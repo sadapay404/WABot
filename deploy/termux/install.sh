@@ -85,7 +85,11 @@ ok "owner +$OWNER"
 
 # ── 1. packages ──────────────────────────────────────────────────────
 say "Installing packages"
-pkg update -y >/dev/null 2>&1
+# upgrade, not just update: a half-upgraded package set is what makes
+  # curl die with 'cannot locate symbol SSL_set_quic_*'. Bringing everything
+  # forward first avoids installing a new libcurl against an old openssl.
+  pkg update -y >/dev/null 2>&1
+  pkg upgrade -y >/dev/null 2>&1
 for p in nodejs-lts git ffmpeg termux-api; do
   if pkg list-installed 2>/dev/null | grep -q "^$p/"; then ok "$p"
   else printf '  · %s…\n' "$p"; pkg install -y "$p" >/dev/null 2>&1 && ok "$p" || warn "$p failed — continuing"; fi

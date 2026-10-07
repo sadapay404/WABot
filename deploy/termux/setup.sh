@@ -24,7 +24,11 @@ die()  { printf '\n\033[31m✗ %s\033[0m\n\n' "$1"; exit 1; }
 
 # ── 1. packages ──────────────────────────────────────────────────────
 say "Installing packages"
-pkg update -y >/dev/null 2>&1
+# upgrade, not just update: a half-upgraded package set is what makes
+  # curl die with 'cannot locate symbol SSL_set_quic_*'. Bringing everything
+  # forward first avoids installing a new libcurl against an old openssl.
+  pkg update -y >/dev/null 2>&1
+  pkg upgrade -y >/dev/null 2>&1
 # nodejs-lts, not nodejs: the project needs >= 22.5 for the built-in
 # node:sqlite driver, which is what lets us skip compiling
 # better-sqlite3 (a native module that routinely fails to build here).
