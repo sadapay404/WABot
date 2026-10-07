@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Nexus-WA · Control</title>
+<style>
+  :root {
+    --bg: #0b0f14; --panel: #121821; --panel2: #182029; --line: #22303c;
+    --text: #e6edf3; --muted: #8b9bab; --accent: #25d366; --warn: #f0b429;
+    --danger: #ff5c5c; --info: #58a6ff;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 16px; align-items: center;
+    padding: 18px 24px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #101820, #0b0f14);
+    position: sticky; top: 0; z-index: 5;
+  }
+  h1 { font-size: 17px; margin: 0; letter-spacing: .3px; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--muted); font-size: 12px; }
+  .badge {
+    font-family: var(--mono); font-size: 11px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--panel2); text-transform: uppercase;
+  }
+  .badge.live { color: var(--danger); border-color: #4a2020; }
+  .badge.observe { color: var(--warn); border-color: #4a3d18; }
+  .badge.dry-run { color: var(--info); border-color: #1c3a5c; }
+  .banner {
+    padding: 10px 24px; font-size: 12.5px; background: #16202b;
+    border-bottom: 1px solid var(--line); color: var(--warn);
+  }
+  main { padding: 20px 24px 60px; max-width: 1320px; margin: 0 auto; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)); margin-bottom: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 13px 15px; }
+  .card .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
+  .card .v { font-size: 23px; font-family: var(--mono); margin-top: 3px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
+  section > h2 {
+    margin: 0; padding: 11px 15px; font-size: 12.5px; text-transform: uppercase;
+    letter-spacing: .7px; color: var(--muted); border-bottom: 1px solid var(--line);
+    background: var(--panel2); display: flex; justify-content: space-between; align-items: center;
+  }
+  .body { padding: 6px 15px 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  tr:last-child td { border-bottom: 0; }
+  td.num { font-family: var(--mono); }
+  .pill { font-family: var(--mono); font-size: 10.5px; padding: 2px 7px; border-radius: 5px; border: 1px solid var(--line); }
+  .pill.active { color: var(--accent); border-color: #1d4a30; }
+  .pill.logged_out { color: var(--danger); border-color: #4a2020; }
+  .pill.retired { color: var(--muted); }
+  .pill.banned { color: var(--danger); background: #2a1414; }
+  .pill.burner { color: var(--warn); border-color: #4a3d18; }
+  .pill.primary { color: var(--accent); border-color: #1d4a30; }
+  .pill.on { color: var(--accent); border-color: #1d4a30; }
+  .pill.off { color: var(--muted); }
+  .svc { padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .svc:last-child { border-bottom: 0; }
+  .svc b { margin-right: 6px; }
+  .svc .sub { margin-left: 6px; }
+  .empty { color: var(--muted); padding: 18px 0; text-align: center; font-size: 13px; }
+  pre.logs {
+    margin: 0; padding: 12px 15px; font-family: var(--mono); font-size: 11.5px;
+    line-height: 1.55; max-height: 340px; overflow: auto; color: #b9c6d3; white-space: pre-wrap;
+  }
+  .lg-error { color: var(--danger); } .lg-warn { color: var(--warn); } .lg-info { color: #9fd6b4; }
+  .row { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+  .del { padding: 9px 0; border-bottom: 1px solid var(--line); }
+  .del:last-child { border-bottom: 0; }
+  .del .who { font-weight: 600; }
+  .del .meta { color: var(--muted); font-size: 11.5px; font-family: var(--mono); }
+  .del .txt {
+    margin-top: 4px; padding: 7px 10px; background: #101720; border-left: 3px solid var(--danger);
+    border-radius: 0 6px 6px 0; font-size: 12.5px; white-space: pre-wrap; word-break: break-word;
+  }
+  .chip { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 8px; background: var(--panel2);
+    border: 1px solid var(--line); border-radius: 999px; font-size: 12px; }
+  footer { text-align: center; color: #5b6b7a; font-size: 11.5px; padding-bottom: 26px; }
+  .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--accent); margin-right:6px; }
+  .dot.off { background: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Nexus<span>·</span>WA</h1>
+    <div class="sub" id="sub">loading…</div>
+  </div>
+  <div style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <span class="badge" id="mode">–</span>
+    <span class="badge" id="risk">–</span>
+    <span class="sub"><span class="dot" id="dot"></span><span id="age">–</span></span>
+  </div>
+</header>
+<div class="banner" id="banner" hidden></div>
+
+<main>
+  <div class="grid" id="stats"></div>
+
+  <section>
+    <h2><span>Linked numbers — every account ever connected</span><span class="sub" id="sessCount"></span></h2>
+    <div class="body"><div id="sessions"></div></div>
+  </section>
+
+  <div class="row">
+    <section>
+      <h2>By country</h2>
+      <div class="body"><div id="countries"></div></div>
+    </section>
+    <section>
+      <h2>Runtime</h2>
+      <div class="body"><div id="runtime"></div></div>
+    </section>
+  </div>
+
+  <section>
+    <h2><span>🗑️ Deleted messages</span><span class="sub" id="adState"></span></h2>
+    <div class="body"><div id="deletions"></div></div>
+  </section>
+
+  <section>
+    <h2><span>🤖 Automation &amp; watchers</span><span class="sub" id="svcState"></span></h2>
+    <div class="body"><div id="services"></div></div>
+  </section>
+
+  <div class="row">
+    <section>
+      <h2>Plugins</h2>
+      <div class="body"><div id="plugins"></div></div>
+    </section>
+    <section>
+      <h2>Address book names</h2>
+      <div class="body"><div id="contacts"></div></div>
+    </section>
+  </div>
+
+  <section>
+    <h2><span>Logs</span><span class="sub">latest first</span></h2>
+    <pre class="logs" id="logs">loading…</pre>
+  </section>
+
+  <footer id="foot"></footer>
+</main>
+
+<script>
+// All server values are untrusted (contact names, message bodies). Nothing is
+// interpolated as HTML — every dynamic string goes through esc() or textContent.
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+));
+const $ = (id) => document.getElementById(id);
+const fmt = (n) => Number(n || 0).toLocaleString();
+const fmtBytes = (n) => {
+  const b = Number(n || 0);
+  if (b < 1024) return `${b} B`;
+  if (b < 1048576) return `${(b / 1024).toFixed(1)} KB`;
+  if (b < 1073741824) return `${(b / 1048576).toFixed(1)} MB`;
+  return `${(b / 1073741824).toFixed(2)} GB`;
+};
+
+function card(k, v) {
+  return `<div class="card"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`;
+}
+
+function renderSessions(s) {
+  if (!s.sessions.length) {
+    $('sessions').innerHTML = '<div class="empty">No account has been linked yet. Start in dry-run, then link a burner.</div>';
+    return;
+  }
+  const rows = s.sessions.map((r) => `
+    <tr>
+      <td>${esc(r.statusIcon)} <span class="num">${esc(r.phone_e164 || r.jid)}</span>
+          ${r.push_name ? `<div class="sub">${esc(r.push_name)}</div>` : ''}</td>
+      <td>${esc(r.flag)} ${esc(r.country_name || 'unknown')}
+          ${r.country_iso ? `<div class="sub">${esc(r.country_iso)}</div>` : ''}</td>
+      <td><span class="pill ${esc(r.status)}">${esc(r.status)}</span>
+          <span class="pill ${esc(r.role)}">${esc(r.role)}</span></td>
+      <td class="num">${fmt(r.messages_in)} / ${fmt(r.messages_out)}
+          <div class="sub">in / out</div></td>
+      <td class="num">${fmt(r.connect_count)}<div class="sub">connects</div></td>
+      <td class="num">${fmt(r.deletions_seen)}<div class="sub">deletions</div></td>
+      <td class="sub">${esc(r.firstSeenAgo)}<div>${esc(r.lastSeenAgo)}</div></td>
+    </tr>`).join('');
+  $('sessions').innerHTML = `
+    <table>
+      <thead><tr><th>Number</th><th>Country</th><th>State</th><th>Messages</th>
+        <th>Connects</th><th>Deletions</th><th>First / last seen</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  $('sessCount').textContent = `${s.sessions.length} recorded · ${s.summary.active || 0} active`;
+}
+
+function renderCountries(s) {
+  if (!s.countries.length) { $('countries').innerHTML = '<div class="empty">—</div>'; return; }
+  $('countries').innerHTML = s.countries
+    .map((c) => `<span class="chip">${esc(c.flag)} ${esc(c.country)} · ${c.count}</span>`).join('');
+}
+
+function renderRuntime(s) {
+  const q = s.queue || {}, d = s.dispatcher || {};
+  $('runtime').innerHTML = `
+    <table>
+      <tr><td>Uptime</td><td class="num">${esc(s.uptime)}</td></tr>
+      <tr><td>Node</td><td class="num">${esc(s.node)}</td></tr>
+      <tr><td>Memory (RSS)</td><td class="num">${esc(s.memory)}</td></tr>
+      <tr><td>Commands handled</td><td class="num">${fmt(d.handled)}</td></tr>
+      <tr><td>Rejected (gated)</td><td class="num">${fmt(d.rejected)}</td></tr>
+      <tr><td>Plugin errors</td><td class="num">${fmt(d.errors)}</td></tr>
+      <tr><td>Queue depth</td><td class="num">${fmt(q.queued)} pending</td></tr>
+      <tr><td>Sent via queue</td><td class="num">${fmt(q.sent)}</td></tr>
+      <tr><td>Throttle time</td><td class="num">${fmt(q.throttledMs)} ms</td></tr>
+      <tr><td>Message cache</td><td class="num">${fmt(s.cache.rows)} rows / ${fmt(s.cache.raw)} raw</td></tr>
+      <tr><td>Telegram panel</td><td class="num">${s.telegram.enabled ? 'on' : 'off'}</td></tr>
+    </table>`;
+}
+
+function renderDeletions(s) {
+  const ad = s.antiDelete;
+  $('adState').textContent = ad ? (ad.enabled ? 'enabled' : 'disabled') : 'inactive in this mode';
+  if (!s.deletions.length) {
+    $('deletions').innerHTML = '<div class="empty">Nothing deleted yet.</div>';
+    return;
+  }
+  $('deletions').innerHTML = s.deletions.map((d) => `
+    <div class="del">
+      <div class="who">${esc(d.sender_name || 'unknown')}
+        ${d.sender_phone ? `<span class="sub num">· ${esc(d.sender_phone)}</span>` : ''}</div>
+      <div class="meta">${esc(d.sender_country || 'unknown country')} · ${esc(d.kind)} · ${esc(d.whenAgo)}</div>
+      ${d.content ? `<div class="txt">${esc(d.content)}</div>`
+                  : `<div class="txt"><em>content not captured</em></div>`}
+    </div>`).join('');
+}
+
+function renderPlugins(s) {
+  const rows = s.plugins.map((p) =>
+    `<tr><td class="num">${esc(p.usage)} ${p.ownerOnly ? '🔒' : ''}</td>
+         <td>${esc(p.category)}</td><td>${esc(p.description)}</td></tr>`).join('');
+  const fails = s.pluginFailures.map((f) =>
+    `<tr><td class="num">✗ ${esc(f.file)}</td><td colspan="2">${esc(f.error)}</td></tr>`).join('');
+  $('plugins').innerHTML = s.plugins.length
+    ? `<table><tbody>${rows}${fails}</tbody></table>`
+    : '<div class="empty">No plugins loaded.</div>';
+}
+
+function renderContacts(s) {
+  if (!s.contacts.named.length) {
+    $('contacts').innerHTML = `<div class="empty">${fmt(s.contacts.total)} contacts cached, none with a saved name yet.</div>`;
+    return;
+  }
+  $('contacts').innerHTML = s.contacts.named
+    .map((c) => `<span class="chip">${esc(c.local_name)}${c.notify_name && c.notify_name !== c.local_name ? ` <span class="sub">(${esc(c.notify_name)})</span>` : ''}</span>`)
+    .join('');
+}
+
+function renderServices(s) {
+  const v = s.services;
+  if (!v) { $('services').innerHTML = '<div class="empty">—</div>'; return; }
+
+  $('svcState').textContent = v.halted ? 'OUTBOUND HALTED' : 'running';
+  $('svcState').style.color = v.halted ? '#e5484d' : '';
+
+  const onoff = (b) => (b ? '<span class="pill on">on</span>' : '<span class="pill off">off</span>');
+  const rows = [];
+
+  if (v.viewOnce) {
+    const st = v.viewOnce.stats;
+    rows.push(`<div class="svc"><b>👁️ View-once capture</b> ${onoff(v.viewOnce.enabled)}
+      <span class="sub">captured ${st.captured} · expired ${st.expired} · empty ${st.empty} · forwarded ${st.forwarded}</span></div>`);
+  }
+  if (v.scheduler) {
+    rows.push(`<div class="svc"><b>⏰ Scheduler</b> ${onoff(v.scheduler.enabled)}
+      <span class="sub">polls every ${v.scheduler.tickMs / 1000}s · ${v.scheduler.summary.pending} pending · ${v.scheduler.summary.fired} fired · ${v.scheduler.summary.failed} failed</span></div>`);
+  }
+  if (v.edits) {
+    rows.push(`<div class="svc"><b>✏️ Edit tracking</b> ${onoff(v.edits.enabled)}
+      <span class="sub">${v.edits.stats.detected} seen · ${v.edits.stats.withDiff} with a diff</span></div>`);
+  }
+  if (v.triggers) {
+    rows.push(`<div class="svc"><b>🎯 Keyword triggers</b> ${onoff(v.triggers.enabled)}
+      <span class="sub">${v.triggers.rules.length} rule(s) · ${v.triggers.stats.fired} fired${v.triggers.enabled ? '' : ' — off by default; auto-replying to real people is a ban signal'}</span></div>`);
+  }
+  rows.push(`<div class="svc"><b>🔗 Webhooks</b>
+    <span class="sub">${v.webhooks.length ? v.webhooks.map((w) => esc(w.url) + (w.fail_count ? ` (failing ×${w.fail_count})` : '')).join(' · ') : 'none configured'}</span></div>`);
+  rows.push(`<div class="svc"><b>📝 Notes</b>
+    <span class="sub">${v.notes ? `${v.notes.summary.todos} open todo(s) · ${v.notes.summary.notes} note(s)` : '—'}</span></div>`);
+  rows.push(`<div class="svc"><b>📦 Media archive</b>
+    <span class="sub">${fmt(v.media.count)} file(s) · ${fmtBytes(v.media.bytes)}</span></div>`);
+  rows.push(`<div class="svc"><b>🧠 AI</b>
+    <span class="sub">${v.ai ? `${esc(v.ai.provider)} — ${v.ai.configured ? 'configured' : 'no API key set'} · ${v.ai.stats.calls} call(s)` : '—'}</span></div>`);
+
+  if (v.blockedSuspects && v.blockedSuspects.length) {
+    rows.push(`<div class="svc"><b>🚫 Suspected blocks</b>
+      <span class="sub">heuristic only — WhatsApp never reports a block. ${v.blockedSuspects.map((b) => esc(b.jid)).join(', ')}</span></div>`);
+  }
+
+  $('services').innerHTML = rows.join('');
+}
+
+function renderStats(s) {
+  const x = s.summary || {};
+  $('stats').innerHTML = [
+    card('Linked now', s.linked ? (s.linked.phone_e164 || s.linked.jid) : 'none'),
+    card('Country', s.linked ? `${s.linked.flag} ${s.linked.country_name || '—'}` : '—'),
+    card('Sessions', `${fmt(x.active)}/${fmt(x.total)}`),
+    card('Messages in', fmt(x.messagesIn)),
+    card('Messages out', fmt(x.messagesOut)),
+    card('Deletions caught', fmt(x.deletionsSeen)),
+    card('Contacts', fmt(s.contacts.total)),
+    card('Plugins', fmt(s.plugins.length)),
+  ].join('');
+}
+
+function renderLogs(s) {
+  if (!s.logs.length) { $('logs').textContent = '(no log lines yet)'; return; }
+  $('logs').innerHTML = s.logs.map((l) =>
+    `<div class="lg-${esc(l.level)}">${esc(l.ts)} ${esc(l.level.toUpperCase())} [${esc(l.scope)}] ${esc(l.message)}</div>`
+  ).join('');
+}
+
+function render(s) {
+  $('mode').textContent = s.mode;
+  $('mode').className = `badge ${s.mode}`;
+  $('risk').textContent = `risk: ${s.risk}`;
+  $('sub').textContent = s.linked
+    ? `${s.linked.phone_e164 || s.linked.jid} · ${s.linked.country_name || 'unknown'} · up ${s.uptime}`
+    : `no account linked · up ${s.uptime}`;
+  $('age').textContent = 'updated ' + new Date(s.generatedAt).toLocaleTimeString();
+
+  const b = $('banner');
+  if (s.synthetic) {
+    b.hidden = false;
+    b.textContent = '⚠ DRY-RUN — no WhatsApp account is connected. Session and contact data shown here is synthetic, produced by the simulator so you can evaluate the interface. Nothing on this page came from Meta.';
+  } else {
+    b.hidden = true;
+  }
+
+  renderStats(s); renderSessions(s); renderCountries(s); renderRuntime(s);
+  renderDeletions(s); renderServices(s); renderPlugins(s); renderContacts(s); renderLogs(s);
+  $('foot').textContent = `pid ${s.pid} · ${s.dashboard.protected ? 'token protected' : 'dry-run: unauthenticated'} · Nexus-WA`;
+}
+
+async function tick() {
+  try {
+    const r = await fetch('/api/state', { cache: 'no-store' });
+    if (r.status === 401) { $('sub').textContent = 'unauthorised — pass ?token='; return; }
+    render(await r.json());
+    $('dot').classList.remove('off');
+  } catch (e) {
+    $('dot').classList.add('off');
+    $('age').textContent = 'disconnected';
+  }
+}
+tick();
+setInterval(tick, 5000);
+</script>
+</body>
+</html>

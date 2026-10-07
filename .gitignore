@@ -1,0 +1,33 @@
+# ── Secrets ────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── WhatsApp session / credentials (PRIVATE-KEY MATERIAL) ──────────
+# Losing these is fine. Committing them hands your account to anyone
+# who can read the repo.
+# NOTE: `data/*` rather than `data/` — excluding the directory itself stops
+# git descending into it, which would silently defeat the negation below.
+data/*
+!data/.gitkeep
+auth_info_baileys/
+
+# ── Runtime ────────────────────────────────────────────────────────
+logs/
+*.log
+*.sqlite
+*.sqlite-journal
+
+# ── Dependencies / build ───────────────────────────────────────────
+node_modules/
+dist/
+coverage/
+.cache/
+
+# ── OS / editor ────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
