@@ -1,5 +1,12 @@
 # Hosting Nexus-WA
 
+> **Use a phone with Termux.** See [`docs/TERMUX.md`](TERMUX.md).
+>
+> It is the only option here that is genuinely free, needs no credit card, and
+> has a real filesystem — which means no re-pairing and no vault. Everything
+> below is the reasoning that got us there, plus the cloud options if your
+> situation changes.
+
 ## The honest answer first
 
 **There is no free, no-credit-card, always-on cloud host left that can run this
@@ -7,12 +14,40 @@ bot.** As of late 2026:
 
 | Host | Free tier | Card? | Why it fails for a WhatsApp bot |
 |---|---|---|---|
-| **Render** | 750 h/mo, 512 MB | No | Sleeps after 15 min idle. A sleeping bot is a disconnected bot. Free tier has **no persistent disk**, so `data/auth` is wiped on every restart and you re-pair. |
+| **Render** | 750 h/mo, 512 MB | **Sometimes — with no way around it** | See the note below. Also: sleeps after 15 min idle, so a sleeping bot is a disconnected bot, and the free tier has **no persistent disk**, so `data/auth` is wiped on every restart and you re-pair. |
 | **Koyeb** | 1 service, 512 MB | **Yes** — $29 hold since Feb 2026 | Card-free Hobby plan was removed. |
 | **Railway** | $5 trial, then $1/mo | Yes (since Aug 2023) | Not free past the trial. |
 | **Fly.io** | 2 VM-hours trial | Yes after | No free tier since Oct 2024. |
 | **Oracle Cloud** | Always Free ARM | Yes | Needs a card; ARM allowance halved June 2026. |
 | **Heroku / Glitch** | — | — | Free tiers gone. |
+
+Two things make this hard, and they are not negotiable:
+
+### Render specifically: the "no credit card" claim is half true
+
+Every guide says Render's free tier needs no card. That is the happy path.
+Render reserves the right to demand one as an **anti-abuse verification**, and
+when it does there is no alternative. From Render's own staff on their community
+forum:
+
+> "Sometimes we may request card details for verification purposes for
+> anti-abuse/fraud measures. Entering your card details will trigger a $1
+> verification payment which is immediately reversed."
+
+and, to someone who asked whether there was another way:
+
+> "Use of a credit card is required to be able to use our services, we don't
+> have an alternative method."
+
+Two practical notes if you are reading this *because* you hit that screen:
+
+- It is a **$1 authorisation hold that is reversed**, not a charge. If you have
+  any card at all — debit included — it is safe to use.
+- It can also be triggered by selecting a **paid instance type**. Make sure the
+  plan says **Free** before concluding you have hit the verification path.
+
+If you have no card, Render is not available and no amount of configuration
+changes that.
 
 Two things make this hard, and they are not negotiable:
 

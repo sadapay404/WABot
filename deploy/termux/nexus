@@ -1,0 +1,186 @@
+#!/data/data/com.termux/files/usr/bin/bash
+#
+# nexus — control the bot on this phone.
+#
+#   nexus start     start in the background (restarts itself if it crashes)
+#   nexus stop      stop it
+#   nexus restart   stop, then start
+#   nexus status    is it running, linked, how much memory
+#   nexus logs      follow the log (Ctrl-C to stop watching)
+#   nexus pair      print the pairing code / QR again
+#
+set -uo pipefail
+
+APP_DIR="$HOME/nexus-wa"
+DATA_DIR="$HOME/.nexus-wa"
+LOG_DIR="$DATA_DIR/logs"
+LOG="$LOG_DIR/nexus.log"
+PIDFILE="$DATA_DIR/nexus.pid"
+BOTPIDFILE="$DATA_DIR/nexus.bot.pid"
+NODE_FLAGS="--disable-warning=ExperimentalWarning"
+
+mkdir -p "$LOG_DIR"
+
+c() { printf '\033[%sm%s\033[0m' "$1" "$2"; }
+
+# Trim the log before it eats the phone's storage. Termux has no logrotate.
+rotate_log() {
+  [ -f "$LOG" ] || return 0
+  local size
+  size=$(wc -c <"$LOG" 2>/dev/null || echo 0)
+  if [ "$size" -gt 5242880 ]; then   # 5 MB
+    tail -c 1048576 "$LOG" >"$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+  fi
+}
+
+running_pid() {
+  [ -f "$PIDFILE" ] || return 1
+  local pid
+  pid=$(cat "$PIDFILE" 2>/dev/null)
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && { echo "$pid"; return 0; }
+  return 1
+}
+
+start() {
+  local pid
+  if pid=$(running_pid); then
+    echo "$(c '33' '•') already running (pid $pid)"
+    return 0
+  fi
+  [ -f "$APP_DIR/src/index.js" ] || { echo "$(c '31' '✗') $APP_DIR not found — run setup.sh first"; exit 1; }
+  [ -f "$APP_DIR/.env" ] || { echo "$(c '31' '✗') no .env in $APP_DIR — copy .env.example and edit it"; exit 1; }
+
+  # Keep the CPU awake. Without this Android dozes the process and WhatsApp
+  # silently drops off. Harmless if termux-api is absent.
+  command -v termux-wake-lock >/dev/null && termux-wake-lock 2>/dev/null \
+    || echo "$(c '33' '!') termux-wake-lock unavailable — install termux-api"
+
+  rotate_log
+  cd "$APP_DIR" || exit 1
+
+  # Detached supervisor. It restarts the bot if it ever exits, with a pause
+  # that grows so a crash-loop cannot hammer WhatsApp's servers.
+  #
+  # PIDs are tracked in files, NOT found with pgrep/pkill. A pattern like
+  # "nexus-wa/src/index.js" also matches this supervisor's own bash -c text
+  # and any shell whose command line merely mentions the path — pkill on that
+  # kills the wrong things. Recording the child PID is exact.
+  nohup bash -c '
+    APP_DIR="'"$APP_DIR"'"; PIDFILE="'"$PIDFILE"'"
+    BOTPID="'"$BOTPIDFILE"'"; LOG="'"$LOG"'"
+    echo $$ > "$PIDFILE"
+    trap "rm -f \"$BOTPID\"" EXIT
+    attempt=0
+    while :; do
+      printf "\n===== start %s (attempt %d) =====\n" "$(date "+%F %T")" "$attempt" >>"$LOG"
+      node '"$NODE_FLAGS"' "$APP_DIR/src/index.js" --serve >>"$LOG" 2>&1 &
+      node_pid=$!
+      echo "$node_pid" > "$BOTPID"
+      wait "$node_pid"
+      code=$?
+      rm -f "$BOTPID"
+      printf "===== exited %d at %s =====\n" "$code" "$(date "+%F %T")" >>"$LOG"
+      [ "$code" -eq 0 ] && break
+      attempt=$((attempt+1))
+      delay=$(( 5 * attempt )); [ "$delay" -gt 60 ] && delay=60
+      sleep "$delay"
+    done
+  ' >/dev/null 2>&1 &
+
+  sleep 2
+  if pid=$(running_pid); then
+    echo "$(c '32' '✓') started (pid $pid)"
+    echo "  watch it:   nexus logs"
+    echo "  pairing:    nexus pair"
+  else
+    echo "$(c '31' '✗') failed to start — see: nexus logs"
+    exit 1
+  fi
+}
+
+stop() {
+  local pid
+  if ! pid=$(running_pid); then
+    echo "$(c '33' '•') not running"
+    rm -f "$PIDFILE"
+    return 0
+  fi
+  local bot
+  bot=$(cat "$BOTPIDFILE" 2>/dev/null)
+  echo "$(c '33' '·') stopping $pid…"
+  # Supervisor first, so it does not restart the bot we are about to stop.
+  kill -TERM "$pid" 2>/dev/null
+  # SIGTERM lets the bot flush its backup and close the socket cleanly.
+  [ -n "$bot" ] && kill -TERM "$bot" 2>/dev/null
+  for _ in $(seq 1 10); do
+    running_pid >/dev/null || break
+    sleep 1
+  done
+  if running_pid >/dev/null; then
+    echo "$(c '33' '!') still up — forcing"
+    kill -KILL "$pid" 2>/dev/null
+    [ -n "$bot" ] && kill -KILL "$bot" 2>/dev/null
+  fi
+  rm -f "$PIDFILE" "$BOTPIDFILE"
+  echo "$(c '32' '✓') stopped"
+}
+
+status() {
+  local pid
+  if pid=$(running_pid); then
+    echo "$(c '32' '✓') running (pid $pid)"
+    local bot rss
+    bot=$(cat "$BOTPIDFILE" 2>/dev/null)
+    if [ -n "$bot" ] && kill -0 "$bot" 2>/dev/null; then
+      # Memory matters on a phone: Android kills the biggest process first.
+      rss=$(ps -o rss= -p "$bot" 2>/dev/null | tr -d ' ')
+      [ -n "$rss" ] && printf '  bot:    pid %s · %.1f MB\n' "$bot" "$(awk "BEGIN{print $rss/1024}")"
+    else
+      echo "  bot:    $(c '33' 'supervisor up but the bot is not — check nexus logs')"
+    fi
+  else
+    echo "$(c '31' '✗') not running"
+  fi
+  [ -f "$DATA_DIR/nexus.db" ] && printf '  db:     %s\n' "$(du -h "$DATA_DIR/nexus.db" | cut -f1)"
+  local auth
+  auth=$(ls -1 "$DATA_DIR/auth" 2>/dev/null | wc -l)
+  if [ "$auth" -gt 0 ]; then echo "  session: linked ($auth credential file(s))"; else echo "  session: $(c '33' 'not paired yet')"; fi
+  command -v termux-battery-status >/dev/null && termux-battery-status 2>/dev/null \
+    | tr -d '{}",' | grep -E 'percentage|plugged|status' | sed 's/^/  battery: /'
+}
+
+logs() { tail -f "$LOG"; }
+
+pair() {
+  # The pairing code is printed once at startup, so dig it out of the log
+  # instead of making you restart the bot to see it again.
+  local line
+  line=$(grep -aE "pairing code|Pairing code|[0-9A-Z]{4}-[0-9A-Z]{4}" "$LOG" 2>/dev/null | tail -1)
+  if [ -n "$line" ]; then
+    echo "$line"
+  else
+    echo "$(c '33' '!') no pairing code in the log yet."
+    echo "   Check WA_PAIRING_NUMBER in .env, then: nexus restart && nexus logs"
+  fi
+}
+
+case "${1:-}" in
+  start)   start ;;
+  stop)    stop ;;
+  restart) stop; sleep 1; start ;;
+  status)  status ;;
+  logs)    logs ;;
+  pair)    pair ;;
+  *)
+    cat <<EOF
+nexus — control Nexus-WA on this phone
+
+  nexus start     start in the background
+  nexus stop      stop
+  nexus restart   restart
+  nexus status    running? linked? memory? battery?
+  nexus logs      follow the log
+  nexus pair      show the pairing code again
+EOF
+    ;;
+esac

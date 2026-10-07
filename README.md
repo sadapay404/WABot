@@ -73,9 +73,13 @@ that reads real traffic while blocking all outbound to non-owners.
 
 ### Hosting
 
-See [`docs/DEPLOY.md`](docs/DEPLOY.md) for the Docker and bare-metal setup, the
-pairing flow, and an honest read on why no free cloud tier can actually run
-this bot 24/7.
+**Run it on a phone with Termux** — see [`docs/TERMUX.md`](docs/TERMUX.md).
+Free, no credit card, and it has a real filesystem, so you pair once and never
+again. `deploy/termux/setup.sh` does the install; `nexus start` runs it.
+
+[`docs/DEPLOY.md`](docs/DEPLOY.md) covers Docker and bare metal, and explains
+why no free cloud tier can actually run this bot 24/7 — including why Render
+will ask you for a card even though every guide says it will not.
 
 ### Commands
 
@@ -143,6 +147,7 @@ in `OWNER_JIDS`.
 | `.panic \| .panic resume` | owner | stop all outbound instantly, then release it |
 | `.audit [n]` | owner | what the bot has done on your behalf |
 | `.backup <passphrase> \| .backup list` | owner | encrypted export of session + database |
+| `.vault \| .vault test \| .vault push` | owner | check the remote backup, or prove it works end to end |
 | `.trigger list \| on \| add <pat> => <reply>` | owner | keyword auto-replies — **off by default** |
 | `.webhook list \| add <url> [events]` | owner | POST events to a URL you control |
 
