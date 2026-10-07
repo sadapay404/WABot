@@ -303,3 +303,56 @@ test('index.js: the vault restore is constructed before the database is opened',
       'or the restore overwrites a database that is already open'
   );
 });
+
+// ── a silently failing vault is the dangerous case ───────────────────
+test('vault: repeated push failures alert the owner, and only once', async () => {
+  const alerts = [];
+  const boom = async () => {
+    throw new Error('Bad credentials');
+  };
+  const { vault } = rig({ fetchImpl: boom });
+  vault.onAlert = (t) => alerts.push(t);
+
+  await vault.push();
+  await vault.push();
+  assert.equal(alerts.length, 0, 'a single blip must not be worth waking anyone for');
+
+  await vault.push(); // third consecutive failure
+  assert.equal(alerts.length, 1, 'the owner is told once pushes keep failing');
+  assert.match(alerts[0], /NOT being backed up/);
+  assert.match(alerts[0], /token expired/i, 'must name the most likely cause');
+
+  await vault.push();
+  await vault.push();
+  assert.equal(alerts.length, 1, 'and not nagged on every subsequent failure');
+});
+
+test('vault: recovery after an alert says so, then re-arms', async () => {
+  const alerts = [];
+  let fail = true;
+  const { vault } = rig({
+    fetchImpl: async () => {
+      if (fail) throw new Error('Bad credentials');
+      return { ok: true, status: 200, json: async () => ({}) };
+    },
+  });
+  vault.onAlert = (t) => alerts.push(t);
+
+  await vault.push();
+  await vault.push();
+  await vault.push();
+  assert.equal(alerts.length, 1);
+
+  fail = false;
+  assert.equal(await vault.push(), true);
+  assert.equal(alerts.length, 2, 'recovery is announced');
+  assert.match(alerts[1], /working again/i);
+  assert.equal(vault.consecutiveFailures, 0, 'the counter resets on success');
+
+  // And it can alert again on a fresh run of failures.
+  fail = true;
+  await vault.push();
+  await vault.push();
+  await vault.push();
+  assert.equal(alerts.length, 3);
+});

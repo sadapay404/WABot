@@ -187,7 +187,20 @@ async function main() {
     dbPath: config.db.path,
     dir: config.storage.backupDir,
   });
-  const vault = new RemoteVault({ logger, backup, cfg: config.vault });
+  const vault = new RemoteVault({
+    logger,
+    backup,
+    cfg: config.vault,
+    // A vault that quietly stops backing up is the one failure mode here that
+    // turns into a lost session, so it has to be able to shout.
+    onAlert: (text) => {
+      const jid = socket?.user?.id ? normalizeJid(socket.user.id) : null;
+      if (!jid) return logger.warn(`vault alert (no self jid yet): ${text}`);
+      socket.sendMessage(jid, { text }).catch((err) =>
+        logger.error(`could not deliver a vault alert: ${err.message}`)
+      );
+    },
+  });
 
   if (!config.isDryRun) {
     const sessionFiles = fs.existsSync(config.wa.sessionDir)

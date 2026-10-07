@@ -32,15 +32,43 @@ export class RemoteVault {
    * @param {object} deps.backup   SessionBackup instance
    * @param {object} deps.cfg      { kind, url, token, passphrase, path, intervalMin }
    * @param {Function} [deps.fetchImpl]
+   * @param {Function} [deps.onAlert]  called with a message when pushes are failing
    */
-  constructor({ logger, backup, cfg, fetchImpl = null }) {
+  constructor({ logger, backup, cfg, fetchImpl = null, onAlert = null, alertAfter = 3 }) {
     this.logger = logger.child({ scope: 'vault' });
     this.backup = backup;
     this.cfg = cfg;
     this.fetch = fetchImpl || globalThis.fetch;
     this.timer = null;
     this.stats = { pushed: 0, pulled: 0, failed: 0, restored: 0, skipped: 0 };
+    this.onAlert = onAlert;
+    this.alertAfter = Math.max(1, alertAfter);
+    /** Consecutive push failures since the last success. */
+    this.consecutiveFailures = 0;
+    this.alerted = false;
   }
+
+  /**
+   * A silently failing vault is worse than no vault: you believe your session
+   * is being backed up, and the next restart wipes it anyway. So once pushes
+   * start failing, say so out loud rather than leaving it in a log nobody is
+   * reading. The usual cause is an expired GitHub token.
+   */
+  #noteFailure(kind, detail) {
+    this.consecutiveFailures++;
+    if (this.consecutiveFailures < this.alertAfter || this.alerted) return;
+    this.alerted = true;
+    this.onAlert?.(
+      `⚠️ *Backup failing* (${this.consecutiveFailures}× in a row)\n\n` +
+        `Your session is NOT being backed up right now.\n` +
+        `Last error: ${String(detail).slice(0, 160)}\n\n` +
+        `If Render restarts before this is fixed, you will have to pair again ` +
+        `and lose your notes, reminders and message history.\n\n` +
+        `Most common cause: the GitHub token expired. Generate a new one and ` +
+        `update REMOTE_VAULT_TOKEN.`
+    );
+  }
+
 
   /** True only when everything needed to talk to a remote is present. */
   enabled() {
@@ -73,6 +101,11 @@ export class RemoteVault {
       const blob = this.backup.readFile(file);
       await this.#upload(blob);
       this.stats.pushed++;
+      this.consecutiveFailures = 0;
+      if (this.alerted) {
+        this.alerted = false;
+        this.onAlert?.('✅ *Backup working again.* Your session is being saved to the vault.');
+      }
       this.logger.info(`pushed ${made.bytes}B backup to the remote vault`);
       return true;
     } catch (err) {
@@ -80,6 +113,7 @@ export class RemoteVault {
       // Never throw out of a timer callback: a failed upload must not take the
       // bot down. The session is still on the local disk.
       this.logger.error(`vault push failed: ${err.message}`);
+      this.#noteFailure('push', err.message);
       return false;
     } finally {
       if (file) this.backup.discard(file);
