@@ -235,3 +235,71 @@ test('vault: start() returns 0 and does nothing when not configured', () => {
   assert.equal(v.start(), 0);
   assert.equal(v.timer, null);
 });
+
+// ── the boot-order invariant ─────────────────────────────────────────
+// The vault restore must run before getDb() opens the database. Overwriting a
+// SQLite file underneath an already-open WAL connection is undefined
+// behaviour, and the failure is silent: the handle keeps pointing at the old
+// inode, so the app just runs against an empty database and nothing errors.
+
+test('vault: data restored to disk is visible to a handle opened AFTER the restore', async () => {
+  const { getDb, closeDb } = await import('../src/database/index.js');
+  const { buildConfig } = await import('../src/config/index.js');
+  const { NoteStore } = await import('../src/core/notes.js');
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nwb-order-'));
+  const dbPath = path.join(tmp, 'nexus.db');
+
+  // Save and restore: these are process-global and other test files read them.
+  const savedDb = process.env.DB_PATH;
+  const savedSession = process.env.WA_SESSION_DIR;
+  process.env.DB_PATH = dbPath;
+  process.env.WA_SESSION_DIR = path.join(tmp, 'auth');
+
+  // Write a note into a real database.
+  let cfg = buildConfig({ mode: 'dry-run' });
+  let db = await getDb(cfg, quiet);
+  new NoteStore(db, quiet).add('remember the milk');
+  closeDb();
+  assert.ok(fs.existsSync(dbPath));
+
+  // Back it up, then wipe the disk the way an ephemeral host would.
+  const backup = new SessionBackup({
+    logger: quiet, sessionDir: path.join(tmp, 'auth'), dbPath, dir: path.join(tmp, 'backups'),
+  });
+  const made = backup.create(PASS);
+  const blob = backup.readFile(made.file);
+  fs.rmSync(dbPath, { force: true });
+  fs.rmSync(`${dbPath}-wal`, { force: true });
+  fs.rmSync(`${dbPath}-shm`, { force: true });
+
+  // Restore, THEN open. This is the order index.js must use.
+  backup.restoreBuffer(blob, PASS, 'test');
+  db = await getDb(cfg, quiet);
+  const notes = new NoteStore(db, quiet).list();
+  closeDb();
+
+  assert.equal(notes.length, 1, 'the restored note must be visible');
+  assert.equal(notes[0].text, 'remember the milk');
+
+  if (savedDb === undefined) delete process.env.DB_PATH; else process.env.DB_PATH = savedDb;
+  if (savedSession === undefined) delete process.env.WA_SESSION_DIR; else process.env.WA_SESSION_DIR = savedSession;
+});
+
+test('index.js: the vault restore is constructed before the database is opened', async () => {
+  // A source-order assertion is unusual, but this particular invariant fails
+  // silently — the app boots fine and simply runs on an empty database — so
+  // there is no runtime symptom for a behavioural test to catch.
+  const src = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'index.js'), 'utf8'
+  );
+  const vaultAt = src.indexOf('new RemoteVault');
+  const dbAt = src.indexOf('await getDb(config, logger)');
+  assert.ok(vaultAt > -1, 'RemoteVault must be constructed in index.js');
+  assert.ok(dbAt > -1, 'getDb must be called in index.js');
+  assert.ok(
+    vaultAt < dbAt,
+    `RemoteVault (offset ${vaultAt}) must be constructed before getDb (offset ${dbAt}), ` +
+      'or the restore overwrites a database that is already open'
+  );
+});

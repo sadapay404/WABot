@@ -65,24 +65,94 @@ REMOTE_VAULT_PASSPHRASE=<something long you will not lose>
 REMOTE_VAULT_INTERVAL_MIN=30
 ```
 
-Then deploy the Dockerfile to Render as a free web service, and use a free
-uptime pinger (cron-job.org, UptimeRobot) to hit the URL every 10 minutes so it
-does not spin down.
+Then deploy the Dockerfile to Render as a free web service, and add a free
+uptime pinger (cron-job.org, UptimeRobot) hitting the URL every 10 minutes.
+
+### Render specifics that will bite you
+
+These are the details that break setups quietly:
+
+- **Ping `/healthz`, never `/robots.txt`.** While a free service is asleep,
+  Render intercepts `/robots.txt` and answers it *itself* — the request never
+  reaches your app and never wakes it. `/healthz` does.
+- **Only inbound HTTP or a new WebSocket wakes it.** Internal cron jobs and
+  background timers do *not* count as activity, so the pinger has to be
+  external.
+- **750 instance-hours is exactly one always-on service.** A 31-day month is
+  744 hours. A second free service kept awake pushes you over, and when the
+  pool is exhausted Render suspends *every* free web service in the workspace
+  until the 1st. Do not add a second service.
+- **Render restarts free services at will**, even one kept permanently awake.
+  So the vault is not a fallback, it is the normal path. Budget for restarts
+  you did not schedule.
+- **512 MB RAM / 0.1 CPU.** The bot uses ~73 MB RSS with all 33 plugins
+  loaded, so there is room — but do not turn on heavy media archiving and
+  expect it to stay there.
+- Free Postgres expires after 30 days. We do not use it — everything is
+  SQLite inside the vault.
+
+### What this means for re-pairing
+
+Better than you would expect, but not never. On restart the vault restores
+`data/auth` before Baileys connects, so normally the existing linked device
+just resumes — **no re-pairing**. But the container's IP has changed, and
+WhatsApp occasionally asks you to re-confirm a device that reappears from a
+new network. When it does, you re-pair with the 8-character code. It is
+minutes, not a rebuild, and your notes, reminders, message cache and audit log
+all survive because the database is in the same blob.
 
 **Read this before you do it:**
 
-- **Use your spare number only. Never your main number.** Every restart means
-  WhatsApp sees a login from a new datacentre IP. Occasional is normal;
-  constant is the pattern that gets an account flagged.
+- **Use your spare number only. Never your main number.** Every restart is a
+  login from a new datacentre IP. Occasional is normal; constant is the
+  pattern that gets an account flagged.
 - You can lose up to `REMOTE_VAULT_INTERVAL_MIN` of state on a restart —
   messages cached since the last push, reminders already delivered.
 - Render's free tier is explicitly "not for production" and can change at any
-  time; the free Postgres already expires after 30 days as a precedent.
+  time; the free Postgres already expiring after 30 days is the precedent.
 - If the passphrase is ever lost, the backup is unrecoverable and you re-pair.
   There is no reset.
 
-This works well enough to **test** the bot on a spare number. I would not run a
-main number on it.
+This is a good way to **test** on a spare number. I would not run a main
+number on it.
+
+---
+
+## Can GitHub or Telegram host it?
+
+Both come up a lot, and neither can.
+
+**GitHub cannot host a persistent process.** Actions caps a job at 6 hours and
+gives ~2000 minutes/month on private repos; chaining workflows to stay alive
+24/7 is a ToS violation that gets accounts suspended. Pages is static only.
+Codespaces sleeps after 30 idle minutes and is a dev environment, not a host.
+**GitHub *is* the right place for the vault** — a private repo holding your
+encrypted backup — which is exactly what `REMOTE_VAULT_KIND=github` uses.
+
+**Telegram is not a host.** It is a messaging API. The Telegram panel in this
+repo lets you *command* the bot from Telegram (`/status`, `/qr`, `/mode`,
+`/kill`), but something still has to run the bot process. Telegram is the
+remote control, not the machine.
+
+### The full free landscape
+
+| Platform | Can host it? | Why |
+|---|---|---|
+| **Render free** | ✅ yes | 750 h/mo covers 24/7; no card. Needs a pinger + the vault. |
+| GitHub (Actions/Pages/Codespaces) | ❌ | No persistent process; Actions 24/7 is a ToS violation |
+| Telegram | ❌ | Messaging API, not compute |
+| Cloudflare Workers | ❌ | Serverless; no filesystem, CPU-capped, no long-lived outbound socket |
+| Vercel / Netlify | ❌ | Serverless functions with a 10s timeout; no WebSockets |
+| Hugging Face Spaces | ❌ | Docker Spaces became a paid feature in 2026 |
+| Deta | ❌ | Free, but no WebSocket support |
+| Bonto | ❌ | 75 runtime hours/month against the 744 you need |
+| Koyeb | ❌ | Needs a card ($29 hold) since Feb 2026 |
+| Railway / Fly.io | ❌ | Not free past a short trial |
+| Oracle Cloud | ❌ | Needs a card |
+| Free "bot hosting" sites | ⚠️ **don't** | They hold your `data/auth` = your account |
+
+**Render free + a private GitHub repo as the vault is the answer.** That is
+what this repo is now set up for.
 
 ---
 

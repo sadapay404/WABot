@@ -174,7 +174,39 @@ async function main() {
     `mode=${config.mode}  prefix="${config.prefix}"  owners=${config.safety.ownerJids.length || '(none)'}  role=${config.wa.role}`
   );
 
-  // Storage.
+  // ── Remote vault restore ─────────────────────────────────────────
+  // This has to happen before getDb() opens the database, and before the
+  // transport connects. Overwriting a SQLite file underneath an already-open
+  // WAL connection is undefined behaviour: at best the restored rows are
+  // ignored because the handle still points at the old inode, at worst the
+  // file is corrupted. Restoring the session first is also what lets Baileys
+  // resume an existing device instead of starting a fresh pairing.
+  const backup = new SessionBackup({
+    logger,
+    sessionDir: config.wa.sessionDir,
+    dbPath: config.db.path,
+    dir: config.storage.backupDir,
+  });
+  const vault = new RemoteVault({ logger, backup, cfg: config.vault });
+
+  if (!config.isDryRun) {
+    const sessionFiles = fs.existsSync(config.wa.sessionDir)
+      ? fs.readdirSync(config.wa.sessionDir).filter((f) => f !== '.gitkeep')
+      : [];
+    if (sessionFiles.length === 0) {
+      const restored = await vault.restoreIfEmpty(false);
+      if (restored) {
+        logger.warn(
+          'restored session and database from the remote vault — ' +
+            'WhatsApp may ask you to confirm this device'
+        );
+      }
+    } else {
+      logger.info(`local session present (${sessionFiles.length} file(s)) — not restoring from the vault`);
+    }
+  }
+
+  // Storage. Opened only after the vault has had its chance to replace the file.
   const db = await getDb(config, logger);
 
   // Stores.
@@ -187,13 +219,6 @@ async function main() {
   const webhooks = new Webhooks({ db, logger });
   const triggers = new Triggers({ db, logger });
   const presenceLog = new PresenceLog({ db, logger });
-  const backup = new SessionBackup({
-    logger,
-    sessionDir: config.wa.sessionDir,
-    dbPath: config.db.path,
-    dir: config.storage.backupDir,
-  });
-  const vault = new RemoteVault({ logger, backup, cfg: config.vault });
   const ai = new AiClient({ config, logger });
 
   // Plugins.
@@ -203,17 +228,6 @@ async function main() {
   if (has('--list-plugins')) {
     printPluginList(plugins);
     process.exit(plugins.failures.length ? 1 : 0);
-  }
-
-  // On an ephemeral host data/auth is wiped on every restart. Pull the session
-  // back from the remote vault BEFORE the transport connects, or Baileys would
-  // start a fresh pairing instead of resuming the existing one.
-  const sessionFiles = fs.existsSync(config.wa.sessionDir)
-    ? fs.readdirSync(config.wa.sessionDir).filter((f) => f !== '.gitkeep')
-    : [];
-  if (!config.isDryRun && sessionFiles.length === 0) {
-    const restored = await vault.restoreIfEmpty(false);
-    if (restored) logger.warn('resumed from the remote vault — WhatsApp may ask you to confirm this device');
   }
 
   // Transport.
