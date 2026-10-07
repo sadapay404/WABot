@@ -80,6 +80,17 @@ export function shouldRequestPairingCode({ qr, pairingNumber, registered, reques
   return Boolean(qr && pairingNumber && !registered && !requested);
 }
 
+/** Pair codes need Baileys' canonical platform descriptor, not our app brand. */
+export function connectionBrowser(B, config) {
+  return config.wa.pairingNumber ? B.Browsers.ubuntu('Chrome') : config.wa.browser;
+}
+
+/** Match the familiar XXXX-XXXX presentation; the code itself is unchanged. */
+export function formatPairingCode(code) {
+  const value = String(code ?? '');
+  return value.match(/.{1,4}/g)?.join('-') || value;
+}
+
 export class WhatsAppConnection {
   constructor({ config, logger }) {
     this.config = config;
@@ -109,7 +120,7 @@ export class WhatsAppConnection {
 
   async connect() {
     const B = await baileys();
-    const { useMultiFileAuthState, makeWASocket, DisconnectReason } = B;
+    const { useMultiFileAuthState, makeWASocket, DisconnectReason, Browsers } = B;
 
     fs.mkdirSync(this.config.wa.sessionDir, { recursive: true });
     const { state, saveCreds } = await useMultiFileAuthState(this.config.wa.sessionDir);
@@ -121,7 +132,7 @@ export class WhatsAppConnection {
       auth: state,
       version,
       logger: this.logger.child({ scope: 'baileys' }),
-      browser: this.config.wa.browser,
+      browser: connectionBrowser({ Browsers }, this.config),
       // The phone-number flow does not need a QR printed into the log. Keep
       // Baileys' legacy QR printer only as a fallback when neither pairing
       // number nor Telegram delivery is configured.
@@ -225,7 +236,7 @@ export class WhatsAppConnection {
     const number = this.config.wa.pairingNumber;
     try {
       const code = await socket.requestPairingCode(number);
-      this.logger.info(`pairing code: ${code}`);
+      this.logger.info(`pairing code: ${formatPairingCode(code)}`);
       this.#emit('pairing-code', code);
       return code;
     } catch (err) {

@@ -72,11 +72,10 @@ export function buildConfig(overrides = {}) {
       // 'burner' or 'primary' — recorded against the session so the dashboard
       // and /sessions can show which account is which.
       role: (process.env.WA_ROLE || 'burner').toLowerCase() === 'primary' ? 'primary' : 'burner',
-      browser: [
-        process.env.WA_BROWSER || 'Nexus-WA',
-        process.env.WA_BROWSER_DESC || 'Nexus-WA/0.1.0',
-        '1.0.0',
-      ],
+      // WhatsApp validates the platform label in the pairing-code handshake.
+      // Keep this canonical; custom branding can produce a code that looks
+      // valid locally but is rejected by the phone.
+      browser: ['Ubuntu', 'Chrome', '22.04.4'],
     },
 
     dashboard: {

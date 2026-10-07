@@ -25,7 +25,7 @@ import { ContactStore } from '../src/core/contactStore.js';
 import { MessageCache } from '../src/core/messageCache.js';
 import { AntiDelete, extractRevoke, formatDeletion } from '../src/core/antiDelete.js';
 import { OutboundQueue } from '../src/core/outboundQueue.js';
-import { classifyDisconnect, backoffDelay, shouldRequestPairingCode } from '../src/core/whatsapp.js';
+import { classifyDisconnect, backoffDelay, shouldRequestPairingCode, connectionBrowser, formatPairingCode } from '../src/core/whatsapp.js';
 import { MockWhatsAppSocket } from '../src/core/mockSocket.js';
 import { Dashboard, buildState, flagFor } from '../src/web/dashboard.js';
 import { seedDemoData } from '../src/lib/demoSeed.js';
@@ -531,6 +531,22 @@ test('pairing code: request on the first fresh QR, never wait for open', () => {
     false,
     'connection=open alone cannot request the first pairing code'
   );
+});
+
+test('pairing code: uses Baileys canonical platform instead of the Nexus app label', async () => {
+  const { Browsers } = await import('@whiskeysockets/baileys');
+  const config = buildConfig({ mode: 'dry-run' });
+  assert.deepEqual(config.wa.browser, ['Ubuntu', 'Chrome', '22.04.4']);
+
+  config.wa.pairingNumber = '923067607949';
+  config.wa.browser = ['Nexus-WA', 'Nexus-WA/0.1.0', '1.0.0'];
+  assert.deepEqual(connectionBrowser({ Browsers }, config), ['Ubuntu', 'Chrome', '22.04.4']);
+});
+
+test('pairing code: display groups four-character halves without altering the value', () => {
+  assert.equal(formatPairingCode('ABCD1234'), 'ABCD-1234');
+  assert.equal(formatPairingCode('ABCD'), 'ABCD');
+  assert.equal(formatPairingCode(''), '');
 });
 
 // ══════════════════════════════════════════════════════════════════
