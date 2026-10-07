@@ -204,5 +204,76 @@ export default {
         return ctx.reply('usage: .webhook list | add <url> [events] | del <id>');
       },
     },
+    {
+      name: 'vault',
+      aliases: ['backup-remote'],
+      description: 'Check the remote session backup, or test it end to end',
+      usage: '.vault | .vault test | .vault push',
+      ownerOnly: true,
+      async execute(ctx) {
+        const vault = ctx.bot?.vault;
+        if (!vault) return ctx.reply('The remote vault is not active in this mode.');
+
+        const sub = (ctx.args[0] || 'status').toLowerCase();
+
+        // .vault test — the only way to know the token really works. Worth
+        // running once right after deploying, because a vault that fails
+        // silently means the next restart costs you a re-pair.
+        if (sub === 'test') {
+          if (!vault.enabled()) {
+            return ctx.reply(`Vault not configured — ${vault.reasonDisabled()}`);
+          }
+          await ctx.reply('🔁 Testing the vault… pushing then pulling.');
+          const t0 = Date.now();
+          const pushed = await vault.push();
+          if (!pushed) {
+            return ctx.reply(
+              '❌ *Push failed.* Nothing reached the remote.\n\n' +
+                'Check `REMOTE_VAULT_TOKEN` (expired? scoped to the wrong repo? ' +
+                'missing Contents write?) and that `REMOTE_VAULT_URL` points at ' +
+                'a repo the token can reach.'
+            );
+          }
+          const blob = await vault.pull();
+          if (!blob?.length) {
+            return ctx.reply(
+              '⚠️ *Push succeeded but the pull came back empty.*\n\n' +
+                'The token can probably write but not read — it needs Contents: ' +
+                '*Read and write*.'
+            );
+          }
+          const ms = Date.now() - t0;
+          return ctx.reply(
+            `✅ *Vault works.*\n\n` +
+              `• pushed ${(blob.length / 1024).toFixed(1)} KB and read it back\n` +
+              `• round-trip ${ms} ms\n` +
+              `• ${vault.stats.pushed} push(es), ${vault.stats.failed} failure(s)\n\n` +
+              `Your session will survive a restart.`
+          );
+        }
+
+        if (sub === 'push') {
+          const ok = await vault.push();
+          return ctx.reply(
+            ok
+              ? `✅ Backup pushed. ${vault.stats.pushed} total, ${vault.stats.failed} failed.`
+              : '❌ Push failed — see the logs for the reason.'
+          );
+        }
+
+        const c = ctx.config.vault;
+        return ctx.reply(
+          `🗄️ *Remote vault*\n\n` +
+            `• status: ${vault.enabled() ? 'configured' : vault.reasonDisabled()}\n` +
+            `• backend: ${c.kind}\n` +
+            `• url: ${c.url || '(none)'}\n` +
+            `• path: ${c.path}\n` +
+            `• every ${c.intervalMin}m\n\n` +
+            `*Since start:* ${vault.stats.pushed} pushed · ${vault.stats.pulled} pulled · ` +
+            `${vault.stats.restored} restored · ${vault.stats.failed} failed\n\n` +
+            (vault.enabled() ? 'Run `.vault test` to prove it works.' : '')
+        );
+      },
+    },
   ],
 };

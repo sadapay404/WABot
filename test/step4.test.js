@@ -356,3 +356,87 @@ test('vault: recovery after an alert says so, then re-arms', async () => {
   await vault.push();
   assert.equal(alerts.length, 3);
 });
+
+// ── the .vault command ───────────────────────────────────────────────
+async function vaultPlugin() {
+  const { PluginLoader } = await import('../src/core/pluginLoader.js');
+  const loader = new PluginLoader({ dir: 'src/plugins', logger: quiet });
+  await loader.loadAll();
+  return loader.resolve('vault');
+}
+
+function ctxFor(plugin, vault, args = []) {
+  const replies = [];
+  return {
+    replies,
+    ctx: {
+      args, text: '', command: 'vault', isOwner: true, isGroup: false,
+      sender: '1@s.whatsapp.net', jid: '1@s.whatsapp.net',
+      config: { vault: { kind: 'github', url: 'https://github.com/me/v', path: 'b.nwb', intervalMin: 30 } },
+      bot: { vault },
+      reply: (t) => { replies.push(t); return Promise.resolve(); },
+    },
+  };
+}
+
+test('.vault test: a working round-trip reports success with real numbers', async () => {
+  const plugin = await vaultPlugin();
+  assert.ok(plugin, 'the vault command must be registered');
+
+  const { vault, store } = rig();
+  const { ctx, replies } = ctxFor(plugin, vault, ['test']);
+  await plugin.execute(ctx);
+
+  const last = replies.at(-1);
+  assert.match(last, /Vault works/);
+  assert.match(last, /KB and read it back/);
+  assert.ok(store.size >= 1, 'a real push reached the store');
+});
+
+test('.vault test: a failed push tells you what to check, not just that it failed', async () => {
+  const plugin = await vaultPlugin();
+  const { vault } = rig({ fetchImpl: async () => { throw new Error('Bad credentials'); } });
+  const { ctx, replies } = ctxFor(plugin, vault, ['test']);
+  await plugin.execute(ctx);
+
+  const last = replies.at(-1);
+  assert.match(last, /Push failed/);
+  assert.match(last, /REMOTE_VAULT_TOKEN/, 'must name the setting to check');
+  assert.match(last, /Contents write/, 'must name the permission needed');
+});
+
+test('.vault test: a token that can write but not read is called out specifically', async () => {
+  const plugin = await vaultPlugin();
+  const { vault } = rig({
+    fetchImpl: async (url, init = {}) => {
+      if (init.method === 'PUT') return { ok: true, status: 200, json: async () => ({}) };
+      return { ok: false, status: 403, json: async () => ({}) };
+    },
+  });
+  const { ctx, replies } = ctxFor(plugin, vault, ['test']);
+  await plugin.execute(ctx);
+
+  assert.match(replies.at(-1), /push succeeded but the pull came back empty/i);
+  assert.match(replies.at(-1), /Read and write/);
+});
+
+test('.vault with no argument: shows config and counters without touching the network', async () => {
+  const plugin = await vaultPlugin();
+  const { vault, calls } = rig();
+  const { ctx, replies } = ctxFor(plugin, vault, []);
+  await plugin.execute(ctx);
+
+  assert.match(replies[0], /Remote vault/);
+  assert.match(replies[0], /configured/);
+  assert.equal(calls.length, 0, 'a status check must not make network calls');
+});
+
+test('.vault test: refuses clearly when the vault is not configured', async () => {
+  const plugin = await vaultPlugin();
+  const v = new RemoteVault({ logger: quiet, backup: null, cfg: {} });
+  const { ctx, replies } = ctxFor(plugin, v, ['test']);
+  await plugin.execute(ctx);
+
+  assert.match(replies[0], /not configured/i);
+  assert.match(replies[0], /REMOTE_VAULT/, 'names what is missing');
+});
