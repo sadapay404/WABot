@@ -25,7 +25,7 @@ import { ContactStore } from '../src/core/contactStore.js';
 import { MessageCache } from '../src/core/messageCache.js';
 import { AntiDelete, extractRevoke, formatDeletion } from '../src/core/antiDelete.js';
 import { OutboundQueue } from '../src/core/outboundQueue.js';
-import { classifyDisconnect, backoffDelay } from '../src/core/whatsapp.js';
+import { classifyDisconnect, backoffDelay, shouldRequestPairingCode } from '../src/core/whatsapp.js';
 import { MockWhatsAppSocket } from '../src/core/mockSocket.js';
 import { Dashboard, buildState, flagFor } from '../src/web/dashboard.js';
 import { seedDemoData } from '../src/lib/demoSeed.js';
@@ -518,6 +518,19 @@ test('backoffDelay: grows, jitters and caps', () => {
   assert.ok(d5 > d1, 'delay must grow');
   assert.ok(d20 <= 10000, `must cap at maxMs, got ${d20}`);
   assert.ok(backoffDelay(0, { baseMs: 1000, maxMs: 10000 }) >= 0, 'delay must never be negative');
+});
+
+test('pairing code: request on the first fresh QR, never wait for open', () => {
+  const base = { qr: 'qr-payload', pairingNumber: '923001234567', registered: false };
+  assert.equal(shouldRequestPairingCode(base), true);
+  assert.equal(shouldRequestPairingCode({ ...base, requested: true }), false, 'only once per socket');
+  assert.equal(shouldRequestPairingCode({ ...base, registered: true }), false, 'already linked session');
+  assert.equal(shouldRequestPairingCode({ ...base, pairingNumber: '' }), false, 'QR fallback when no number');
+  assert.equal(
+    shouldRequestPairingCode({ ...base, qr: undefined }),
+    false,
+    'connection=open alone cannot request the first pairing code'
+  );
 });
 
 // ══════════════════════════════════════════════════════════════════

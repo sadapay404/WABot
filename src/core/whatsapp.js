@@ -75,6 +75,11 @@ export function backoffDelay(attempt, { baseMs = 3000, maxMs = 60000 } = {}) {
   return Math.round(exp / 2 + Math.random() * (exp / 2));
 }
 
+/** Request a phone-number pairing code when Baileys first offers a QR. */
+export function shouldRequestPairingCode({ qr, pairingNumber, registered, requested }) {
+  return Boolean(qr && pairingNumber && !registered && !requested);
+}
+
 export class WhatsAppConnection {
   constructor({ config, logger }) {
     this.config = config;
@@ -117,9 +122,10 @@ export class WhatsAppConnection {
       version,
       logger: this.logger.child({ scope: 'baileys' }),
       browser: this.config.wa.browser,
-      // Print the QR in the terminal only when there is no Telegram panel to
-      // deliver it to — you should never need a terminal to link this bot.
-      printQRInTerminal: !this.config.telegram.enabled,
+      // The phone-number flow does not need a QR printed into the log. Keep
+      // Baileys' legacy QR printer only as a fallback when neither pairing
+      // number nor Telegram delivery is configured.
+      printQRInTerminal: !this.config.wa.pairingNumber && !this.config.telegram.enabled,
       markOnlineOnConnect: false,
       emitOwnEvents: false,
       syncFullHistory: false,
@@ -156,6 +162,7 @@ export class WhatsAppConnection {
 
   #wire(socket, DisconnectReason) {
     socket.ev.on('creds.update', () => this.saveCreds?.());
+    let pairingRequested = false;
 
     socket.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
@@ -163,16 +170,25 @@ export class WhatsAppConnection {
       if (qr) {
         this.logger.info('QR code generated');
         this.#emit('qr', qr);
+
+        // A fresh account never reaches connection='open' until it has been
+        // linked. Ask for the pairing code as soon as Baileys emits its first
+        // QR (the websocket is ready to accept the link-code request then).
+        if (shouldRequestPairingCode({
+          qr,
+          pairingNumber: this.config.wa.pairingNumber,
+          registered: socket.authState?.creds?.registered,
+          requested: pairingRequested,
+        })) {
+          pairingRequested = true;
+          await this.#requestPairingCode(socket);
+        }
       }
 
       if (connection === 'open') {
         this.attempt = 0;
         const me = normalizeJid(socket.user?.id || '');
         this.logger.info(`connected as ${me}`);
-
-        if (this.config.wa.pairingNumber && !socket.authState?.creds?.registered) {
-          await this.#requestPairingCode(socket);
-        }
         this.#emit('open', { jid: me, pushName: socket.user?.name || null });
         return;
       }
@@ -208,7 +224,6 @@ export class WhatsAppConnection {
   async #requestPairingCode(socket) {
     const number = this.config.wa.pairingNumber;
     try {
-      // Baileys requires the number to be "registered" with the socket first.
       const code = await socket.requestPairingCode(number);
       this.logger.info(`pairing code: ${code}`);
       this.#emit('pairing-code', code);
