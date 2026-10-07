@@ -2,7 +2,7 @@
   "name": "nexus-wa",
   "version": "0.2.0",
   "private": true,
-  "description": "Nexus-WA \u2014 modular 24/7 personal WhatsApp assistant & automation tool with a Telegram control panel and web dashboard",
+  "description": "Nexus-WA — modular 24/7 personal WhatsApp assistant & automation tool with a Telegram control panel and web dashboard",
   "type": "module",
   "engines": {
     "node": ">=22.5.0"
@@ -29,8 +29,7 @@
     "telegraf": "^4.16.3"
   },
   "optionalDependencies": {
-    "better-sqlite3": "^13.0.3",
-    "sharp": "^0.33.5"
+    "better-sqlite3": "^13.0.3"
   },
   "keywords": [
     "whatsapp",

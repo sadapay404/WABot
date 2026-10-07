@@ -71,6 +71,12 @@ that reads real traffic while blocking all outbound to non-owners.
 **Remote control.** A single-tenant Telegram panel: `/status`, `/sessions`,
 `/logs`, `/deletes`, `/plugins`, `/qr`, `/mode`, `/antidelete`, `/kill`.
 
+### Hosting
+
+See [`docs/DEPLOY.md`](docs/DEPLOY.md) for the Docker and bare-metal setup, the
+pairing flow, and an honest read on why no free cloud tier can actually run
+this bot 24/7.
+
 ### Commands
 
 33 commands across 13 plugin files. `.help` prints the live list; everything

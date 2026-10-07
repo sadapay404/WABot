@@ -120,6 +120,27 @@ export function buildConfig(overrides = {}) {
       path: path.resolve(ROOT, process.env.DB_PATH || './data/nexus.db'),
     },
 
+    /**
+     * Where archived media and encrypted backups go.
+     *
+     * These default to a path *derived from the database location* rather than
+     * from the repo root. That matters in a container: the volume is mounted at
+     * /data while the code lives at /app, so anchoring to the repo would write
+     * archived media to the ephemeral container filesystem and silently lose it
+     * on every restart — defeating the entire purpose of the volume. Setting
+     * DB_PATH alone is therefore enough to relocate everything persistent.
+     */
+    storage: {
+      mediaDir: path.resolve(
+        process.env.MEDIA_DIR
+          || path.join(path.dirname(path.resolve(ROOT, process.env.DB_PATH || './data/nexus.db')), 'media')
+      ),
+      backupDir: path.resolve(
+        process.env.BACKUP_DIR
+          || path.join(path.dirname(path.resolve(ROOT, process.env.DB_PATH || './data/nexus.db')), 'backups')
+      ),
+    },
+
     ai: {
       provider: (process.env.AI_PROVIDER || 'groq').toLowerCase(),
       model: process.env.AI_MODEL || '',

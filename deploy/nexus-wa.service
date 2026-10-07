@@ -1,0 +1,69 @@
+# Nexus-WA — systemd unit for a bare-metal host (Raspberry Pi, old laptop, VPS).
+#
+# Install:
+#   sudo useradd --system --create-home --shell /usr/sbin/nologin nexus
+#   sudo mkdir -p /opt/nexus-wa /var/lib/nexus-wa
+#   sudo cp -r . /opt/nexus-wa && sudo chown -R nexus:nexus /opt/nexus-wa
+#   sudo chown -R nexus:nexus /var/lib/nexus-wa
+#   sudo cp deploy/nexus-wa.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now nexus-wa
+#
+# Then:  journalctl -u nexus-wa -f     to watch the pairing code appear.
+
+[Unit]
+Description=Nexus-WA — personal WhatsApp assistant
+Documentation=https://github.com/sadapay404/WABot
+After=network-online.target
+# The bot is useless without DNS and an outbound route to WhatsApp. Waiting for
+# network-online rather than network.target avoids a boot-time connect storm
+# that lands in the reconnect backoff before the network is actually up.
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexus
+Group=nexus
+WorkingDirectory=/opt/nexus-wa
+
+EnvironmentFile=-/opt/nexus-wa/.env
+Environment=NODE_ENV=production
+Environment=DB_PATH=/var/lib/nexus-wa/nexus.db
+Environment=WA_SESSION_DIR=/var/lib/nexus-wa/auth
+
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning src/index.js --serve
+
+Restart=always
+# WhatsApp reconnects with its own backoff. Give it room before systemd
+# intervenes, and cap the rate so a crash loop cannot hammer the account.
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Give the process time to close the WhatsApp socket cleanly. A hard kill
+# mid-handshake is the kind of thing that makes Meta look at an account.
+TimeoutStopSec=25
+KillSignal=SIGTERM
+
+# ── Hardening ────────────────────────────────────────────────────────
+# The session directory is private-key material. Everything else is read-only.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nexus-wa
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# The bot must reach the network — that is the product — but it never needs to
+# listen on anything except the dashboard port, and never needs raw sockets.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

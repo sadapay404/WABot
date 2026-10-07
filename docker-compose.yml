@@ -1,0 +1,45 @@
+# Nexus-WA — local/self-host deployment.
+#
+#   docker compose up -d --build      start it
+#   docker compose logs -f            watch it (pairing code / QR appear here)
+#   docker compose down               stop it
+#
+# The named volume below is the whole point: it holds your WhatsApp session
+# credentials and the database. Delete it and you re-pair from scratch.
+
+services:
+  nexus-wa:
+    build: .
+    image: nexus-wa:local
+    container_name: nexus-wa
+    restart: unless-stopped
+    env_file: .env
+
+    # Bound to the loopback interface by default on purpose. This dashboard can
+    # drive your WhatsApp account; publishing it on 0.0.0.0 on a home or VPS
+    # network puts it in front of every scanner on the internet, protected only
+    # by DASHBOARD_TOKEN.
+    #
+    # To reach it from your phone, prefer a tunnel (see docs/DEPLOY.md):
+    #   Cloudflare Tunnel — free, no card, no open inbound port
+    #   Tailscale         — free for personal use, private network
+    #
+    # If you accept the risk and want it exposed anyway, change to "3000:3000".
+    ports:
+      - "${DASHBOARD_BIND:-127.0.0.1}:3000:3000"
+
+    volumes:
+      - nexus-data:/data
+
+    # The bot is a linked WhatsApp device: it holds a persistent socket and
+    # must not be starved. 512 MB is the ceiling on most free PaaS tiers and
+    # it is genuinely tight once media archiving is on.
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  nexus-data:

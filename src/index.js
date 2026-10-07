@@ -179,7 +179,7 @@ async function main() {
   const registry = new SessionRegistry(db, logger);
   const contacts = new ContactStore(db, logger);
   const cache = new MessageCache(db, logger);
-  const mediaStore = new MediaStore({ db, logger, dir: path.join(config.root, 'data', 'media') });
+  const mediaStore = new MediaStore({ db, logger, dir: config.storage.mediaDir });
   const notes = new NoteStore(db, logger);
   const audit = new AuditLog(db, logger);
   const webhooks = new Webhooks({ db, logger });
@@ -189,6 +189,7 @@ async function main() {
     logger,
     sessionDir: config.wa.sessionDir,
     dbPath: config.db.path,
+    dir: config.storage.backupDir,
   });
   const ai = new AiClient({ config, logger });
 
