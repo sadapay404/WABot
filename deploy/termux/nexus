@@ -171,6 +171,7 @@ case "${1:-}" in
   status)  status ;;
   logs)    logs ;;
   pair)    pair ;;
+  harden)  exec bash "$APP_DIR/deploy/termux/harden.sh" "${2:-}" ;;
   *)
     cat <<EOF
 nexus — control Nexus-WA on this phone
@@ -181,6 +182,8 @@ nexus — control Nexus-WA on this phone
   nexus status    running? linked? memory? battery?
   nexus logs      follow the log
   nexus pair      show the pairing code again
+  nexus harden    stop Android killing the bot (needs Shizuku)
+  nexus harden --check   report what is in place, change nothing
 EOF
     ;;
 esac
