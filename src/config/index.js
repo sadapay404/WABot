@@ -89,6 +89,26 @@ export function buildConfig(overrides = {}) {
       seedDemo: bool(process.env.DASHBOARD_SEED_DEMO, true),
     },
 
+    /**
+     * Remote vault — keeps a WhatsApp session alive on hosts with an ephemeral
+     * filesystem (Render's free tier cannot attach a persistent disk at all).
+     * The blob is AES-256-GCM encrypted locally, so the remote never sees the
+     * session keys.
+     *
+     *   kind   github | http
+     *   url    a GitHub repo URL, or any endpoint accepting PUT/GET + bearer
+     *   token  GitHub fine-grained PAT (contents: read/write on one repo), or
+     *          the bearer token your endpoint expects
+     */
+    vault: {
+      kind: (process.env.REMOTE_VAULT_KIND || 'github').toLowerCase(),
+      url: process.env.REMOTE_VAULT_URL || '',
+      token: process.env.REMOTE_VAULT_TOKEN || '',
+      passphrase: process.env.REMOTE_VAULT_PASSPHRASE || '',
+      path: process.env.REMOTE_VAULT_PATH || 'nexus-backup.nwb',
+      intervalMin: int(process.env.REMOTE_VAULT_INTERVAL_MIN, 30),
+    },
+
     scheduler: {
       // Poll interval for due jobs. 15s is a good default: reminders land
       // within a few seconds of their target while barely touching the disk.

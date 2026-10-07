@@ -13,6 +13,7 @@
  */
 
 import readline from 'node:readline';
+import fs from 'node:fs';
 import path from 'node:path';
 
 import { buildConfig, validateConfig, MODES } from './config/index.js';
@@ -37,6 +38,7 @@ import { Triggers } from './core/triggers.js';
 import { Webhooks } from './core/webhooks.js';
 import { AuditLog } from './core/audit.js';
 import { SessionBackup } from './core/backup.js';
+import { RemoteVault } from './core/remoteVault.js';
 import { NoteStore } from './core/notes.js';
 import { AiClient } from './core/ai.js';
 import { OutboundQueue } from './core/outboundQueue.js';
@@ -191,6 +193,7 @@ async function main() {
     dbPath: config.db.path,
     dir: config.storage.backupDir,
   });
+  const vault = new RemoteVault({ logger, backup, cfg: config.vault });
   const ai = new AiClient({ config, logger });
 
   // Plugins.
@@ -200,6 +203,17 @@ async function main() {
   if (has('--list-plugins')) {
     printPluginList(plugins);
     process.exit(plugins.failures.length ? 1 : 0);
+  }
+
+  // On an ephemeral host data/auth is wiped on every restart. Pull the session
+  // back from the remote vault BEFORE the transport connects, or Baileys would
+  // start a fresh pairing instead of resuming the existing one.
+  const sessionFiles = fs.existsSync(config.wa.sessionDir)
+    ? fs.readdirSync(config.wa.sessionDir).filter((f) => f !== '.gitkeep')
+    : [];
+  if (!config.isDryRun && sessionFiles.length === 0) {
+    const restored = await vault.restoreIfEmpty(false);
+    if (restored) logger.warn('resumed from the remote vault — WhatsApp may ask you to confirm this device');
   }
 
   // Transport.
@@ -252,7 +266,7 @@ async function main() {
     config, logger, db, startedAt,
     registry, contacts, cache, mediaStore, notes, audit, webhooks, triggers,
     presenceLog, profileWatch, groupWatch, editWatch, antiDelete, viewOnce,
-    scheduler, ai, backup, plugins, dispatcher, queue, logs, connection,
+    scheduler, ai, backup, vault, plugins, dispatcher, queue, logs, connection,
     selfJid,
     // Kill-switch: the only thing that can stop outbound instantly.
     safety: {
@@ -330,6 +344,7 @@ async function main() {
 
   // Scheduler last, so everything it may deliver already exists.
   scheduler.start();
+  vault.start();
 
   logger.info(
     `ready · ${plugins.commands.size} command(s) · ${registry.list().length} session(s) · ` +
@@ -356,6 +371,9 @@ async function shutdown(why = 'signal') {
   logger.info(`shutting down (${why})…`);
   try {
     appRef?.scheduler?.stop();
+    // One final push, so a restart does not roll the session back by half an hour.
+    await appRef?.vault?.push?.();
+    appRef?.vault?.stop?.();
     await appRef?.telegram?.stop?.();
     await appRef?.dashboard?.stop?.();
     await appRef?.connection?.stop?.();

@@ -107,8 +107,33 @@ export class SessionBackup {
    * @returns {{sessions:number, db:boolean}}
    */
   restore(file, passphrase) {
-    const blob = fs.readFileSync(file);
-    if (blob.subarray(0, MAGIC.length).toString('utf8') !== MAGIC) {
+    return this.restoreBuffer(fs.readFileSync(file), passphrase, path.basename(file));
+  }
+
+  /** Read a backup blob off disk without decrypting it. */
+  readFile(file) {
+    return fs.readFileSync(file);
+  }
+
+  /**
+   * Delete a local backup file. Used after a successful remote push so the
+   * plaintext-adjacent blob is not left sitting on an ephemeral disk.
+   */
+  discard(file) {
+    try {
+      fs.rmSync(file, { force: true });
+    } catch {
+      /* best effort */
+    }
+  }
+
+  /**
+   * Restore straight from an in-memory blob — the path the remote vault uses,
+   * where the backup never needs to touch the local filesystem.
+   * @returns {{sessions:number, db:boolean}}
+   */
+  restoreBuffer(blob, passphrase, label = 'remote') {
+    if (!Buffer.isBuffer(blob) || blob.subarray(0, MAGIC.length).toString('utf8') !== MAGIC) {
       throw new Error('not a Nexus-WA backup file');
     }
     let off = MAGIC.length;
@@ -143,7 +168,7 @@ export class SessionBackup {
       db = true;
     }
 
-    this.logger.info(`restored ${(payload.session || []).length} session file(s) from ${path.basename(file)}`);
+    this.logger.info(`restored ${(payload.session || []).length} session file(s) from ${label}`);
     return { sessions: (payload.session || []).length, db };
   }
 

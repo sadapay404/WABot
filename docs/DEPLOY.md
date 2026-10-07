@@ -31,6 +31,59 @@ hard requirement.
 If you would rather pay a little: a **$3–5/month VPS** (Hetzner, Contabo,
 OVH) is what actually works in the cloud, and this repo ships ready for it.
 
+### ⚠️ Do not use the free "bot hosting" sites
+
+Searching for free bot hosting turns up dozens of sites offering 24/7 Node.js
+hosting for $0 and no card. **Do not put this bot on one of them.**
+
+They all get full filesystem access to `data/auth`. Those files *are* your
+WhatsApp login — anyone with them can impersonate your account from anywhere,
+and you will not see it happen. This repo treats that directory as private-key
+material for exactly this reason. An unknown free host is not a hosting
+provider, it is a third party holding your account.
+
+### If you have no machine of your own: Render free + the remote vault
+
+This is the least-bad free path, and it needs a caveat you should read before
+trying it.
+
+Render's free tier gives 750 instance-hours a month — just enough for one
+always-on service (a 31-day month is 744 hours). It cannot attach a persistent
+disk, so the **remote vault** bridges that: it pushes an AES-256-GCM encrypted
+snapshot of your session and database to a private GitHub repo on an interval,
+and restores it on boot when `data/auth` is empty. The remote only ever sees
+ciphertext.
+
+```bash
+# 1. Create a PRIVATE GitHub repo, e.g. nexus-vault
+# 2. Create a fine-grained PAT: Contents → Read and write, scoped to that repo only
+# 3. In .env:
+REMOTE_VAULT_KIND=github
+REMOTE_VAULT_URL=https://github.com/YOU/nexus-vault
+REMOTE_VAULT_TOKEN=github_pat_...
+REMOTE_VAULT_PASSPHRASE=<something long you will not lose>
+REMOTE_VAULT_INTERVAL_MIN=30
+```
+
+Then deploy the Dockerfile to Render as a free web service, and use a free
+uptime pinger (cron-job.org, UptimeRobot) to hit the URL every 10 minutes so it
+does not spin down.
+
+**Read this before you do it:**
+
+- **Use your spare number only. Never your main number.** Every restart means
+  WhatsApp sees a login from a new datacentre IP. Occasional is normal;
+  constant is the pattern that gets an account flagged.
+- You can lose up to `REMOTE_VAULT_INTERVAL_MIN` of state on a restart —
+  messages cached since the last push, reminders already delivered.
+- Render's free tier is explicitly "not for production" and can change at any
+  time; the free Postgres already expires after 30 days as a precedent.
+- If the passphrase is ever lost, the backup is unrecoverable and you re-pair.
+  There is no reset.
+
+This works well enough to **test** the bot on a spare number. I would not run a
+main number on it.
+
 ---
 
 ## Option A — Docker (recommended)
@@ -119,8 +172,39 @@ cloudflared tunnel --url http://127.0.0.1:3000
 reachable only from your own devices. Install Tailscale on the host and your
 phone, then open `http://<tailscale-ip>:3000`.
 
-Either way, set `DASHBOARD_TOKEN`. In `observe`/`live` mode the server refuses
-to serve the dashboard without one. `/healthz` stays open for liveness probes.
+### All three at once
+
+Cloudflare Tunnel, Tailscale and plain LAN are not mutually exclusive — run all
+three and use whichever suits where you are. They listen on the same
+`127.0.0.1:3000` (or the LAN interface) and cost nothing.
+
+```bash
+# 1. LAN — already works, no setup. Find the host's address:
+ip -4 addr show | grep inet        # Linux
+# then open http://192.168.x.x:3000 from your phone on the same Wi-Fi.
+# For this you DO need to publish the port; set DASHBOARD_BIND=0.0.0.0 in the
+# compose env, and understand that anyone on your Wi-Fi can reach it.
+
+# 2. Tailscale — private network, works at home and away, nothing inbound open
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+sudo tailscale serve --bg 3000     # or just use the 100.x.y.z address
+# Open http://<tailscale-ip>:3000 from any device signed into your tailnet.
+
+# 3. Cloudflare Tunnel — a public HTTPS URL, no open inbound port
+cloudflared tunnel --url http://127.0.0.1:3000
+# prints https://<random>.trycloudflare.com — share it with nobody
+```
+
+**Tailscale is the better default** if you only want access from your own
+devices: it never exposes anything to the internet, and the URL cannot be
+guessed or scanned. Use the Cloudflare quick tunnel when you need a throwaway
+public link, and note that a quick tunnel URL changes every time it restarts —
+a named tunnel (`cloudflared tunnel create`) gives you a stable one.
+
+Whichever you use, set `DASHBOARD_TOKEN`. In `observe`/`live` mode the server
+refuses to serve the dashboard without one. `/healthz` stays open for liveness
+probes.
 
 ---
 
