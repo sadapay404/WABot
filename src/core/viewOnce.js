@@ -7,7 +7,7 @@
  * payload; those events are recorded and reported, but the missing media cannot
  * be reconstructed by this process.
  *
- * If the primary phone later sends an explicit 👀 reply to the original, the
+ * If the primary phone later replies with `*`, 🤔, or 👀 to the original, the
  * quotedMessage can carry the media key/url. That owner-triggered fallback is
  * handled separately; the bot never downloads arbitrary quoted media.
  *
@@ -19,6 +19,8 @@ import { normalizeJid, isGroupJid, describeChat } from './jid.js';
 import { normalize, unwrap } from './message.js';
 import { flag, setFlag } from '../database/index.js';
 import { describeMedia, mediaIcon } from '../lib/media.js';
+
+const VIEW_ONCE_RECOVERY_REPLIES = new Set(['*', '🤔', '👀']);
 
 function clockTime(ms) {
   return new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
@@ -212,10 +214,10 @@ export class ViewOnceCapture {
   }
 
   async #recoverQuotedReply(raw, msg) {
-    // The proven fallback from other Baileys bots is a reply made on the
-    // primary phone: its quotedMessage can carry the media key/url. Require an
-    // explicit owner-authored 👀 reply; never download arbitrary quoted media.
-    if (!this.enabled() || raw?.key?.fromMe !== true || String(msg?.text || '').trim() !== '👀') return null;
+    // The phone's quotedMessage can carry the media key/url. Require an exact
+    // owner-authored recovery token; never download arbitrary quoted media.
+    const replyText = String(msg?.text || '').trim();
+    if (!this.enabled() || raw?.key?.fromMe !== true || !VIEW_ONCE_RECOVERY_REPLIES.has(replyText)) return null;
 
     const quotedRaw = this.#quotedMessage(raw);
     if (!quotedRaw?.key?.id) return null;
@@ -374,7 +376,7 @@ export function formatViewOnce(r) {
   } else if (r.status === 'unavailable') {
     lines.push(
       '⚠️ *WhatsApp sent only the view-once marker; this linked device received no media to save.*',
-      'If it is still available on the primary phone, reply 👀 to the original there; the quoted copy may let the bot recover it.',
+      'If it is still available on the primary phone, reply with `*`, 🤔, or 👀 to the original there; the quoted copy may let the bot recover it.',
       r.caption ? `> ${r.caption}` : ''
     );
   } else {

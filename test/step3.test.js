@@ -675,9 +675,10 @@ test('view-once: Baileys unavailable marker is recorded and reported', async () 
   assert.ok(alert, 'the event alert is sent despite missing media');
   assert.equal(alert.jid, SELF);
   assert.match(alert.content.text, /linked device received no media/i);
+  assert.match(alert.content.text, /reply with `\*`, 🤔, or 👀/);
 });
 
-test('view-once: an owner 👀 reply can recover quoted media after a marker-only event', async () => {
+test('view-once: owner replies using *, 🤔 or 👀 recover quoted media after a marker-only event', async () => {
   const db = await getMemoryDb();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nwb-media-'));
   const socket = fakeSocket();
@@ -693,58 +694,59 @@ test('view-once: an owner 👀 reply can recover quoted media after a marker-onl
   });
   const { normalize } = await import('../src/core/message.js');
 
-  const marker = {
-    key: { remoteJid: MOM, fromMe: false, id: 'VO-QUOTE', isViewOnce: true },
-    messageTimestamp: Math.floor(Date.now() / 1000),
-  };
-  const markerMessage = normalize(marker);
-  cache.store(marker, markerMessage, SELF);
-  const unavailable = await capture.onMessage(marker, markerMessage);
-  assert.equal(unavailable.status, 'unavailable');
-  assert.equal(downloads, 0);
+  for (const [index, replyText] of ['*', '🤔', '👀'].entries()) {
+    const stanzaId = `VO-QUOTE-${index}`;
+    const marker = {
+      key: { remoteJid: MOM, fromMe: false, id: stanzaId, isViewOnce: true },
+      messageTimestamp: Math.floor(Date.now() / 1000),
+    };
+    const markerMessage = normalize(marker);
+    cache.store(marker, markerMessage, SELF);
+    const unavailable = await capture.onMessage(marker, markerMessage);
+    assert.equal(unavailable.status, 'unavailable');
+    assert.equal(downloads, index, 'a marker-only event has no bytes to download');
 
-  const reply = {
-    key: { remoteJid: MOM, fromMe: true, id: 'OWNER-QUOTE-REPLY' },
-    message: {
-      extendedTextMessage: {
-        text: '👀',
-        contextInfo: {
-          stanzaId: 'VO-QUOTE',
-          remoteJid: MOM,
-          quotedMessage: {
-            viewOnceMessageV2: {
-              message: {
-                imageMessage: {
-                  mimetype: 'image/jpeg',
-                  fileLength: bytes.length,
-                  url: 'https://media.invalid/quoted-image',
+    const reply = {
+      key: { remoteJid: MOM, fromMe: true, id: `OWNER-QUOTE-REPLY-${index}` },
+      message: {
+        extendedTextMessage: {
+          text: replyText,
+          contextInfo: {
+            stanzaId,
+            remoteJid: MOM,
+            quotedMessage: {
+              viewOnceMessageV2: {
+                message: {
+                  imageMessage: {
+                    mimetype: 'image/jpeg',
+                    fileLength: bytes.length,
+                    url: 'https://media.invalid/quoted-image',
+                  },
                 },
               },
             },
           },
         },
       },
-    },
-  };
+    };
 
-  const nonOwnerReply = {
-    ...reply,
-    key: { ...reply.key, fromMe: false },
-  };
-  await capture.onMessage(nonOwnerReply, normalize(nonOwnerReply));
-  assert.equal(downloads, 0, 'a contact’s 👀 message must not trigger recovery');
+    const nonOwnerReply = { ...reply, key: { ...reply.key, fromMe: false } };
+    await capture.onMessage(nonOwnerReply, normalize(nonOwnerReply));
+    assert.equal(downloads, index, 'a contact cannot trigger recovery with a token');
 
-  const recovered = await capture.onMessage(reply, normalize(reply));
-  assert.equal(recovered.status, 'captured');
-  assert.equal(downloads, 1);
-  assert.equal(capture.stats.captured, 1);
-  const row = db.prepare('SELECT * FROM view_once WHERE stanza_id = ?').get('VO-QUOTE');
-  assert.equal(row.media_bytes, bytes.length);
-  assert.ok(row.media_path && fs.existsSync(row.media_path));
-  assert.equal(socket.sent.filter((s) => s.content.image).length, 1);
+    const recovered = await capture.onMessage(reply, normalize(reply));
+    assert.equal(recovered.status, 'captured', `${replyText} should trigger recovery`);
+    assert.equal(downloads, index + 1);
+    const row = db.prepare('SELECT * FROM view_once WHERE stanza_id = ?').get(stanzaId);
+    assert.equal(row.media_bytes, bytes.length);
+    assert.ok(row.media_path && fs.existsSync(row.media_path));
 
-  await capture.onMessage(reply, normalize(reply));
-  assert.equal(downloads, 1, 'a successful recovery must not download the same quote again');
+    await capture.onMessage(reply, normalize(reply));
+    assert.equal(downloads, index + 1, 'successful recovery must not download the same quote again');
+  }
+
+  assert.equal(capture.stats.captured, 3);
+  assert.equal(socket.sent.filter((s) => s.content.image).length, 3);
 });
 
 // ── mock harness integrity ───────────────────────────────────────────
