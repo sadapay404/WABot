@@ -63,11 +63,11 @@ linked to is recorded with its country, role (burner/primary), status,
 message counts, connect count and first/last seen. The web dashboard renders
 all of it plus deletions, plugins, contacts, queue depth and a live log tail.
 
-**Safety shield.** A serial outbound queue with a per-chat per-minute budget,
-a repeated-text loop breaker that halts and alerts the owner, and simulated
-typing presence; an owner-only whitelist that fails closed, silent rejection
-of strangers, per-command cooldowns, and an `observe` mode that reads real
-traffic while blocking all outbound to non-owners.
+**Safety shield.** A serial outbound queue with per-chat rate limits, a
+repeated-text loop breaker that halts and alerts the owner, a global volume
+warning, and simulated typing; an owner-only whitelist that fails closed,
+silent rejection of strangers, per-command cooldowns, and an `observe` mode
+that reads real traffic while blocking all outbound to non-owners.
 
 **Remote control.** A single-tenant Telegram panel: `/status`, `/sessions`,
 `/logs`, `/deletes`, `/plugins`, `/qr`, `/mode`, `/antidelete`, `/kill`.
@@ -166,7 +166,7 @@ in `OWNER_JIDS`.
 │   │   ├── pluginLoader.js   scans src/plugins/, quarantines broken files
 │   │   ├── mockSocket.js     ⭐ fake transport — makes dry-run possible
 │   │   ├── jid.js            JID + phone + country resolution
-│   │   ├── outboundQueue.js  ⭐ rate limiting and typing pacing
+│   │   ├── outboundQueue.js  ⭐ rate limits, loop and volume protection
 │   │   ├── messageCache.js   two-tier cache that makes anti-delete possible
 │   │   ├── antiDelete.js     ⭐ revoke detection, recovery, notification
 │   │   ├── contactStore.js   your saved names vs. their push names
@@ -174,13 +174,13 @@ in `OWNER_JIDS`.
 │   │   ├── logBuffer.js      ring buffer for /logs
 │   │   ├── whatsapp.js       Baileys connection + reconnect policy
 │   │   ├── telegram.js       Telegram control panel
-│   │   └── scheduler.js      cron + job queue          [Phase 4 — stub]
+│   │   └── scheduler.js      SQLite-backed reminders and recurring jobs
 │   ├── database/index.js     node:sqlite, better-sqlite3 fallback
 │   ├── lib/{format,demoSeed}.js
 │   ├── web/{dashboard.js,index.html}
 │   ├── plugins/              drop a file here to add a feature
 │   └── index.js              boot + preview console
-├── test/                     73 tests + fixtures
+├── test/                     node:test suites + fixtures
 ├── data/                     gitignored: session credentials + SQLite
 └── docs/
 ```
@@ -251,7 +251,7 @@ is nothing to keep patched on a bot meant to run unattended for weeks.
       persistence, session registry, contact store, anti-delete, web dashboard,
       Telegram panel, outbound queue
 - [ ] **Phase 3** — AI orchestrator, voice-note transcription, vision
-- [ ] **Phase 4** — SQLite-backed persistent scheduler + reminder engine
+- [x] **Phase 4** — SQLite-backed persistent scheduler + reminder engine
 - [ ] **Phase 5** — Dockerfile, health checks, cloud deploy, reconnect hardening
 
 See [`docs/IDEAS.md`](docs/IDEAS.md) for the candidate feature backlog.
@@ -260,8 +260,8 @@ See [`docs/IDEAS.md`](docs/IDEAS.md) for the candidate feature backlog.
 
 ## Test coverage notes
 
-`npm test` runs 73 tests against the real modules and the real entry point.
-Writing them surfaced several defects that reading the code had not:
+`npm test` exercises the real modules and entry point with the mock transport.
+Writing the tests surfaced several defects that reading the code had not:
 
 - `normalizeJid()` stripped the **domain** from device JIDs
   (`12025550188:12@s.whatsapp.net` → `12025550188`), which would have broken

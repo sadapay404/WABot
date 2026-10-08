@@ -296,21 +296,34 @@ test('config: an unknown mode degrades to dry-run, never to live', () => {
   assert.equal(config.risk, 0);
 });
 
-test('config: outbound loop-breaker bounds cannot be disabled or stretched indefinitely', () => {
-  const names = ['OUTBOUND_LOOP_THRESHOLD', 'OUTBOUND_LOOP_WINDOW_MS'];
+test('config: outbound safety bounds cannot be disabled or stretched indefinitely', () => {
+  const names = [
+    'OUTBOUND_LOOP_THRESHOLD',
+    'OUTBOUND_LOOP_WINDOW_MS',
+    'OUTBOUND_VOLUME_LIMIT',
+    'OUTBOUND_VOLUME_WINDOW_MS',
+  ];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   try {
     process.env.OUTBOUND_LOOP_THRESHOLD = '1';
     process.env.OUTBOUND_LOOP_WINDOW_MS = '0';
+    process.env.OUTBOUND_VOLUME_LIMIT = '1';
+    process.env.OUTBOUND_VOLUME_WINDOW_MS = '0';
     let config = buildConfig({ mode: 'dry-run' });
     assert.equal(config.safety.outboundLoopThreshold, 2);
     assert.equal(config.safety.outboundLoopWindowMs, 1_000);
+    assert.equal(config.safety.outboundVolumeLimit, 5);
+    assert.equal(config.safety.outboundVolumeWindowMs, 1_000);
 
     process.env.OUTBOUND_LOOP_THRESHOLD = '999';
     process.env.OUTBOUND_LOOP_WINDOW_MS = '999999999';
+    process.env.OUTBOUND_VOLUME_LIMIT = '9999';
+    process.env.OUTBOUND_VOLUME_WINDOW_MS = '999999999';
     config = buildConfig({ mode: 'dry-run' });
     assert.equal(config.safety.outboundLoopThreshold, 25);
     assert.equal(config.safety.outboundLoopWindowMs, 3_600_000);
+    assert.equal(config.safety.outboundVolumeLimit, 1_000);
+    assert.equal(config.safety.outboundVolumeWindowMs, 3_600_000);
   } finally {
     for (const name of names) {
       if (previous[name] === undefined) delete process.env[name];

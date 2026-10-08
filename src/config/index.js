@@ -140,6 +140,13 @@ export function buildConfig(overrides = {}) {
         1_000,
         Math.min(3_600_000, int(process.env.OUTBOUND_LOOP_WINDOW_MS, 60_000))
       ),
+      // Warn the owner when a global burst exceeds this many successful sends
+      // in the window. This alerts but does not pause the queue.
+      outboundVolumeLimit: Math.max(5, Math.min(1_000, int(process.env.OUTBOUND_VOLUME_LIMIT, 30))),
+      outboundVolumeWindowMs: Math.max(
+        1_000,
+        Math.min(3_600_000, int(process.env.OUTBOUND_VOLUME_WINDOW_MS, 60_000))
+      ),
       queueConcurrency: Math.max(1, int(process.env.QUEUE_CONCURRENCY, 1)),
       typingIndicator: bool(process.env.TYPING_INDICATOR, true),
       observeAllowReplyToOwner: bool(process.env.OBSERVE_ALLOW_REPLY_TO_OWNER, true),

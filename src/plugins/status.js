@@ -36,6 +36,7 @@ export default {
       }\` gated`,
       `• queue: \`${q.queued ?? 0}\` pending, \`${q.sent ?? 0}\` sent`,
       `• outbound loop breaker: \`${q.halted ? 'HALTED' : 'armed'}\`, \`${q.loopBreakerTrips ?? 0}\` trip(s)`,
+      `• outbound volume warnings: \`${q.volumeAnomalyAlerts ?? 0}\``,
       `• cache: \`${bot.cache?.size?.().rows ?? 0}\` messages`,
     ];
 

@@ -153,6 +153,7 @@ export class TelegramPanel {
       `• deletions caught: \`${s.deletionsSeen ?? 0}\``,
       `• queue: \`${q.queued ?? 0}\` pending, \`${q.sent ?? 0}\` sent`,
       `• outbound loop breaker: \`${q.halted ? 'HALTED' : 'armed'}\`, \`${q.loopBreakerTrips ?? 0}\` trip(s)`,
+      `• outbound volume warnings: \`${q.volumeAnomalyAlerts ?? 0}\``,
       `• dashboard: \`${a.dashboard?.url?.() || 'off'}\``,
     ].join('\n');
   }

@@ -137,6 +137,26 @@ Xiaomi/Huawei/Oppo/Vivo are the worst offenders here. Check
 
 ---
 
+## Scheduling messages and reminders
+
+The scheduler is already enabled and stores jobs in SQLite, so one-time and
+recurring jobs survive a bot restart. In `.env`, the default `TZ=UTC` controls
+how natural-language times such as `tomorrow 9am` are interpreted. For Bannu
+local time, set `TZ=Asia/Karachi` before creating new jobs; already saved jobs
+are absolute timestamps and will not shift when you change the timezone.
+
+```text
+.schedule tomorrow 9am | Send the report     # send in the chat where you typed it
+.schedule every day 8am | Take your medicine # recurring message
+.remind in 20 minutes | Stretch               # reminder to your own chat
+.jobs                                           # list pending jobs
+.jobs cancel 12                                 # cancel job #12
+```
+
+One-time jobs that become overdue while the phone is offline are delivered once
+when it reconnects. Recurring jobs skip missed intervals rather than sending a
+catch-up burst. `.jobs` currently displays timestamps in UTC.
+
 ## Day to day
 
 ```sh

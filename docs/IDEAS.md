@@ -87,7 +87,7 @@ it on, keep it to one narrow chat.
 | **Outbound loop breaker** | S | none | 🟡 | Blocks the 5th normalized-exact or ≥80%-token-overlap text/caption send (3+ tokens) to one destination within 60s; halts the queue and alerts the self-chat. Tune with `OUTBOUND_LOOP_THRESHOLD` and `OUTBOUND_LOOP_WINDOW_MS`; inspect the cause before `.panic resume`. |
 | **Audit log** | S | none | ✅ | `.audit [n]` — who did what, newest first. |
 | **Session backup** | M | low | ✅ | `.backup <passphrase>` → AES-256-GCM blob of `data/auth` + the DB. Passphrase is never stored, and a wrong passphrase is deliberately indistinguishable from a corrupt file. |
-| **Rate-limit anomaly alert** | S | none | ⬜ | Warn when outbound volume spikes — a loop is how accounts die. |
+| **Rate-limit anomaly alert** | S | none | 🟡 | Warns after 30 successful sends across all chats in 60s; alerts once per window and does not halt. Tune with `OUTBOUND_VOLUME_LIMIT` and `OUTBOUND_VOLUME_WINDOW_MS`. |
 
 ---
 

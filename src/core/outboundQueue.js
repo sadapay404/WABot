@@ -4,6 +4,10 @@ const DEFAULT_LOOP_THRESHOLD = 5;
 const MAX_LOOP_THRESHOLD = 25;
 const DEFAULT_LOOP_WINDOW_MS = 60_000;
 const MAX_LOOP_WINDOW_MS = 3_600_000;
+const DEFAULT_VOLUME_LIMIT = 30;
+const MAX_VOLUME_LIMIT = 1_000;
+const DEFAULT_VOLUME_WINDOW_MS = 60_000;
+const MAX_VOLUME_WINDOW_MS = 3_600_000;
 const LOOP_HISTORY_MAX_DESTINATIONS = 500;
 const LOOP_MIN_TOKENS_FOR_FUZZY_MATCH = 3;
 const LOOP_TOKEN_OVERLAP_THRESHOLD = 0.8;
@@ -45,9 +49,8 @@ function similarLoopText(left, right) {
 /**
  * Nexus-WA — outbound queue.
  *
- * Every message the bot sends goes through here, including scheduled ones, so
- * nothing can bypass the pacing. Four things it does that a raw socket does
- * not:
+ * Normal messages, including scheduled ones, go through this queue so plugins
+ * cannot bypass pacing. Five things it adds beyond the raw socket are:
  *
  *   1. serialises sends (concurrency 1) — bursts are the loudest signal an
  *      unofficial client can emit
@@ -56,6 +59,7 @@ function similarLoopText(left, right) {
  *      message length, so replies look like they were typed by a person
  *   4. trips a loop breaker before the Nth similar text/caption reaches the
  *      same destination within its safety window
+ *   5. alerts the owner on a global outbound-volume spike (without halting)
  *
  * It wraps the socket, so callers keep using `sock.sendMessage(...)` and the
  * protection is structural rather than a convention someone can forget.
@@ -88,6 +92,18 @@ export class OutboundQueue {
       1_000,
       MAX_LOOP_WINDOW_MS
     );
+    this.volumeLimit = boundedInteger(
+      config.safety.outboundVolumeLimit,
+      DEFAULT_VOLUME_LIMIT,
+      5,
+      MAX_VOLUME_LIMIT
+    );
+    this.volumeWindowMs = boundedInteger(
+      config.safety.outboundVolumeWindowMs,
+      DEFAULT_VOLUME_WINDOW_MS,
+      1_000,
+      MAX_VOLUME_WINDOW_MS
+    );
 
     /** Kill-switch state. When true nothing leaves the process. */
     this.halted = false;
@@ -99,17 +115,32 @@ export class OutboundQueue {
     this.windows = new Map();
     /** Recent normalized text per destination; size-bounded and lazily expired. */
     this.loopHistory = new Map();
+    /** Successful outbound send timestamps, capped at the anomaly threshold. */
+    this.volumeWindow = [];
+    this.lastVolumeAlertAt = 0;
+    this.rawSendMessage = null;
     this.queue = [];
     this.active = 0;
-    this.stats = { sent: 0, throttledMs: 0, dropped: 0, typing: 0, loopBreakerTrips: 0 };
+    this.stats = {
+      sent: 0,
+      throttledMs: 0,
+      dropped: 0,
+      typing: 0,
+      loopBreakerTrips: 0,
+      volumeAnomalyAlerts: 0,
+    };
     this.logger.info(
       `outbound loop breaker active (${this.loopThreshold} similar messages / ${Math.round(this.loopWindowMs / 1000)}s)`
+    );
+    this.logger.info(
+      `outbound volume alert active (${this.volumeLimit} sends / ${Math.round(this.volumeWindowMs / 1000)}s)`
     );
   }
 
   /** Wrap a socket with outbound pacing and loop protection. */
   attach() {
     const original = this.socket.sendMessage.bind(this.socket);
+    this.rawSendMessage = original;
     const self = this;
 
     this.socket.sendMessage = function queuedSendMessage(jid, content, options) {
@@ -129,19 +160,19 @@ export class OutboundQueue {
 
   #enqueue(task, jid, content) {
     return new Promise((resolve, reject) => {
-      let bypassLoopBreaker = false;
+      let bypassSafetyMonitors = false;
       if (this.halted) {
         // A single explicit pass lets `.panic` confirm its halt and lets the
         // loop breaker deliver its owner alert without reopening general sends.
         if (this.escape > 0) {
           this.escape--;
-          bypassLoopBreaker = true;
+          bypassSafetyMonitors = true;
         } else {
           this.stats.dropped++;
           return reject(new Error(`outbound halted by ${this.haltReason}`));
         }
       }
-      this.queue.push({ task, jid, content, bypassLoopBreaker, resolve, reject });
+      this.queue.push({ task, jid, content, bypassSafetyMonitors, resolve, reject });
       this.#pump();
     });
   }
@@ -207,6 +238,52 @@ export class OutboundQueue {
     return null;
   }
 
+  #checkVolumeAnomaly() {
+    const now = Date.now();
+    this.volumeWindow = this.volumeWindow.filter((sentAt) => now - sentAt <= this.volumeWindowMs);
+    this.volumeWindow.push(now);
+    if (this.volumeWindow.length > this.volumeLimit) {
+      this.volumeWindow.splice(0, this.volumeWindow.length - this.volumeLimit);
+    }
+
+    if (this.volumeWindow.length < this.volumeLimit || now - this.lastVolumeAlertAt < this.volumeWindowMs) {
+      return null;
+    }
+
+    this.lastVolumeAlertAt = now;
+    this.stats.volumeAnomalyAlerts++;
+    return { count: this.volumeWindow.length };
+  }
+
+  async #alertVolumeAnomaly({ count }) {
+    const seconds = Math.ceil(this.volumeWindowMs / 1_000);
+    this.logger.warn(
+      `outbound volume warning: ${count} successful sends within ${this.volumeWindowMs}ms`
+    );
+
+    const ownerJid =
+      normalizeJid(this.socket?.user?.id) || normalizeJid(this.config?.safety?.ownerJids?.[0]);
+    if (!ownerJid) {
+      this.logger.error('outbound volume warning could not reach owner (no owner JID available)');
+      return;
+    }
+
+    try {
+      // This is sent on the original transport while the current queue item is
+      // active; routing it back through the queue here would deadlock at
+      // concurrency 1. It is one owner-only safety alert, not user traffic.
+      await this.rawSendMessage(ownerJid, {
+        text:
+          `⚠️ Outbound volume warning.\n\n` +
+          `${count} successful messages were sent across chats within ${seconds}s ` +
+          `(threshold: ${this.volumeLimit}). Sending continues under normal limits; ` +
+          `use ".panic" if this was unexpected.`,
+      });
+    } catch (error) {
+      this.logger.error(`outbound volume owner alert failed: ${error.message}`);
+    }
+  }
+
   async #tripLoopBreaker(item, { destination, count }) {
     this.stats.loopBreakerTrips++;
     this.stats.dropped++;
@@ -257,7 +334,7 @@ export class OutboundQueue {
         continue;
       }
 
-      if (!item.bypassLoopBreaker) {
+      if (!item.bypassSafetyMonitors) {
         const trip = this.#checkLoop(item);
         if (trip) {
           await this.#tripLoopBreaker(item, trip);
@@ -287,6 +364,10 @@ export class OutboundQueue {
         this.windows.set(item.jid, [...(this.windows.get(item.jid) || []), Date.now()]);
       }
       this.stats.sent++;
+      if (!item.bypassSafetyMonitors) {
+        const anomaly = this.#checkVolumeAnomaly();
+        if (anomaly) await this.#alertVolumeAnomaly(anomaly);
+      }
       item.resolve(res);
     } catch (err) {
       this.logger.error(`send failed: ${err.message}`);

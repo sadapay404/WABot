@@ -471,6 +471,40 @@ test('loop breaker: sends outside the configured window do not count', async () 
   assert.equal(q.depth().loopBreakerTrips, 0);
 });
 
+test('volume alert: aggregate outbound bursts warn the owner without halting', async () => {
+  const socket = fakeSocket();
+  const config = rigConfig();
+  config.safety.typingIndicator = false;
+  config.safety.outboundVolumeLimit = 5;
+  config.safety.outboundVolumeWindowMs = 60_000;
+  const q = new OutboundQueue(socket, config, quiet);
+  q.attach();
+  const destinations = [
+    MOM,
+    '12025550199@s.whatsapp.net',
+    '12025550177@s.whatsapp.net',
+    '12025550166@s.whatsapp.net',
+    '12025550155@s.whatsapp.net',
+  ];
+
+  for (const [index, jid] of destinations.entries()) {
+    await socket.sendMessage(jid, { text: `Distinct update number ${index + 1}` });
+  }
+
+  const alert = socket.sent.find(
+    (entry) => entry.jid === SELF && /Outbound volume warning/i.test(entry.content.text)
+  );
+  assert.ok(alert, 'aggregate traffic warning reaches the owner self-chat');
+  assert.match(alert.content.text, /5 successful messages/);
+  assert.match(alert.content.text, /Sending continues/);
+  assert.equal(q.depth().halted, false, 'volume warning is not a kill-switch');
+  assert.equal(q.depth().volumeAnomalyAlerts, 1);
+
+  await socket.sendMessage(MOM, { text: 'A fourth independent update' });
+  assert.equal(socket.sent.filter((entry) => entry.jid === SELF).length, 1, 'warning is rate-limited to once per window');
+  assert.equal(q.depth().halted, false, 'normal sends continue after the warning');
+});
+
 // ── FTS ──────────────────────────────────────────────────────────────
 test('search: the FTS index is readable, not just indexable', async () => {
   // Regression: an external-content FTS5 table whose columns do not match the
