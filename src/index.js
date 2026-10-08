@@ -251,7 +251,7 @@ async function main() {
     await socket.connect();
   } else {
     const { WhatsAppConnection } = await import('./core/whatsapp.js');
-    connection = new WhatsAppConnection({ config, logger });
+    connection = new WhatsAppConnection({ config, logger, cache });
     socket = await connection.connect();
   }
 
@@ -281,7 +281,8 @@ async function main() {
     selfJid: config.isDryRun ? selfJid : null,
   });
   const viewOnce = new ViewOnceCapture({
-    socket, db, contacts, registry, mediaStore, logger, config,
+    socket, db, cache, contacts, registry, mediaStore, logger, config,
+    downloader: config.isDryRun ? (raw) => socket.downloadMediaMessage(raw) : null,
   });
   const scheduler = new Scheduler({
     db, socket, logger, contacts,

@@ -35,6 +35,48 @@ function sqliteInteger(value) {
   }
 }
 
+function addressSet(key, fields) {
+  return new Set(
+    fields
+      .map((field) => key?.[field])
+      .filter((jid) => typeof jid === 'string' && jid.length > 0)
+      .map((jid) => normalizeJid(jid))
+  );
+}
+
+function intersects(left, right) {
+  for (const value of left) if (right.has(value)) return true;
+  return false;
+}
+
+/** Fail closed unless id, direction and chat (including known PN/LID aliases) agree. */
+function matchesMessageKey(raw, requested) {
+  if (
+    !raw?.key ||
+    typeof requested?.id !== 'string' ||
+    !requested.id ||
+    (!requested.remoteJid && !requested.remoteJidAlt) ||
+    typeof requested.fromMe !== 'boolean'
+  ) return false;
+  if (
+    raw.key.id !== requested.id ||
+    typeof raw.key.fromMe !== 'boolean' ||
+    raw.key.fromMe !== requested.fromMe
+  ) return false;
+
+  const requestedChats = addressSet(requested, ['remoteJid', 'remoteJidAlt']);
+  const storedChats = addressSet(raw.key, ['remoteJid', 'remoteJidAlt']);
+  if (!requestedChats.size || !intersects(requestedChats, storedChats)) return false;
+
+  const isGroup = [...requestedChats].some((jid) => jid.endsWith('@g.us'));
+  if (isGroup) {
+    const requestedParticipants = addressSet(requested, ['participant', 'participantAlt']);
+    const storedParticipants = addressSet(raw.key, ['participant', 'participantAlt']);
+    if (requestedParticipants.size && !intersects(requestedParticipants, storedParticipants)) return false;
+  }
+  return true;
+}
+
 export class MessageCache {
   /**
    * @param {object} db
@@ -50,7 +92,7 @@ export class MessageCache {
     this.maxRaw = maxRaw;
     /** @type {Map<string, object>} stanzaId -> raw Baileys message */
     this.raw = new Map();
-    this.stats = { stored: 0, hits: 0, misses: 0, pruned: 0 };
+    this.stats = { stored: 0, hits: 0, misses: 0, pruned: 0, messageHits: 0, messageMisses: 0 };
   }
 
   /**
@@ -59,8 +101,12 @@ export class MessageCache {
    * @param {string} sessionJid
    */
   store(raw, msg, sessionJid) {
-    if (!msg?.id) return;
-    if (msg.isBot) return; // our own messages are not interesting here
+    if (!msg?.id || !raw?.key) return;
+
+    // Keep the full protobuf only in memory: encrypted message edits require
+    // messageContextInfo.messageSecret, but it is never written to SQLite.
+    this.#rememberRaw(msg.id, raw);
+    if (msg.isBot) return; // own messages are kept only for scoped getMessage lookups
 
     const kind = msg.media?.type || (msg.text ? 'text' : 'unknown');
 
@@ -89,7 +135,6 @@ export class MessageCache {
         msg.timestamp * 1000
       );
 
-    this.#rememberRaw(msg.id, raw);
     this.stats.stored++;
   }
 
@@ -120,6 +165,20 @@ export class MessageCache {
       return null;
     }
     return hit.raw;
+  }
+
+  /**
+   * Baileys callback for message-secret lookups (encrypted edit decryption and
+   * resend). Return content only when id, direction and chat identity match.
+   */
+  getMessage(key) {
+    const raw = this.getRaw(key?.id);
+    if (!matchesMessageKey(raw, key) || !raw?.message) {
+      this.stats.messageMisses++;
+      return undefined;
+    }
+    this.stats.messageHits++;
+    return raw.message;
   }
 
   /**

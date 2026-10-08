@@ -93,8 +93,9 @@ export function formatPairingCode(code) {
 }
 
 export class WhatsAppConnection {
-  constructor({ config, logger }) {
+  constructor({ config, logger, cache = null }) {
     this.config = config;
+    this.cache = cache;
     this.logger = logger.child({ scope: 'whatsapp' });
     this.socket = null;
     this.saveCreds = null;
@@ -161,7 +162,10 @@ export class WhatsAppConnection {
       qrTimeout: 60_000,
       retryRequestDelayMs: 5000,
       maxMsgRetryCount: 5,
-      getMessage: async () => undefined,
+      // Keep original protobufs in the bounded in-memory cache so Baileys can
+      // decrypt secret-encrypted MESSAGE_EDIT envelopes. Cache lookups verify
+      // the message ID, conversation, and direction before returning content.
+      getMessage: async (key) => this.cache?.getMessage?.(key),
     });
 
     // Structural rate limiting — nothing can send around this.

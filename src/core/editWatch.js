@@ -91,7 +91,8 @@ export class EditWatch {
     );
 
     const record = this.cache?.getRecord?.(edit.stanzaId) || null;
-    const before = record?.text ?? null;
+    const rawOriginal = this.cache?.getRaw?.(edit.stanzaId) || null;
+    const before = record?.text ?? (rawOriginal ? extractText(rawOriginal.message) || null : null);
     this.logger.info(`edit event detected${before === null ? ' (original not cached)' : ''}`);
     const profile = this.contacts.profile(senderJid);
     const at = Date.now();

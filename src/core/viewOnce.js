@@ -7,21 +7,16 @@
  * payload; those events are recorded and reported, but the missing media cannot
  * be reconstructed by this process.
  *
- * The linked-device session is independent of the handset's power and network
- * state. There are two important limits:
- *   • If the bot process is down, the media URL may be expired by the time
- *     WhatsApp redelivers the event after reconnect. We report that as expired.
- *   • If WhatsApp sends only an unavailable marker for this companion profile,
- *     no media bytes exist in the event to download. We report that separately.
- * In both cases the event is persisted and an alert is attempted when the
- * linked socket has a self-JID.
+ * If the primary phone later sends an explicit 👀 reply to the original, the
+ * quotedMessage can carry the media key/url. That owner-triggered fallback is
+ * handled separately; the bot never downloads arbitrary quoted media.
  *
- * Timing matters: the media is fetched the moment the message arrives, before
- * anything else touches it, because WhatsApp invalidates view-once blobs once
- * they have been "seen".
+ * Timing matters: the media is fetched the moment it arrives, before anything
+ * else touches it, because WhatsApp can invalidate short-lived media URLs.
  */
 
 import { normalizeJid, isGroupJid, describeChat } from './jid.js';
+import { normalize, unwrap } from './message.js';
 import { flag, setFlag } from '../database/index.js';
 import { describeMedia, mediaIcon } from '../lib/media.js';
 
@@ -34,6 +29,7 @@ export class ViewOnceCapture {
    * @param {object} deps
    * @param {object} deps.socket
    * @param {object} deps.db
+   * @param {import('./messageCache.js').MessageCache} [deps.cache]
    * @param {import('./contactStore.js').ContactStore} deps.contacts
    * @param {import('./sessionRegistry.js').SessionRegistry} deps.registry
    * @param {import('./mediaStore.js').MediaStore} deps.mediaStore
@@ -45,6 +41,7 @@ export class ViewOnceCapture {
   constructor({
     socket,
     db,
+    cache = null,
     contacts,
     registry,
     mediaStore,
@@ -55,6 +52,7 @@ export class ViewOnceCapture {
   }) {
     this.socket = socket;
     this.db = db;
+    this.cache = cache;
     this.contacts = contacts;
     this.registry = registry;
     this.mediaStore = mediaStore;
@@ -93,7 +91,7 @@ export class ViewOnceCapture {
    * @returns {Promise<object|null>} the persisted record
    */
   async onMessage(raw, msg) {
-    if (!msg?.viewOnce) return null;
+    if (!msg?.viewOnce) return this.#recoverQuotedReply(raw, msg);
     if (!this.enabled()) {
       this.stats.detected++;
       return null;
@@ -123,16 +121,9 @@ export class ViewOnceCapture {
       error: null,
     };
 
-    // Fetch IMMEDIATELY — the blob is invalidated once the message is seen.
-    //
-    // If the envelope carried no media payload at all, do not attempt a
-    // download: there is nothing to fetch, and letting it fail would record
-    // the event as "expired", which tells the owner the wrong thing.
+    // Fetch immediately while WhatsApp still serves the media URL.
     let buffer = null;
     if (!msg.media) {
-      // Baileys v7 marks a server-side unavailable view-once message on the
-      // message key, without a media envelope. Do not mislabel this as an
-      // expired download: no payload was delivered to this linked device.
       const withheld = raw?.key?.isViewOnce === true;
       record.status = withheld ? 'unavailable' : 'empty';
       record.error = withheld
@@ -146,9 +137,7 @@ export class ViewOnceCapture {
       );
     } else {
       try {
-        buffer = this.downloader
-          ? await this.downloader(raw)
-          : await this.socket.downloadMediaMessage(raw);
+        buffer = await this.#download(raw);
       } catch (err) {
         record.status = 'expired';
         record.error = err.message;
@@ -182,8 +171,101 @@ export class ViewOnceCapture {
     return record;
   }
 
+  async #download(raw) {
+    if (this.downloader) return this.downloader(raw);
+
+    // Baileys exposes downloadMediaMessage as a package utility, not as a
+    // makeWASocket method. Pass the socket's supported media-reupload hook.
+    const { downloadMediaMessage } = await import('@whiskeysockets/baileys');
+    const context = { logger: this.logger };
+    if (typeof this.socket?.updateMediaMessage === 'function') {
+      context.reuploadRequest = (message) => this.socket.updateMediaMessage(message);
+    }
+    return downloadMediaMessage(raw, 'buffer', {}, context);
+  }
+
+  #quotedMessage(raw) {
+    const { inner } = unwrap(raw?.message);
+    const contextInfo =
+      inner?.extendedTextMessage?.contextInfo ||
+      inner?.imageMessage?.contextInfo ||
+      inner?.videoMessage?.contextInfo ||
+      inner?.audioMessage?.contextInfo ||
+      inner?.documentMessage?.contextInfo ||
+      inner?.stickerMessage?.contextInfo ||
+      null;
+    if (!contextInfo?.stanzaId || !contextInfo.quotedMessage) return null;
+
+    return {
+      key: {
+        remoteJid: contextInfo.remoteJid || raw.key?.remoteJid,
+        remoteJidAlt: contextInfo.remoteJidAlt,
+        id: contextInfo.stanzaId,
+        fromMe: false,
+        participant: contextInfo.participant || undefined,
+        participantAlt: contextInfo.participantAlt || undefined,
+      },
+      message: contextInfo.quotedMessage,
+      messageTimestamp: raw.messageTimestamp,
+      pushName: raw.pushName,
+    };
+  }
+
+  async #recoverQuotedReply(raw, msg) {
+    // The proven fallback from other Baileys bots is a reply made on the
+    // primary phone: its quotedMessage can carry the media key/url. Require an
+    // explicit owner-authored 👀 reply; never download arbitrary quoted media.
+    if (!this.enabled() || raw?.key?.fromMe !== true || String(msg?.text || '').trim() !== '👀') return null;
+
+    const quotedRaw = this.#quotedMessage(raw);
+    if (!quotedRaw?.key?.id) return null;
+    const quoted = normalize(quotedRaw);
+    const markerRecord = this.cache?.getRecord?.(quotedRaw.key.id);
+    const wasViewOnce = quoted.viewOnce || Number(markerRecord?.view_once) === 1;
+    if (!wasViewOnce || !quoted.media) return null;
+
+    const alreadyCaptured = this.db
+      .prepare('SELECT 1 FROM view_once WHERE stanza_id = ? AND media_bytes > 0 LIMIT 1')
+      .get(quotedRaw.key.id);
+    if (alreadyCaptured) return null;
+
+    this.logger.info('owner requested view-once recovery from a quoted phone reply');
+    return this.onMessage(quotedRaw, { ...quoted, viewOnce: true });
+  }
+
   #persist(r) {
     try {
+      const sessionJid = this.selfJid() || '';
+      const existing = this.db
+        .prepare(
+          'SELECT id, media_bytes FROM view_once WHERE stanza_id = ? AND session_jid = ? ORDER BY id DESC LIMIT 1'
+        )
+        .get(r.stanzaId, sessionJid);
+      if (existing?.media_bytes > 0 && !r.mediaBytes) return;
+      if (existing) {
+        this.db
+          .prepare(
+            `UPDATE view_once SET chat_jid = ?, sender_jid = ?, sender_name = ?, sender_phone = ?,
+               sender_country = ?, kind = ?, caption = ?, media_path = ?, media_bytes = ?,
+               mimetype = ?, captured_at = ?, forwarded = 0 WHERE id = ?`
+          )
+          .run(
+            r.chatJid,
+            r.senderJid,
+            r.profile.name,
+            r.profile.phoneE164,
+            r.profile.countryName,
+            r.kind,
+            r.caption,
+            r.mediaPath,
+            r.mediaBytes,
+            r.mimetype,
+            r.at,
+            existing.id
+          );
+        return;
+      }
+
       this.db
         .prepare(
           `INSERT INTO view_once
@@ -194,7 +276,7 @@ export class ViewOnceCapture {
         )
         .run(
           r.stanzaId,
-          this.selfJid() || '',
+          sessionJid,
           r.chatJid,
           r.senderJid,
           r.profile.name,
@@ -292,6 +374,7 @@ export function formatViewOnce(r) {
   } else if (r.status === 'unavailable') {
     lines.push(
       '⚠️ *WhatsApp sent only the view-once marker; this linked device received no media to save.*',
+      'If it is still available on the primary phone, reply 👀 to the original there; the quoted copy may let the bot recover it.',
       r.caption ? `> ${r.caption}` : ''
     );
   } else {

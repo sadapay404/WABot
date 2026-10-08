@@ -194,6 +194,71 @@ test('cache: stores text durably and keeps the raw object for media', async () =
   assert.equal(r.mediaAvailable, false, 'a text message has no media to forward');
 });
 
+test('cache: getMessage preserves the edit secret in memory and fails closed across chats/directions', async () => {
+  const db = await getMemoryDb();
+  const cache = new MessageCache(db, quiet);
+  const secret = Buffer.alloc(32, 23);
+  const raw = rawMsg('EDIT-ORIGINAL', 'before', { jid: '12345@lid' });
+  raw.key.remoteJidAlt = MOM;
+  raw.message.messageContextInfo = { messageSecret: secret };
+  cache.store(raw, normMsg('EDIT-ORIGINAL', 'before'), SELF);
+
+  const request = {
+    id: 'EDIT-ORIGINAL',
+    remoteJid: MOM,
+    remoteJidAlt: '12345@lid',
+    fromMe: false,
+  };
+  assert.equal(cache.getMessage(request), raw.message, 'returns the original protobuf including messageContextInfo');
+  assert.equal(
+    cache.getMessage({ ...request, remoteJid: undefined, remoteJidAlt: MOM }),
+    raw.message,
+    'a matching remoteJidAlt alone is a sufficient chat identity'
+  );
+  assert.equal(cache.getMessage({ ...request, remoteJid: '12025550000@s.whatsapp.net', remoteJidAlt: undefined }), undefined);
+  assert.equal(cache.getMessage({ ...request, fromMe: true }), undefined);
+  const ambiguousDirection = rawMsg('EDIT-NO-DIRECTION', 'before');
+  delete ambiguousDirection.key.fromMe;
+  cache.store(ambiguousDirection, normMsg('EDIT-NO-DIRECTION', 'before'), SELF);
+  assert.equal(
+    cache.getMessage({ id: 'EDIT-NO-DIRECTION', remoteJid: MOM, fromMe: false }),
+    undefined,
+    'missing stored direction must not be mistaken for an incoming message'
+  );
+  assert.equal(cache.getRecord('EDIT-ORIGINAL').messageSecret, undefined, 'secret is never persisted to SQLite');
+});
+
+test('cache: keeps own messages only in volatile storage for edit-secret lookups', async () => {
+  const db = await getMemoryDb();
+  const cache = new MessageCache(db, quiet);
+  const raw = rawMsg('OWN-EDIT', 'before');
+  raw.key.fromMe = true;
+  raw.message.messageContextInfo = { messageSecret: Buffer.alloc(32, 41) };
+  cache.store(raw, { ...normMsg('OWN-EDIT', 'before'), isBot: true }, SELF);
+
+  assert.equal(cache.getMessage({ id: 'OWN-EDIT', remoteJid: MOM, fromMe: true }), raw.message);
+  assert.equal(cache.getRecord('OWN-EDIT'), null, 'own content is not added to the durable cache');
+});
+
+test('cache: getMessage checks the participant for group originals', async () => {
+  const db = await getMemoryDb();
+  const cache = new MessageCache(db, quiet);
+  const group = '120363000000000000@g.us';
+  const raw = rawMsg('GROUP-EDIT', 'before', { jid: group });
+  raw.key.participant = MOM;
+  raw.key.participantAlt = '12345@lid';
+  cache.store(raw, normMsg('GROUP-EDIT', 'before', { jid: group }), SELF);
+
+  assert.equal(
+    cache.getMessage({ id: 'GROUP-EDIT', remoteJid: group, participant: '12345@lid', fromMe: false }),
+    raw.message
+  );
+  assert.equal(
+    cache.getMessage({ id: 'GROUP-EDIT', remoteJid: group, participant: '15550000001@s.whatsapp.net', fromMe: false }),
+    undefined
+  );
+});
+
 test('cache: media is flagged as forwardable', async () => {
   const db = await getMemoryDb();
   const cache = new MessageCache(db, quiet);

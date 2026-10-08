@@ -47,9 +47,6 @@ function fakeSocket() {
     },
     async sendPresenceUpdate() {},
     async readMessages() {},
-    async downloadMediaMessage() {
-      return Buffer.from('fake-bytes');
-    },
   };
 }
 
@@ -538,6 +535,29 @@ test('edits: a rewritten message is stored with both versions', async () => {
   assert.match(socket.sent.at(-1).content.text, /I love Mondays/);
 });
 
+test('edits: an own-message edit can diff against its volatile original', async () => {
+  const db = await getMemoryDb();
+  const socket = fakeSocket();
+  const cache = new MessageCache(db, quiet);
+  const contacts = new ContactStore(db, quiet);
+  const watch = new EditWatch({ socket, db, cache, contacts, logger: quiet, config: rigConfig() });
+  const sent = {
+    key: { remoteJid: MOM, fromMe: true, id: 'OWN-STANZA' },
+    message: { conversation: 'sent before edit' },
+  };
+  const { normalize } = await import('../src/core/message.js');
+  cache.store(sent, normalize(sent), SELF);
+
+  await watch.onUpdate({
+    key: { remoteJid: MOM, fromMe: true, id: 'OWN-STANZA' },
+    update: { message: { editedMessage: { message: { conversation: 'sent after edit' } } } },
+  });
+
+  const row = db.prepare('SELECT * FROM message_edits WHERE stanza_id = ?').get('OWN-STANZA');
+  assert.equal(row.before_text, 'sent before edit');
+  assert.equal(row.after_text, 'sent after edit');
+});
+
 // ── view-once capture ────────────────────────────────────────────────
 test('view-once: captured, archived and forwarded to the self-chat', async () => {
   const db = await getMemoryDb();
@@ -549,6 +569,7 @@ test('view-once: captured, archived and forwarded to the self-chat', async () =>
 
   const capture = new ViewOnceCapture({
     socket, db, contacts, registry: null, mediaStore: media, logger: quiet, config: rigConfig(),
+    downloader: async () => Buffer.from('fake-bytes'),
   });
 
   const raw = {
@@ -576,6 +597,31 @@ test('view-once: captured, archived and forwarded to the self-chat', async () =>
   assert.ok(alert, 'an alert must reach the self-chat');
   assert.equal(alert.jid, SELF, 'forwarded to the owner, not the sender');
   assert.match(alert.content.text, /Mom/);
+});
+
+test('view-once: production path calls Baileys package downloader, not a socket method', async () => {
+  const db = await getMemoryDb();
+  const socket = fakeSocket();
+  const capture = new ViewOnceCapture({
+    socket, db, contacts: new ContactStore(db, quiet), registry: null,
+    mediaStore: null, logger: quiet, config: rigConfig(),
+  });
+  const raw = {
+    key: { remoteJid: MOM, fromMe: false, id: 'VO-DOWNLOAD' },
+    message: {
+      viewOnceMessageV2: {
+        message: { imageMessage: { mimetype: 'image/jpeg' } },
+      },
+    },
+  };
+  const { normalize } = await import('../src/core/message.js');
+  const result = await capture.onMessage(raw, normalize(raw));
+
+  // This intentionally lacks a URL, so the real Baileys utility rejects it
+  // before network access. The error proves the package utility was called;
+  // the fake socket has no downloadMediaMessage method to mask API misuse.
+  assert.equal(result.status, 'expired');
+  assert.match(result.error, /imageMessage.*not a media message/);
 });
 
 test('view-once: an empty payload is recorded, never silently dropped', async () => {
@@ -629,6 +675,76 @@ test('view-once: Baileys unavailable marker is recorded and reported', async () 
   assert.ok(alert, 'the event alert is sent despite missing media');
   assert.equal(alert.jid, SELF);
   assert.match(alert.content.text, /linked device received no media/i);
+});
+
+test('view-once: an owner 👀 reply can recover quoted media after a marker-only event', async () => {
+  const db = await getMemoryDb();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nwb-media-'));
+  const socket = fakeSocket();
+  const cache = new MessageCache(db, quiet);
+  const contacts = new ContactStore(db, quiet);
+  const media = new MediaStore({ db, logger: quiet, dir: tmp });
+  const bytes = Buffer.from('quoted view-once bytes');
+  let downloads = 0;
+  const capture = new ViewOnceCapture({
+    socket, db, cache, contacts, registry: null, mediaStore: media,
+    logger: quiet, config: rigConfig(),
+    downloader: async () => { downloads++; return bytes; },
+  });
+  const { normalize } = await import('../src/core/message.js');
+
+  const marker = {
+    key: { remoteJid: MOM, fromMe: false, id: 'VO-QUOTE', isViewOnce: true },
+    messageTimestamp: Math.floor(Date.now() / 1000),
+  };
+  const markerMessage = normalize(marker);
+  cache.store(marker, markerMessage, SELF);
+  const unavailable = await capture.onMessage(marker, markerMessage);
+  assert.equal(unavailable.status, 'unavailable');
+  assert.equal(downloads, 0);
+
+  const reply = {
+    key: { remoteJid: MOM, fromMe: true, id: 'OWNER-QUOTE-REPLY' },
+    message: {
+      extendedTextMessage: {
+        text: '👀',
+        contextInfo: {
+          stanzaId: 'VO-QUOTE',
+          remoteJid: MOM,
+          quotedMessage: {
+            viewOnceMessageV2: {
+              message: {
+                imageMessage: {
+                  mimetype: 'image/jpeg',
+                  fileLength: bytes.length,
+                  url: 'https://media.invalid/quoted-image',
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+
+  const nonOwnerReply = {
+    ...reply,
+    key: { ...reply.key, fromMe: false },
+  };
+  await capture.onMessage(nonOwnerReply, normalize(nonOwnerReply));
+  assert.equal(downloads, 0, 'a contact’s 👀 message must not trigger recovery');
+
+  const recovered = await capture.onMessage(reply, normalize(reply));
+  assert.equal(recovered.status, 'captured');
+  assert.equal(downloads, 1);
+  assert.equal(capture.stats.captured, 1);
+  const row = db.prepare('SELECT * FROM view_once WHERE stanza_id = ?').get('VO-QUOTE');
+  assert.equal(row.media_bytes, bytes.length);
+  assert.ok(row.media_path && fs.existsSync(row.media_path));
+  assert.equal(socket.sent.filter((s) => s.content.image).length, 1);
+
+  await capture.onMessage(reply, normalize(reply));
+  assert.equal(downloads, 1, 'a successful recovery must not download the same quote again');
 });
 
 // ── mock harness integrity ───────────────────────────────────────────
