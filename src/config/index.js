@@ -129,6 +129,17 @@ export function buildConfig(overrides = {}) {
       // The window the per-minute budget is measured over. Configurable so the
       // throttling behaviour can actually be asserted on in tests.
       rateLimitWindowMs: int(process.env.RATE_LIMIT_WINDOW_MS, 60000),
+      // Halt before the Nth similar text/caption send to one destination in
+      // this window. Bounds prevent accidental misconfiguration from disabling
+      // the breaker or retaining an excessively long history.
+      outboundLoopThreshold: Math.max(
+        2,
+        Math.min(25, int(process.env.OUTBOUND_LOOP_THRESHOLD, 5))
+      ),
+      outboundLoopWindowMs: Math.max(
+        1_000,
+        Math.min(3_600_000, int(process.env.OUTBOUND_LOOP_WINDOW_MS, 60_000))
+      ),
       queueConcurrency: Math.max(1, int(process.env.QUEUE_CONCURRENCY, 1)),
       typingIndicator: bool(process.env.TYPING_INDICATOR, true),
       observeAllowReplyToOwner: bool(process.env.OBSERVE_ALLOW_REPLY_TO_OWNER, true),

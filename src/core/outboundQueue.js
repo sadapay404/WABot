@@ -1,8 +1,52 @@
+import { normalizeJid } from './jid.js';
+
+const DEFAULT_LOOP_THRESHOLD = 5;
+const MAX_LOOP_THRESHOLD = 25;
+const DEFAULT_LOOP_WINDOW_MS = 60_000;
+const MAX_LOOP_WINDOW_MS = 3_600_000;
+const LOOP_HISTORY_MAX_DESTINATIONS = 500;
+const LOOP_MIN_TOKENS_FOR_FUZZY_MATCH = 3;
+const LOOP_TOKEN_OVERLAP_THRESHOLD = 0.8;
+
+function boundedInteger(value, fallback, minimum, maximum) {
+  const number = Number(value);
+  return Math.min(maximum, Math.max(minimum, Number.isFinite(number) ? Math.trunc(number) : fallback));
+}
+
+function outboundText(content) {
+  if (typeof content === 'string') return normalizeLoopText(content.slice(0, 2_000));
+  if (!content || typeof content !== 'object') return '';
+  const text = [content.text, content.caption]
+    .filter((part) => typeof part === 'string')
+    .join(' ')
+    .slice(0, 2_000);
+  return normalizeLoopText(text);
+}
+
+function normalizeLoopText(text) {
+  return String(text)
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\p{P}\p{Z}\s]+/gu, ' ')
+    .trim();
+}
+
+/** Exact normalized match, or at least 80% token overlap for texts with 3+ tokens. */
+function similarLoopText(left, right) {
+  if (left === right) return true;
+  const a = new Set(left.split(' ').filter(Boolean));
+  const b = new Set(right.split(' ').filter(Boolean));
+  if (Math.min(a.size, b.size) < LOOP_MIN_TOKENS_FOR_FUZZY_MATCH) return false;
+  let common = 0;
+  for (const token of a) if (b.has(token)) common++;
+  return common / Math.min(a.size, b.size) >= LOOP_TOKEN_OVERLAP_THRESHOLD;
+}
+
 /**
  * Nexus-WA — outbound queue.
  *
  * Every message the bot sends goes through here, including scheduled ones, so
- * nothing can bypass the pacing. Three things it does that a raw socket does
+ * nothing can bypass the pacing. Four things it does that a raw socket does
  * not:
  *
  *   1. serialises sends (concurrency 1) — bursts are the loudest signal an
@@ -10,6 +54,8 @@
  *   2. enforces a per-chat per-minute budget
  *   3. shows a typing/composing presence and waits a beat proportional to the
  *      message length, so replies look like they were typed by a person
+ *   4. trips a loop breaker before the Nth similar text/caption reaches the
+ *      same destination within its safety window
  *
  * It wraps the socket, so callers keep using `sock.sendMessage(...)` and the
  * protection is structural rather than a convention someone can forget.
@@ -30,26 +76,44 @@ export class OutboundQueue {
     this.windowMs = Math.max(50, config.safety.rateLimitWindowMs || 60000);
     this.concurrency = Math.max(1, config.safety.queueConcurrency);
     this.typing = config.safety.typingIndicator;
+    this.loopThreshold = boundedInteger(
+      config.safety.outboundLoopThreshold,
+      DEFAULT_LOOP_THRESHOLD,
+      2,
+      MAX_LOOP_THRESHOLD
+    );
+    this.loopWindowMs = boundedInteger(
+      config.safety.outboundLoopWindowMs,
+      DEFAULT_LOOP_WINDOW_MS,
+      1_000,
+      MAX_LOOP_WINDOW_MS
+    );
 
     /** Kill-switch state. When true nothing leaves the process. */
     this.halted = false;
+    this.haltReason = 'kill-switch';
     /** One-shot passes through the kill-switch (see allowOnce). */
     this.escape = 0;
 
     /** @type {Map<string, number[]>} jid -> send timestamps */
     this.windows = new Map();
+    /** Recent normalized text per destination; size-bounded and lazily expired. */
+    this.loopHistory = new Map();
     this.queue = [];
     this.active = 0;
-    this.stats = { sent: 0, throttledMs: 0, dropped: 0, typing: 0 };
+    this.stats = { sent: 0, throttledMs: 0, dropped: 0, typing: 0, loopBreakerTrips: 0 };
+    this.logger.info(
+      `outbound loop breaker active (${this.loopThreshold} similar messages / ${Math.round(this.loopWindowMs / 1000)}s)`
+    );
   }
 
-  /** Wrap a socket so sendMessage is rate-limited. Mutates and returns it. */
+  /** Wrap a socket with outbound pacing and loop protection. */
   attach() {
     const original = this.socket.sendMessage.bind(this.socket);
     const self = this;
 
     this.socket.sendMessage = function queuedSendMessage(jid, content, options) {
-      return self.#enqueue(() => original(jid, content, options), jid);
+      return self.#enqueue(() => original(jid, content, options), jid, content);
     };
 
     this.socket.__outboundQueue = this;
@@ -63,20 +127,21 @@ export class OutboundQueue {
     return win.length < this.limitPerMin;
   }
 
-  #enqueue(task, jid) {
+  #enqueue(task, jid, content) {
     return new Promise((resolve, reject) => {
+      let bypassLoopBreaker = false;
       if (this.halted) {
-        // A single explicit pass lets a command confirm the halt it just
-        // caused. Without it `.panic` engages and then cannot tell the owner
-        // it engaged — so they have no way to know whether to send `resume`.
+        // A single explicit pass lets `.panic` confirm its halt and lets the
+        // loop breaker deliver its owner alert without reopening general sends.
         if (this.escape > 0) {
           this.escape--;
+          bypassLoopBreaker = true;
         } else {
           this.stats.dropped++;
-          return reject(new Error('outbound halted by kill-switch'));
+          return reject(new Error(`outbound halted by ${this.haltReason}`));
         }
       }
-      this.queue.push({ task, jid, resolve, reject });
+      this.queue.push({ task, jid, content, bypassLoopBreaker, resolve, reject });
       this.#pump();
     });
   }
@@ -85,22 +150,23 @@ export class OutboundQueue {
    * Panic stop. Drops everything queued and refuses new sends until resume().
    * @returns {number} how many queued messages were discarded
    */
-  halt() {
+  halt(reason = 'kill-switch') {
     this.halted = true;
+    this.haltReason = reason;
     const dropped = this.queue.length;
     const pending = this.queue.splice(0, this.queue.length);
     for (const item of pending) {
       this.stats.dropped++;
-      item.reject(new Error('outbound halted by kill-switch'));
+      item.reject(new Error(`outbound halted by ${reason}`));
     }
-    this.logger.warn(`KILL-SWITCH engaged — dropped ${dropped} queued message(s)`);
+    this.logger.warn(`${reason.toUpperCase().replaceAll('-', ' ')} engaged — dropped ${dropped} queued message(s)`);
     return dropped;
   }
 
   /**
-   * Let exactly one further send through the kill-switch. Used by the command
-   * that engages the switch so it can confirm itself to the owner. Deliberately
-   * a single message — it is not a bypass for bulk sends.
+   * Let exactly one further send through the kill-switch for an owner
+   * confirmation/alert. Deliberately a single message — not a bypass for bulk
+   * sends.
    */
   allowOnce() {
     this.escape++;
@@ -108,8 +174,69 @@ export class OutboundQueue {
 
   resume() {
     this.halted = false;
+    this.haltReason = 'kill-switch';
     this.escape = 0;
     this.logger.info('kill-switch released — outbound resumed');
+  }
+
+  #checkLoop(item) {
+    const text = outboundText(item.content).slice(0, 1_000);
+    const destination = normalizeJid(item.jid);
+    if (!text || !destination) return null;
+
+    const now = Date.now();
+    const recent = (this.loopHistory.get(destination) || [])
+      .filter((entry) => now - entry.at <= this.loopWindowMs);
+    const matching = recent.filter((entry) => similarLoopText(text, entry.text)).length;
+
+    if (matching >= this.loopThreshold - 1) {
+      this.loopHistory.set(destination, recent);
+      return { destination, count: matching + 1 };
+    }
+
+    if (!this.loopHistory.has(destination) && this.loopHistory.size >= LOOP_HISTORY_MAX_DESTINATIONS) {
+      this.loopHistory.delete(this.loopHistory.keys().next().value);
+    }
+    recent.push({ text, at: now });
+    // Keep enough history for non-consecutive repeats without allowing an
+    // unusually chatty destination to grow memory without bound.
+    const maxPerDestination = Math.max(20, this.loopThreshold * 2);
+    if (recent.length > maxPerDestination) recent.splice(0, recent.length - maxPerDestination);
+    this.loopHistory.delete(destination);
+    this.loopHistory.set(destination, recent);
+    return null;
+  }
+
+  async #tripLoopBreaker(item, { destination, count }) {
+    this.stats.loopBreakerTrips++;
+    this.stats.dropped++;
+    this.halt('loop-breaker');
+    item.reject(new Error('outbound loop breaker engaged; outbound halted'));
+    this.logger.error(
+      `outbound loop breaker engaged: blocked similar message ${count} to ${destination} ` +
+        `within ${this.loopWindowMs}ms`
+    );
+
+    const ownerJid =
+      normalizeJid(this.socket?.user?.id) || normalizeJid(this.config?.safety?.ownerJids?.[0]);
+    if (!ownerJid) {
+      this.logger.error('loop breaker stopped outbound traffic but could not alert owner (no owner JID available)');
+      return;
+    }
+
+    this.allowOnce();
+    const seconds = Math.ceil(this.loopWindowMs / 1_000);
+    try {
+      await this.socket.sendMessage(ownerJid, {
+        text:
+          `🛑 Outbound loop breaker engaged.\n\n` +
+          `Blocked similar message ${count} to ${destination} within ${seconds}s. ` +
+          `Further sends are halted. Fix the source, then run ".panic resume" or restart Nexus-WA.\n` +
+          `Message text is not included in this alert.`,
+      });
+    } catch (error) {
+      this.logger.error(`loop breaker owner alert failed: ${error.message}`);
+    }
   }
 
   async #pump() {
@@ -128,6 +255,14 @@ export class OutboundQueue {
         this.queue.unshift(item);
         await sleep(wait);
         continue;
+      }
+
+      if (!item.bypassLoopBreaker) {
+        const trip = this.#checkLoop(item);
+        if (trip) {
+          await this.#tripLoopBreaker(item, trip);
+          continue;
+        }
       }
 
       this.active++;

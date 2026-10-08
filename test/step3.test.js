@@ -397,6 +397,80 @@ test('kill-switch: resume clears the pass and lets normal traffic through', asyn
   assert.equal(socket.sent.length, 2);
 });
 
+test('loop breaker: similar sends halt queued traffic and alert the owner', async () => {
+  const socket = fakeSocket();
+  const config = rigConfig();
+  config.safety.typingIndicator = false;
+  config.safety.outboundLoopThreshold = 3;
+  config.safety.outboundLoopWindowMs = 60_000;
+  const q = new OutboundQueue(socket, config, quiet);
+  q.attach();
+
+  // These enter the queue together: two get through, the third (similar but
+  // not byte-identical) trips the breaker, and the fourth remains undelivered.
+  const results = await Promise.allSettled([
+    socket.sendMessage(MOM, { text: 'Repeated sync failed for account 123' }),
+    socket.sendMessage(MOM, { caption: 'Repeated sync failed for account 456' }),
+    socket.sendMessage(MOM, { text: 'Repeated sync failed for account 789' }),
+    socket.sendMessage(MOM, { text: 'Repeated sync failed for account 999' }),
+  ]);
+
+  assert.deepEqual(results.map((result) => result.status), ['fulfilled', 'fulfilled', 'rejected', 'rejected']);
+  assert.match(results[2].reason.message, /loop breaker/i);
+  assert.equal(socket.sent.filter((entry) => entry.jid === MOM).length, 2);
+  const alert = socket.sent.find((entry) => entry.jid === SELF && /loop breaker/i.test(entry.content.text));
+  assert.ok(alert, 'the owner self-chat receives an alert');
+  assert.match(alert.content.text, /60s/);
+  assert.match(alert.content.text, /panic resume/);
+  assert.equal(q.depth().halted, true);
+  assert.equal(q.depth().loopBreakerTrips, 1);
+
+  // Recovery is the same explicit operation used by `.panic`; after fixing
+  // the source, a distinct message passes through normally.
+  q.resume();
+  await socket.sendMessage(MOM, { text: 'A healthy independent status update' });
+  assert.equal(q.depth().halted, false);
+});
+
+test('loop breaker: thresholds are per destination and distinct messages still send', async () => {
+  const socket = fakeSocket();
+  const config = rigConfig();
+  config.safety.typingIndicator = false;
+  config.safety.outboundLoopThreshold = 3;
+  const q = new OutboundQueue(socket, config, quiet);
+  q.attach();
+  const OTHER = '12025550199@s.whatsapp.net';
+
+  await socket.sendMessage(MOM, { text: 'Repeated sync failed for account 123' });
+  await socket.sendMessage(OTHER, { text: 'Repeated sync failed for account 123' });
+  await socket.sendMessage(MOM, { text: 'Repeated sync failed for account 456' });
+  await socket.sendMessage(OTHER, { text: 'Repeated sync failed for account 456' });
+  await socket.sendMessage(MOM, { text: 'A completely different status update' });
+
+  assert.equal(q.depth().halted, false);
+  assert.equal(socket.sent.length, 5);
+  assert.equal(q.depth().loopBreakerTrips, 0);
+});
+
+test('loop breaker: sends outside the configured window do not count', async () => {
+  const socket = fakeSocket();
+  const config = rigConfig();
+  config.safety.typingIndicator = false;
+  config.safety.outboundLoopThreshold = 3;
+  config.safety.outboundLoopWindowMs = 1_000;
+  const q = new OutboundQueue(socket, config, quiet);
+  q.attach();
+
+  await socket.sendMessage(MOM, { text: 'Repeated sync failed for account 123' });
+  await socket.sendMessage(MOM, { text: 'Repeated sync failed for account 123' });
+  await new Promise((resolve) => setTimeout(resolve, 1_050));
+  await socket.sendMessage(MOM, { text: 'Repeated sync failed for account 123' });
+
+  assert.equal(socket.sent.length, 3);
+  assert.equal(q.depth().halted, false);
+  assert.equal(q.depth().loopBreakerTrips, 0);
+});
+
 // ── FTS ──────────────────────────────────────────────────────────────
 test('search: the FTS index is readable, not just indexable', async () => {
   // Regression: an external-content FTS5 table whose columns do not match the

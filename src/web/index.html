@@ -216,6 +216,7 @@ function renderRuntime(s) {
       <tr><td>Plugin errors</td><td class="num">${fmt(d.errors)}</td></tr>
       <tr><td>Queue depth</td><td class="num">${fmt(q.queued)} pending</td></tr>
       <tr><td>Sent via queue</td><td class="num">${fmt(q.sent)}</td></tr>
+      <tr><td>Outbound loop breaker</td><td class="num">${q.halted ? 'HALTED' : 'armed'} · ${fmt(q.loopBreakerTrips)} trip(s)</td></tr>
       <tr><td>Throttle time</td><td class="num">${fmt(q.throttledMs)} ms</td></tr>
       <tr><td>Message cache</td><td class="num">${fmt(s.cache.rows)} rows / ${fmt(s.cache.raw)} raw</td></tr>
       <tr><td>Telegram panel</td><td class="num">${s.telegram.enabled ? 'on' : 'off'}</td></tr>

@@ -84,6 +84,7 @@ it on, keep it to one narrow chat.
 |---|---|---|---|---|
 | **Health check endpoint** | S | none | ✅ | `/healthz`, unauthenticated, for the PaaS liveness probe. |
 | **Panic kill-switch** | S | none | ✅ | `.panic` drops the outbound queue and refuses new sends. `.panic resume` releases it. An unrecognised argument does **not** engage it. |
+| **Outbound loop breaker** | S | none | 🟡 | Blocks the 5th normalized-exact or ≥80%-token-overlap text/caption send (3+ tokens) to one destination within 60s; halts the queue and alerts the self-chat. Tune with `OUTBOUND_LOOP_THRESHOLD` and `OUTBOUND_LOOP_WINDOW_MS`; inspect the cause before `.panic resume`. |
 | **Audit log** | S | none | ✅ | `.audit [n]` — who did what, newest first. |
 | **Session backup** | M | low | ✅ | `.backup <passphrase>` → AES-256-GCM blob of `data/auth` + the DB. Passphrase is never stored, and a wrong passphrase is deliberately indistinguishable from a corrupt file. |
 | **Rate-limit anomaly alert** | S | none | ⬜ | Warn when outbound volume spikes — a loop is how accounts die. |
@@ -98,7 +99,6 @@ Things worth doing that were not in the original list.
 
 | Idea | Effort | Risk | Notes |
 |---|---|---|---|
-| **Outbound loop breaker** | S | none | Detect *self*-reinforcing sends: same destination + similar text N times in a window → halt and alert. This is the failure mode that actually gets accounts banned, and nothing currently catches it. |
 | **Digest scheduling built in** | S | none | `.digest daily 8am` registers the recurring job directly, instead of making you compose `.schedule every day 8am \| /digest`. |
 | **Retention policy** | S | none | `RETENTION_DAYS` — prune `message_cache`, `media_archive` and `view_once` older than N days. Right now the database only grows. |
 | **Restore-from-backup command** | S | none | `.backup restore <id> <passphrase>` over Telegram. Currently restore is code-complete but only reachable from a shell. |

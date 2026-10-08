@@ -63,10 +63,11 @@ linked to is recorded with its country, role (burner/primary), status,
 message counts, connect count and first/last seen. The web dashboard renders
 all of it plus deletions, plugins, contacts, queue depth and a live log tail.
 
-**Safety shield.** A serial outbound queue with a per-chat per-minute budget
-and simulated typing presence, an owner-only whitelist that fails closed,
-silent rejection of strangers, per-command cooldowns, and an `observe` mode
-that reads real traffic while blocking all outbound to non-owners.
+**Safety shield.** A serial outbound queue with a per-chat per-minute budget,
+a repeated-text loop breaker that halts and alerts the owner, and simulated
+typing presence; an owner-only whitelist that fails closed, silent rejection
+of strangers, per-command cooldowns, and an `observe` mode that reads real
+traffic while blocking all outbound to non-owners.
 
 **Remote control.** A single-tenant Telegram panel: `/status`, `/sessions`,
 `/logs`, `/deletes`, `/plugins`, `/qr`, `/mode`, `/antidelete`, `/kill`.

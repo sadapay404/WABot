@@ -296,6 +296,29 @@ test('config: an unknown mode degrades to dry-run, never to live', () => {
   assert.equal(config.risk, 0);
 });
 
+test('config: outbound loop-breaker bounds cannot be disabled or stretched indefinitely', () => {
+  const names = ['OUTBOUND_LOOP_THRESHOLD', 'OUTBOUND_LOOP_WINDOW_MS'];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  try {
+    process.env.OUTBOUND_LOOP_THRESHOLD = '1';
+    process.env.OUTBOUND_LOOP_WINDOW_MS = '0';
+    let config = buildConfig({ mode: 'dry-run' });
+    assert.equal(config.safety.outboundLoopThreshold, 2);
+    assert.equal(config.safety.outboundLoopWindowMs, 1_000);
+
+    process.env.OUTBOUND_LOOP_THRESHOLD = '999';
+    process.env.OUTBOUND_LOOP_WINDOW_MS = '999999999';
+    config = buildConfig({ mode: 'dry-run' });
+    assert.equal(config.safety.outboundLoopThreshold, 25);
+    assert.equal(config.safety.outboundLoopWindowMs, 3_600_000);
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
+});
+
 // ══════════════════════════════════════════════════════════════════
 const stripAnsi = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '');
 
