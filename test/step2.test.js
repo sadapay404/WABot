@@ -210,6 +210,27 @@ test('cache: media is flagged as forwardable', async () => {
   assert.equal(r.mediaAvailable, true);
 });
 
+test('cache: converts protobuf Long media lengths before the SQLite bind', async () => {
+  const db = await getMemoryDb();
+  const cache = new MessageCache(db, quiet);
+  const fileLength = {
+    low: 48_213,
+    high: 0,
+    unsigned: true,
+    toNumber() { return 48_213; },
+  };
+
+  cache.store(
+    rawMsg('S3', ''),
+    normMsg('S3', '', {
+      media: { type: 'image', key: 'imageMessage', mimetype: 'image/jpeg', payload: { fileLength } },
+    }),
+    SELF
+  );
+
+  assert.equal(db.prepare('SELECT media_bytes FROM message_cache WHERE id = ?').get('S3').media_bytes, 48_213);
+});
+
 test('cache: evicts the raw tier past maxRaw, keeps the durable tier', async () => {
   const db = await getMemoryDb();
   const cache = new MessageCache(db, quiet, { maxRaw: 2 });

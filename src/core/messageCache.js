@@ -21,6 +21,20 @@ import { normalizeJid } from './jid.js';
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_RAW = 1000;
 
+/**
+ * protobufjs can expose uint64 media sizes as Long objects. node:sqlite accepts
+ * numbers, not those objects, so convert the value before binding it.
+ */
+function sqliteInteger(value) {
+  if (value == null) return null;
+  try {
+    const n = typeof value?.toNumber === 'function' ? value.toNumber() : Number(value);
+    return Number.isSafeInteger(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
 export class MessageCache {
   /**
    * @param {object} db
@@ -69,7 +83,7 @@ export class MessageCache {
         msg.text || null,
         msg.media?.mimetype || null,
         msg.media?.seconds ?? null,
-        msg.media?.payload?.fileLength ?? null,
+        sqliteInteger(msg.media?.payload?.fileLength),
         msg.media ? 1 : 0,
         msg.viewOnce ? 1 : 0,
         msg.timestamp * 1000

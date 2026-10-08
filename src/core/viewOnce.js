@@ -161,6 +161,7 @@ export class ViewOnceCapture {
       record.status = 'captured';
       record.mediaBytes = buffer.length;
       this.stats.captured++;
+      this.logger.info(`view-once media captured (${record.mediaBytes} bytes)`);
       const saved = this.mediaStore?.save({
         buffer,
         kind,
