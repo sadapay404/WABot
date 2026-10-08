@@ -82,6 +82,7 @@ export function shouldRequestPairingCode({ qr, pairingNumber, registered, reques
 
 /** Pair codes need Baileys' canonical platform descriptor, not our app brand. */
 export function connectionBrowser(B, config) {
+  if (config.wa.companionProfile === 'smb_android') return B.Browsers.android('13');
   return config.wa.pairingNumber ? B.Browsers.ubuntu('Chrome') : config.wa.browser;
 }
 
@@ -126,6 +127,14 @@ export class WhatsAppConnection {
     const { state, saveCreds } = await useMultiFileAuthState(this.config.wa.sessionDir);
     this.saveCreds = saveCreds;
 
+    const companionProfile = this.config.wa.companionProfile || 'web';
+    if (companionProfile === 'smb_android' && state.creds?.me) {
+      throw new Error(
+        'WA_COMPANION_PROFILE=smb_android only applies during a fresh link. ' +
+          'Use a new WA_SESSION_DIR for the Business companion; the existing auth directory was not changed.'
+      );
+    }
+
     const version = await this.#version(B);
     const browser = connectionBrowser({ Browsers }, this.config);
 
@@ -134,6 +143,12 @@ export class WhatsAppConnection {
       version,
       logger: this.logger.child({ scope: 'baileys' }),
       browser,
+      // Baileys rc14 needs a small local patch for the Business-only SMB_ANDROID
+      // UserAgent/webInfo/CHROME registration combination.
+      nexusCompanionProfile: companionProfile,
+      ...(companionProfile === 'smb_android'
+        ? { nexusCompanionPlatformDisplay: 'Chrome (Ubuntu)' }
+        : {}),
       // The phone-number flow does not need a QR printed into the log. Keep
       // Baileys' legacy QR printer only as a fallback when neither pairing
       // number nor Telegram delivery is configured.
@@ -155,8 +170,9 @@ export class WhatsAppConnection {
     this.socket = socket;
     this.#wire(socket, DisconnectReason);
     this.logger.info(
-      `connecting… (registered platform: ${state.creds?.platform || 'not recorded'}; ` +
-        `requested profile: ${browser[0]}/${browser[1]}; session: ${this.config.wa.sessionDir}` +
+      `connecting… (account platform: ${state.creds?.platform || 'not recorded'}; ` +
+        `requested companion: ${companionProfile} (${browser[0]}/${browser[1]}); ` +
+        `session: ${this.config.wa.sessionDir}` +
         `${state.creds?.me ? ', resuming as ' + state.creds.me.id : ', fresh link'})`
     );
     return socket;

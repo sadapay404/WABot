@@ -67,6 +67,13 @@ export function buildConfig(overrides = {}) {
     wa: {
       pairingNumber: String(overrides.pairingNumber ?? process.env.WA_PAIRING_NUMBER ?? '')
         .replace(/[^\d]/g, ''),
+      // Opt-in only. smb_android is needed when creating a fresh companion for
+      // a WhatsApp Business account; it cannot retrofit an already linked WEB session.
+      companionProfile:
+        String(overrides.companionProfile ?? process.env.WA_COMPANION_PROFILE ?? 'web').trim().toLowerCase() ===
+        'smb_android'
+          ? 'smb_android'
+          : 'web',
       sessionDir: path.resolve(ROOT, process.env.WA_SESSION_DIR || './data/auth'),
       botName: process.env.WA_BOT_NAME || 'Nexus-WA',
       // 'burner' or 'primary' — recorded against the session so the dashboard

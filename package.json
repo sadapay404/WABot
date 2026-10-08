@@ -9,6 +9,7 @@
   },
   "main": "src/index.js",
   "scripts": {
+    "postinstall": "node scripts/patch-baileys-smb-android.mjs",
     "start": "node --disable-warning=ExperimentalWarning src/index.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch src/index.js",
     "preview": "node --disable-warning=ExperimentalWarning src/index.js --dry-run",

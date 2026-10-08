@@ -85,14 +85,31 @@ cannot fix. What happens during a gap:
 | **Messages sent to you** | Partial. WhatsApp replays recent history to linked devices on reconnect, but this is not guaranteed for everything. Do not treat the bot as a reliable archive of what arrived while it was down. |
 | **View-once media** | Captured only when WhatsApp delivers the media to this linked-device profile. Some profiles receive just a view-once marker; the bot records and alerts on that event but cannot recover bytes it never received. If the bot is offline, a short-lived blob may also expire before reconnect. |
 
-This branch currently requests Baileys' **Ubuntu/Chrome web profile** for phone-number
-pairing. Startup logs both the stored `registered platform` (when saved in the
-Baileys credentials) and the currently `requested profile`, so they are not
-confused. Baileys has an experimental Android-browser profile that may receive
-view-once media, but changing profile does not convert an already-registered
-device; it may require unlinking and pairing again. That is a separate decision:
-do not unlink a working session until you explicitly choose to test it, and
-WhatsApp Business accounts may behave differently.
+The default companion is Baileys' **Ubuntu/Chrome web profile**. `creds.platform`
+identifies the primary WhatsApp account platform (`smba`/`smbi`), not the linked
+companion type; logs now label it `account platform` separately from the
+requested companion profile.
+
+For WhatsApp Business view-once media, the upstream Baileys report [#2782](https://github.com/WhiskeySockets/Baileys/issues/2782)
+reports success with a *fresh* `SMB_ANDROID` companion, `webInfo` present,
+`companion_platform_id=CHROME (1)`, and `DeviceProps=ANDROID_PHONE`. Nexus-WA has
+an opt-in patch for this exact combination on Baileys `7.0.0-rc14`:
+
+- Set `WA_COMPANION_PROFILE=smb_android`.
+- Use a **new, separate** `WA_SESSION_DIR` (for example, the absolute path
+  `/data/data/com.termux/files/home/.nexus-wa/auth-smb`). This keeps the current
+  linked session and its auth files untouched. The app refuses to apply this
+  profile to an already-authenticated directory.
+- Run `npm install --omit=optional --no-audit --fund=false` once after updating;
+  the postinstall step applies the pinned Baileys patch.
+- Pair the new companion from the Business phone. The old linked device is not
+  removed. To roll back, stop the bot, restore the old `WA_SESSION_DIR` and set
+  `WA_COMPANION_PROFILE=web`.
+
+This is based on an upstream user's Business-account test, not a live test on
+your number. Use a spare test Business account first; linking the additional
+companion consumes one linked-device slot. Do not delete the old auth directory
+or remove the old linked device unless you later choose to do so.
 
 **Practical advice:** keep the phone at home on a charger when you can. If it
 has to travel, expect reminders to land late rather than on time.
@@ -144,7 +161,7 @@ capped at 60s) so a crash-loop cannot hammer WhatsApp's servers.
 ## Updating
 
 ```sh
-cd ~/nexus-wa && git pull && npm install --omit=optional && nexus restart
+cd ~/nexus-wa && git pull --ff-only && npm install --omit=optional --no-audit --fund=false && nexus restart
 ```
 
 Your database, session and notes live in `~/.nexus-wa`, outside the repo, so an

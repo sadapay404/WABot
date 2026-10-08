@@ -554,14 +554,60 @@ test('pairing code: request on the first fresh QR, never wait for open', () => {
   );
 });
 
-test('pairing code: uses Baileys canonical platform instead of the Nexus app label', async () => {
+test('pairing profile: defaults to web and preserves the canonical browser for pairing codes', async () => {
   const { Browsers } = await import('@whiskeysockets/baileys');
   const config = buildConfig({ mode: 'dry-run' });
+  assert.equal(config.wa.companionProfile, 'web');
   assert.deepEqual(config.wa.browser, ['Ubuntu', 'Chrome', '22.04.4']);
 
   config.wa.pairingNumber = '923067607949';
   config.wa.browser = ['Nexus-WA', 'Nexus-WA/0.1.0', '1.0.0'];
   assert.deepEqual(connectionBrowser({ Browsers }, config), ['Ubuntu', 'Chrome', '22.04.4']);
+});
+
+test('pairing profile: selects Android only for the explicit Business registration profile', async () => {
+  const { Browsers } = await import('@whiskeysockets/baileys');
+  const config = buildConfig({ mode: 'dry-run', companionProfile: 'smb_android' });
+  config.wa.pairingNumber = '923067607949';
+
+  assert.equal(config.wa.companionProfile, 'smb_android');
+  assert.deepEqual(connectionBrowser({ Browsers }, config), ['13', 'Android', '']);
+});
+
+test('Baileys SMB_ANDROID patch sends all reported Business registration fields', async () => {
+  const { Browsers, proto } = await import('@whiskeysockets/baileys');
+  const { generateLoginNode, generateRegistrationNode } = await import(
+    '../node_modules/@whiskeysockets/baileys/lib/Utils/validate-connection.js'
+  );
+  const { getCompanionPlatformId } = await import(
+    '../node_modules/@whiskeysockets/baileys/lib/Utils/companion-reg-client-utils.js'
+  );
+  const browser = Browsers.android('13');
+  const config = {
+    version: [2, 3000, 1043],
+    browser,
+    countryCode: 'PK',
+    syncFullHistory: false,
+    nexusCompanionProfile: 'smb_android',
+  };
+  const login = generateLoginNode('923001234567@s.whatsapp.net', config);
+  assert.equal(login.userAgent.platform, proto.ClientPayload.UserAgent.Platform.SMB_ANDROID);
+  assert.ok(login.webInfo, 'Business Android login must retain webInfo');
+  assert.equal(getCompanionPlatformId(browser), '1', 'pairing ID must be CHROME');
+
+  const key = Buffer.alloc(32, 7);
+  const registration = generateRegistrationNode(
+    {
+      registrationId: 123,
+      signedPreKey: { keyId: 1, keyPair: { public: key }, signature: Buffer.alloc(64, 8) },
+      signedIdentityKey: { public: key },
+    },
+    config
+  );
+  assert.equal(registration.userAgent.platform, proto.ClientPayload.UserAgent.Platform.SMB_ANDROID);
+  assert.ok(registration.webInfo, 'Business Android registration must retain webInfo');
+  const deviceProps = proto.DeviceProps.decode(registration.devicePairingData.deviceProps);
+  assert.equal(deviceProps.platformType, proto.DeviceProps.PlatformType.ANDROID_PHONE);
 });
 
 test('pairing code: display groups four-character halves without altering the value', () => {
