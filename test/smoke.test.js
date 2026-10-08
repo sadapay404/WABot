@@ -101,6 +101,21 @@ test('message.js: detects audio media for the transcribe pipeline', () => {
   assert.match(media.mimetype, /opus/);
 });
 
+test('message.js: recognizes Baileys unavailable and flat view-once markers', () => {
+  const unavailable = normalize({
+    key: { remoteJid: OWNER, fromMe: false, id: 'VO-MARKER', isViewOnce: true },
+  });
+  assert.equal(unavailable.viewOnce, true);
+  assert.equal(unavailable.media, null);
+
+  const flat = normalize({
+    key: { remoteJid: OWNER, fromMe: false, id: 'VO-FLAT' },
+    message: { imageMessage: { mimetype: 'image/jpeg', viewOnce: true } },
+  });
+  assert.equal(flat.viewOnce, true);
+  assert.equal(flat.media?.type, 'image');
+});
+
 test('message.js: parseCommand splits prefix, command and args', () => {
   const m = normalize(rawMessage('.schedule 10m | buy milk', { jid: OWNER }));
   const p = parseCommand(m, '.');

@@ -71,7 +71,10 @@ export default {
         const rows = vo.recent(Math.min(Number.parseInt(arg, 10) || 10, 30));
         const s = vo.stats;
         if (!rows.length) {
-          return ctx.reply(`👁️ Nothing captured yet.\n\n_detected ${s.detected} · captured ${s.captured} · expired ${s.expired}_`);
+          return ctx.reply(
+            `👁️ Nothing captured yet.\n\n_detected ${s.detected} · captured ${s.captured} · ` +
+              `expired ${s.expired} · unavailable ${s.unavailable || 0}_`
+          );
         }
 
         const lines = [
@@ -79,7 +82,9 @@ export default {
           '',
           ...rows.map((r) => {
             const when = timeAgo(r.captured_at);
-            const size = r.media_bytes ? ` · ${Math.round(r.media_bytes / 1024)} KB` : '';
+            const size = r.media_bytes
+              ? ` · ${Math.round(r.media_bytes / 1024)} KB`
+              : ' · no media bytes';
             const state = r.forwarded ? '✅' : '⚠️';
             return `${state} *${r.sender_name || r.sender_phone || 'unknown'}* ${when} — ${r.kind}${size}` +
               (r.caption ? `\n  > ${String(r.caption).slice(0, 90)}` : '');

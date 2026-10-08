@@ -2,7 +2,7 @@ import { timeAgo, formatBytes } from '../lib/format.js';
 
 /**
  * Daily digest. One message that answers "what happened while I wasn't
- * looking?" — deletions, edits, view-once captures, group churn, what is due.
+ * looking?" — deletions, edits, view-once events, group churn, what is due.
  *
  * Scheduled delivery is a one-line job:
  *   .schedule every day 8am | /digest
@@ -68,9 +68,14 @@ export default {
         }
 
         if (viewOnce.length) {
-          lines.push('', `👁️ *${viewOnce.length} view-once captured*`);
+          lines.push('', `👁️ *${viewOnce.length} view-once events*`);
           for (const v of viewOnce.slice(0, 4)) {
-            lines.push(`   • ${v.sender_name || 'unknown'} — ${v.kind} · ${timeAgo(v.captured_at)}`);
+            const availability = v.media_bytes
+              ? ` · ${Math.round(v.media_bytes / 1024)} KB saved`
+              : ' · no media bytes';
+            lines.push(
+              `   • ${v.sender_name || 'unknown'} — ${v.kind}${availability} · ${timeAgo(v.captured_at)}`
+            );
           }
         }
 

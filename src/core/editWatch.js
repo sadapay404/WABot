@@ -2,14 +2,16 @@
  * Nexus-WA — edited-message watch.
  *
  * WhatsApp lets people silently rewrite a message after you have read it. The
- * edit arrives as a protocol message of type MESSAGE_EDIT (14) that names the
- * original stanza id — the same shape a deletion uses, with a different type.
+ * edit is a MESSAGE_EDIT (14) protocol stanza. Baileys turns it into a
+ * messages.update event whose key.id is the original stanza id and whose new
+ * content lives under update.message.editedMessage.message.
  *
  * Because the message cache already holds the original text, we can show the
  * diff instead of just "this was edited".
  */
 
 import { normalizeJid, isGroupJid, describeChat } from './jid.js';
+import { extractText } from './message.js';
 import { flag, setFlag } from '../database/index.js';
 
 const PROTOCOL_MESSAGE_EDIT = 14;
@@ -22,19 +24,25 @@ export function extractEdit(payload = {}) {
   const update = payload.update || {};
   const message = update.message || payload.message || null;
 
+  // Baileys emits MESSAGE_EDIT as a normalized messages.update event:
+  //   { key: { id: <original stanza id> },
+  //     update: { message: { editedMessage: { message: <new content> } } } }
+  // The edit is no longer exposed as a protocolMessage here; its key.id is the
+  // edited stanza's ID. Keep the protocol form below for older Baileys builds.
+  const editedMessage = message?.editedMessage;
+  if (editedMessage) {
+    const stanzaId = payload.key?.id || update.key?.id || editedMessage.key?.id || null;
+    const newText = extractText(editedMessage.message || editedMessage) || null;
+    return { stanzaId, newText };
+  }
+
   const proto = message?.protocolMessage;
   if (!proto) return null;
   if (proto.type !== PROTOCOL_MESSAGE_EDIT && proto.type !== 'MESSAGE_EDIT') return null;
 
-  const edited = proto.editedMessage;
-  const newText =
-    edited?.conversation ??
-    edited?.extendedTextMessage?.text ??
-    edited?.imageMessage?.caption ??
-    edited?.videoMessage?.caption ??
-    null;
-
-  return { stanzaId: proto.stanzaId || null, newText };
+  const stanzaId = proto.stanzaId || proto.key?.id || null;
+  const newText = extractText(proto.editedMessage) || null;
+  return { stanzaId, newText };
 }
 
 function clockTime(ms) {

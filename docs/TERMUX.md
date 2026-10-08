@@ -83,7 +83,16 @@ cannot fix. What happens during a gap:
 | **Recurring jobs** | **Fire once, not in a burst.** The next run is rolled forward past the current time (`scheduler.js:179`), so an hourly job missed four times fires once and reschedules. No drift. |
 | **A job interrupted mid-send** | Recovered. `resumeOrphans()` flips anything left `running` back to `pending` at boot. |
 | **Messages sent to you** | Partial. WhatsApp replays recent history to linked devices on reconnect, but this is not guaranteed for everything. Do not treat the bot as a reliable archive of what arrived while it was down. |
-| **View-once media** | The blob usually expires before you can download it. You still get sender, time and caption plus "Media expired before capture" — never silence. |
+| **View-once media** | Captured only when WhatsApp delivers the media to this linked-device profile. Some profiles receive just a view-once marker; the bot records and alerts on that event but cannot recover bytes it never received. If the bot is offline, a short-lived blob may also expire before reconnect. |
+
+This branch currently requests Baileys' **Ubuntu/Chrome web profile** for phone-number
+pairing. Startup logs both the stored `registered platform` (when saved in the
+Baileys credentials) and the currently `requested profile`, so they are not
+confused. Baileys has an experimental Android-browser profile that may receive
+view-once media, but changing profile does not convert an already-registered
+device; it may require unlinking and pairing again. That is a separate decision:
+do not unlink a working session until you explicitly choose to test it, and
+WhatsApp Business accounts may behave differently.
 
 **Practical advice:** keep the phone at home on a charger when you can. If it
 has to travel, expect reminders to land late rather than on time.

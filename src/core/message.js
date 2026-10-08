@@ -172,7 +172,7 @@ export function normalize(raw) {
 
   // Context lives on the UNWRAPPED message, so a quoted reply inside a
   // disappearing-messages chat is still visible.
-  const { inner } = unwrap(message);
+  const { inner, flags, wrappers } = unwrap(message);
   const contextInfo =
     inner?.extendedTextMessage?.contextInfo ||
     inner?.imageMessage?.contextInfo ||
@@ -181,7 +181,6 @@ export function normalize(raw) {
     null;
 
   const media = extractMediaType(message);
-  const { flags, wrappers } = unwrap(message);
 
   return {
     /** Raw Baileys object — kept so plugins can reach anything we didn't map. */
@@ -195,8 +194,8 @@ export function normalize(raw) {
     pushName: raw?.pushName || null,
     text: extractText(message).trim(),
     media,
-    /** True for view-once photo/video/voice — the media expires once viewed. */
-    viewOnce: flags.viewOnce,
+    /** True from an envelope, a flat media flag, or Baileys' unavailable key marker. */
+    viewOnce: Boolean(flags.viewOnce || key.isViewOnce || media?.payload?.viewOnce),
     /** True inside a disappearing-messages chat. */
     ephemeral: flags.ephemeral,
     edited: flags.edited,

@@ -1,21 +1,20 @@
 /**
  * Nexus-WA — view-once capture.
  *
- * Your requirement: every view-once message you receive is saved to the chat
- * you have with yourself, instantly, even when your phone is offline.
+ * When the linked-device session receives the media payload, it is fetched
+ * immediately and copied to the account's self-chat. Some companion profiles
+ * receive only Baileys' `key.isViewOnce` unavailable marker, with no media
+ * payload; those events are recorded and reported, but the missing media cannot
+ * be reconstructed by this process.
  *
- * Why "even when your phone is offline" actually works:
- *   This bot is a LINKED DEVICE, not a client running on your phone. WhatsApp
- *   pushes new messages to every linked device independently, so the bot
- *   receives and captures them whether or not your handset is awake, charged
- *   or on the network.
- *
- * The one case it cannot cover, stated plainly:
- *   If the BOT process is down, WhatsApp queues the message and redelivers it
- *   on reconnect — but the view-once media URL is short-lived and may already
- *   be expired by then. In that situation you get the notification with the
- *   sender, time and caption, and an explicit "media expired" line rather than
- *   silence or a guess. The row is still recorded so you know it happened.
+ * The linked-device session is independent of the handset's power and network
+ * state. There are two important limits:
+ *   • If the bot process is down, the media URL may be expired by the time
+ *     WhatsApp redelivers the event after reconnect. We report that as expired.
+ *   • If WhatsApp sends only an unavailable marker for this companion profile,
+ *     no media bytes exist in the event to download. We report that separately.
+ * In both cases the event is persisted and an alert is attempted when the
+ * linked socket has a self-JID.
  *
  * Timing matters: the media is fetched the moment the message arrives, before
  * anything else touches it, because WhatsApp invalidates view-once blobs once
@@ -63,7 +62,15 @@ export class ViewOnceCapture {
     this.config = config;
     this.downloader = downloader;
     this.onCaptured = onCaptured;
-    this.stats = { detected: 0, captured: 0, expired: 0, empty: 0, forwarded: 0, failed: 0 };
+    this.stats = {
+      detected: 0,
+      captured: 0,
+      expired: 0,
+      empty: 0,
+      unavailable: 0,
+      forwarded: 0,
+      failed: 0,
+    };
   }
 
   selfJid() {
@@ -123,10 +130,20 @@ export class ViewOnceCapture {
     // the event as "expired", which tells the owner the wrong thing.
     let buffer = null;
     if (!msg.media) {
-      record.status = 'empty';
-      record.error = 'view-once message carried no media payload';
-      this.stats.empty++;
-      this.logger.warn(`view-once ${msg.id} had no media payload`);
+      // Baileys v7 marks a server-side unavailable view-once message on the
+      // message key, without a media envelope. Do not mislabel this as an
+      // expired download: no payload was delivered to this linked device.
+      const withheld = raw?.key?.isViewOnce === true;
+      record.status = withheld ? 'unavailable' : 'empty';
+      record.error = withheld
+        ? 'Baileys received an unavailable view-once marker without media'
+        : 'view-once message carried no media payload';
+      this.stats[withheld ? 'unavailable' : 'empty']++;
+      this.logger.warn(
+        withheld
+          ? `view-once ${msg.id} was marked unavailable; WhatsApp supplied no media payload`
+          : `view-once ${msg.id} had no media payload`
+      );
     } else {
       try {
         buffer = this.downloader
@@ -270,6 +287,11 @@ export function formatViewOnce(r) {
       '',
       'The bot was not running when this arrived, and WhatsApp had already',
       'invalidated the blob. The event is still recorded so you know it happened.',
+    );
+  } else if (r.status === 'unavailable') {
+    lines.push(
+      '⚠️ *WhatsApp sent only the view-once marker; this linked device received no media to save.*',
+      r.caption ? `> ${r.caption}` : ''
     );
   } else {
     lines.push('_No media bytes were returned._');

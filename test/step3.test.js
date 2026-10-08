@@ -25,7 +25,7 @@ import { OutboundQueue } from '../src/core/outboundQueue.js';
 import { MessageCache } from '../src/core/messageCache.js';
 import { ContactStore } from '../src/core/contactStore.js';
 import { MediaStore } from '../src/core/mediaStore.js';
-import { EditWatch } from '../src/core/editWatch.js';
+import { EditWatch, extractEdit } from '../src/core/editWatch.js';
 import { ViewOnceCapture } from '../src/core/viewOnce.js';
 import { PluginLoader } from '../src/core/pluginLoader.js';
 import { buildConfig } from '../src/config/index.js';
@@ -482,6 +482,21 @@ test('pluginLoader: a throwing plugin is reported, not fatal', async () => {
 });
 
 // ── edit tracking ────────────────────────────────────────────────────
+test('edits: still accepts the older protocolMessage payload shape', () => {
+  const edit = extractEdit({
+    update: {
+      message: {
+        protocolMessage: {
+          type: 14,
+          stanzaId: 'LEGACY1',
+          editedMessage: { conversation: 'older format' },
+        },
+      },
+    },
+  });
+  assert.deepEqual(edit, { stanzaId: 'LEGACY1', newText: 'older format' });
+});
+
 test('edits: a rewritten message is stored with both versions', async () => {
   const db = await getMemoryDb();
   const socket = fakeSocket();
@@ -501,14 +516,13 @@ test('edits: a rewritten message is stored with both versions', async () => {
   // messages populate — so store it there, exactly as the running bot does.
   cache.store(sent, normalize(sent), SELF);
 
+  // This is the messages.update shape Baileys actually emits for MESSAGE_EDIT.
   const update = {
-    key: { remoteJid: MOM, fromMe: false, id: 'UPDATE1', participant: undefined },
+    key: { remoteJid: MOM, fromMe: false, id: 'STANZA1', participant: undefined },
     update: {
       message: {
-        protocolMessage: {
-          type: 14,
-          stanzaId: 'STANZA1',
-          editedMessage: { conversation: 'I love Mondays' },
+        editedMessage: {
+          message: { conversation: 'I love Mondays' },
         },
       },
     },
@@ -586,6 +600,35 @@ test('view-once: an empty payload is recorded, never silently dropped', async ()
   const row = db.prepare('SELECT * FROM view_once WHERE stanza_id = ?').get('VO2');
   assert.ok(row, 'still recorded even with no media');
   assert.equal(row.media_path, null, 'nothing was downloadable');
+});
+
+test('view-once: Baileys unavailable marker is recorded and reported', async () => {
+  const db = await getMemoryDb();
+  const socket = fakeSocket();
+  const capture = new ViewOnceCapture({
+    socket, db, contacts: new ContactStore(db, quiet), registry: null,
+    mediaStore: null, logger: quiet, config: rigConfig(),
+  });
+  // Baileys v7 represents a server-side unavailable view-once event on key,
+  // with no message/media envelope to download.
+  const raw = {
+    key: { remoteJid: MOM, fromMe: false, id: 'VO3', isViewOnce: true },
+    pushName: 'Mom',
+    messageTimestamp: Math.floor(Date.now() / 1000),
+  };
+  const { normalize } = await import('../src/core/message.js');
+  const msg = normalize(raw);
+  assert.equal(msg.viewOnce, true, 'the key marker must reach the capture pipeline');
+  assert.equal(msg.media, null, 'the marker carries no media payload');
+
+  const result = await capture.onMessage(raw, msg);
+  assert.equal(result.status, 'unavailable');
+  assert.equal(capture.stats.unavailable, 1);
+  assert.ok(db.prepare('SELECT * FROM view_once WHERE stanza_id = ?').get('VO3'));
+  const alert = socket.sent.find((s) => /View-once/i.test(s.content.text || ''));
+  assert.ok(alert, 'the event alert is sent despite missing media');
+  assert.equal(alert.jid, SELF);
+  assert.match(alert.content.text, /linked device received no media/i);
 });
 
 // ── mock harness integrity ───────────────────────────────────────────

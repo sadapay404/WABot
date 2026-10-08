@@ -102,7 +102,7 @@ in `OWNER_JIDS`.
 |---|---|---|
 | `.antidelete [on\|off\|media on\|off\|list]` | owner | deletion alerts |
 | `.edits [n]` | owner | messages edited after sending, with the diff |
-| `.viewonce [n] \| on\|off` | owner | captured view-once messages |
+| `.viewonce [n] \| on\|off` | owner | view-once events; media only when WhatsApp delivers it to this linked-device profile |
 | `.presence [n]` | owner | who was online and when |
 | `.groups [n]` | owner | group joins and leaves |
 | `.blocked [jid]` | owner | *suspected* blocks, with the signals behind each guess |

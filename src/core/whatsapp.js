@@ -127,12 +127,13 @@ export class WhatsAppConnection {
     this.saveCreds = saveCreds;
 
     const version = await this.#version(B);
+    const browser = connectionBrowser({ Browsers }, this.config);
 
     const socket = makeWASocket({
       auth: state,
       version,
       logger: this.logger.child({ scope: 'baileys' }),
-      browser: connectionBrowser({ Browsers }, this.config),
+      browser,
       // The phone-number flow does not need a QR printed into the log. Keep
       // Baileys' legacy QR printer only as a fallback when neither pairing
       // number nor Telegram delivery is configured.
@@ -154,7 +155,8 @@ export class WhatsAppConnection {
     this.socket = socket;
     this.#wire(socket, DisconnectReason);
     this.logger.info(
-      `connecting… (session: ${this.config.wa.sessionDir}` +
+      `connecting… (registered platform: ${state.creds?.platform || 'not recorded'}; ` +
+        `requested profile: ${browser[0]}/${browser[1]}; session: ${this.config.wa.sessionDir}` +
         `${state.creds?.me ? ', resuming as ' + state.creds.me.id : ', fresh link'})`
     );
     return socket;
