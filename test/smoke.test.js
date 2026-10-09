@@ -229,12 +229,14 @@ test('containment: a throwing plugin is caught, reported, and never crashes', as
   assert.match(socket.outbox.at(-1).text, /That command failed: deliberate plugin failure/);
 });
 
-test('dispatcher: the bot ignores own messages outside the restricted self-chat scheduler flow', async () => {
+test('dispatcher: a configured owner can run owner-only commands in the fresh self-chat', async () => {
   const { socket, dispatcher } = await dispatchFixture('.secret', { from: OWNER });
+  socket.user.id = OWNER;
   socket.outbox.length = 0;
+  dispatcher.stats.handled = 0;
   await dispatcher.handle(socket, normalize(rawMessage('.secret', { jid: OWNER, fromMe: true })));
-  assert.equal(socket.outbox.length, 0);
-  assert.equal(dispatcher.stats.rejected, 0, 'own messages are skipped before authorisation');
+  assert.deepEqual(socket.outbox.map((item) => item.text), ['vault opened']);
+  assert.equal(dispatcher.stats.handled, 1);
 });
 
 test('dispatcher: plain chat is ignored entirely', async () => {

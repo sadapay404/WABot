@@ -21,7 +21,7 @@ cp .env.example .env      # leave NEXUS_MODE=dry-run for now
 
 npm run preview           # interactive console, ZERO WhatsApp connection
 npm run dashboard         # headless + web dashboard on :3000
-npm test                  # 168 tests
+npm test                  # 178 tests
 ```
 
 In the preview console try:
@@ -84,7 +84,7 @@ will ask you for a card even though every guide says it will not.
 
 ### Commands
 
-35 commands across 13 plugin files. `.help` prints the live list; everything
+37 commands across 15 plugin files. `.help` prints the live list; everything
 below is generated from it. **owner** means it is refused unless the sender is
 in `OWNER_JIDS`.
 
@@ -109,6 +109,13 @@ in `OWNER_JIDS`.
 | `.blocked [jid]` | owner | *suspected* blocks, with the signals behind each guess |
 | `.watch [name on\|off]` | owner | show or toggle every watcher |
 
+Passive delete/edit/view-once capture processes events from every chat the
+linked WhatsApp device receives; `OWNER_JIDS` gates commands, not captured
+senders. Alerts go to `CAPTURE_ALERT_JID` when set, otherwise to a remote owner
+or the linked account’s own chat. Keep the main controller whitelisted; add the
+linked number with `.env owner add <number>` to enable fresh owner commands in
+its “You” chat.
+
 **Notes, reminders, search**
 
 | Command | Access | What |
@@ -128,6 +135,7 @@ in `OWNER_JIDS`.
 | Command | Access | What |
 |---|---|---|
 | `.ai <prompt>` | anyone | ask the model, with per-chat memory |
+| `.ask chats` / `.ask <n> <count|all> <question>` | owner | ask about selected cached one-to-one chats; explicit transcript is sent to the configured AI provider |
 | `.summarize [n]` | owner | summarise recent messages in this chat |
 | `.vision [instruction]` | owner | describe or OCR an attached image |
 | `.translate <lang> [text]` | anyone | translate the last message, or your own text |
@@ -147,6 +155,7 @@ in `OWNER_JIDS`.
 | Command | Access | What |
 |---|---|---|
 | `.panic \| .panic resume` | owner | stop all outbound instantly, then release it |
+| `.env status \| set \| unset \| owner` | owner | manage approved AI settings and controller numbers; API secrets stay hidden |
 | `.audit [n]` | owner | what the bot has done on your behalf |
 | `.backup <passphrase> \| .backup list` | owner | encrypted export of session + database |
 | `.vault \| .vault test \| .vault push` | owner | check the remote backup, or prove it works end to end |

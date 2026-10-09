@@ -33,7 +33,7 @@ export default {
   commands: [
     {
       name: 'ai',
-      aliases: ['ask', 'gpt'],
+      aliases: ['gpt'],
       description: 'Ask the model anything, with per-chat memory',
       usage: '.ai <prompt>',
       ownerOnly: false,

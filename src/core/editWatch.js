@@ -11,6 +11,7 @@
  */
 
 import { normalizeJid, isGroupJid, describeChat } from './jid.js';
+import { captureAlertJid } from './alertRouting.js';
 import { extractText } from './message.js';
 import { flag, setFlag } from '../database/index.js';
 
@@ -124,10 +125,10 @@ export class EditWatch {
         .run(edit.newText, edit.stanzaId);
     }
 
-    const self = this.selfJid();
-    if (self) {
+    const destination = captureAlertJid(this.config, this.selfJid());
+    if (destination) {
       try {
-        await this.socket.sendMessage(self, { text: formatEdit(entry) });
+        await this.socket.sendMessage(destination, { text: formatEdit(entry) });
       } catch (err) {
         this.stats.failed++;
         this.logger.error(`could not send edit alert: ${err.message}`);

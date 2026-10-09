@@ -16,12 +16,12 @@ more than the effort one.
 
 ## Privacy & awareness — the anti-delete family
 
-The hard part (capturing content on the way in) was already done.
+Passive delete/edit/view-once capture is independent of `OWNER_JIDS`: it observes every event delivered to the linked device. Owner access controls commands only; alerts are routed to an explicit capture-alert JID, a remote owner, or the linked account’s own chat.
 
 | Idea | Effort | Risk | Status | Notes |
 |---|---|---|---|---|
 | **Edited-message diff** | S | none | ✅ | WhatsApp sends `MESSAGE_EDIT` as a protocol message, not a revoke. Shows *was → now*, with the original recovered from the message cache. |
-| **View-once recovery** | M | none | 🟡 | Media is fetched the instant the message arrives, because WhatsApp invalidates the blob once it is seen. Archived to disk and forwarded to your own chat. |
+| **View-once recovery** | M | none | 🟡 | Media is fetched as soon as the message arrives, because WhatsApp may invalidate the blob once it is seen. Archived to disk and forwarded to the configured capture-alert destination. |
 | **Profile-change watch** | S | none | ✅ | Alerts on photo/name/status/about changes. |
 | **"Am I blocked?" probe** | S | low | ✅ | Needs **≥2 independent signals** before it says anything, and always says *"suspected"*. WhatsApp never reports a block; anything claiming otherwise is lying to you. |
 | **Last-seen log** | S | low | ✅ | Presence transitions recorded. Opt-in per contact. |
@@ -44,16 +44,14 @@ The hard part (capturing content on the way in) was already done.
 
 | Idea | Effort | Risk | Status | Notes |
 |---|---|---|---|---|
-| **`.ai` with context** | M | none | 🟡 | groq / openai / gemini behind one interface. Per-chat memory capped at `AI_MAX_HISTORY`. |
-| **`.summarize`** | M | none | 🟡 | Summarise the last N messages of a group you've been away from. |
+| **`.ai` with context** | M | none | 🟡 | groq / openai / gemini behind one interface. Per-chat AI memory is capped at `AI_MAX_HISTORY`. |
+| **Selected-chat `.ask`** | M | medium | 🟡 | `.ask chats` lists cached one-to-one conversations; explicitly selects one or more, a message count or `all`, and a question. Sends text only to the chosen AI provider, drafts only, and does not persist transcript in AI memory. Group selection is deferred. |
+| **`.summarize`** | M | none | 🟡 | Summarise the last N messages of the current chat. |
 | **`.vision`** | M | none | 🟡 | Describe/OCR an image. |
 | **Draft replies, never auto-send** | S | **medium** | 🟡 | `.draft` returns text marked *"Draft (not sent)"*. It will never message another person. |
 | **Language translation** | S | low | 🟡 | `.translate <lang> <text>`. |
 
-**Memory is deliberately not persisted.** Conversation history lives in RAM
-only. Writing every prompt to SQLite means keeping a permanent transcript of
-everything you ever asked, with no retention policy — that is a privacy
-decision you should make explicitly, not one a bot should make for you.
+**AI conversation memory is deliberately not persisted.** `.ai` history stays in RAM only. `.ask` is different: the bot reads locally cached one-to-one text only after an owner selects chats and sends a question, then sends that bounded transcript to the configured provider for that request. Group selection remains disabled until its flow is agreed.
 
 ## Automation
 
@@ -88,6 +86,7 @@ it on, keep it to one narrow chat.
 | **Panic kill-switch** | S | none | ✅ | `.panic` drops the outbound queue and refuses new sends. `.panic resume` releases it. An unrecognised argument does **not** engage it. |
 | **Outbound loop breaker** | S | none | 🟡 | Blocks the 5th normalized-exact or ≥80%-token-overlap text/caption send (3+ tokens) to one destination within 60s; halts the queue and alerts the self-chat. Tune with `OUTBOUND_LOOP_THRESHOLD` and `OUTBOUND_LOOP_WINDOW_MS`; inspect the cause before `.panic resume`. |
 | **Audit log** | S | none | ✅ | `.audit [n]` — who did what, newest first. |
+| **Remote approved settings** | M | medium | 🟡 | `.env` changes approved AI settings, capture-alert destination, and owner numbers only. API keys use a one-message private flow, are not cached or shown, and the local file is owner-readable only; WhatsApp still retains the sent key message. |
 | **Session backup** | M | low | ✅ | `.backup <passphrase>` → AES-256-GCM blob of `data/auth` + the DB. Passphrase is never stored, and a wrong passphrase is deliberately indistinguishable from a corrupt file. |
 | **Rate-limit anomaly alert** | S | none | 🟡 | Warns after 30 successful sends across all chats in 60s; alerts once per window and does not halt. Tune with `OUTBOUND_VOLUME_LIMIT` and `OUTBOUND_VOLUME_WINDOW_MS`. |
 
@@ -95,27 +94,31 @@ it on, keep it to one narrow chat.
 
 ## New ideas (next round)
 
-Things worth doing that were not in the original list.
+Practical follow-ons to the capture, remote-control, privacy, and selected-chat
+work. These are suggestions only; none is silently enabled.
 
-### Worth building soon
-
-| Idea | Effort | Risk | Notes |
-|---|---|---|---|
-| **Digest scheduling built in** | S | none | `.digest daily 8am` registers the recurring job directly, instead of making you compose `.schedule every day 8am \| /digest`. |
-| **Retention policy** | S | none | `RETENTION_DAYS` — prune `message_cache`, `media_archive` and `view_once` older than N days. Right now the database only grows. |
-| **Restore-from-backup command** | S | none | `.backup restore <id> <passphrase>` over Telegram. Currently restore is code-complete but only reachable from a shell. |
-| **Webhook retry with backoff** | S | low | Three attempts, 30s/2m/10m, then stop. A hook that is down for a minute should not lose the event. |
-| **Per-contact opt-in for watchers** | S | **medium** | Presence logging and profile watching are surveillance-adjacent. Make them explicit per contact rather than global. |
-
-### Larger, higher value
+### Capture reliability and remote control
 
 | Idea | Effort | Risk | Notes |
 |---|---|---|---|
-| **`.ask` over your own history (RAG)** | L | none | Embed the message cache, then answer *"what did the landlord say about the deposit?"*. The highest-value AI feature here, and the one that justifies keeping the cache. Needs an embedding store and a real retrieval eval — do not ship it on cosine similarity alone. |
-| **Trip/mode awareness** | M | low | Suppress reminders while you are driving or asleep; queue them instead. Presence + time-of-day is enough signal. |
-| **Invoice/receipt pipeline** | M | none | Vision → structured rows → monthly CSV. Pairs with `.vision`. |
-| **Shared family group bot** | M | **medium** | Let a second trusted JID run a subset of commands. Multiplies the blast radius of a mistake; only do it once the audit log has proven itself. |
-| **Signal/Telegram mirror** | L | low | One inbox. Large surface area, and now two services can get you banned. |
+| **`.capture status`** | S | none | One compact report: watcher switches, alert destination, last event per type, and whether each alert send succeeded—without exposing message contents. Helps distinguish “WhatsApp did not emit an event” from “the bot failed to deliver it.” |
+| **`.capture test`** | S | none | Send a labelled synthetic alert through the real routing/queue path, without creating or deleting a real WhatsApp message. Confirms that the main controller can receive bot alerts. |
+| **`.capture recent [n]`** | M | low | Show a redacted event ledger with time, event type, chat label, and media availability. Useful for checking whether an event arrived without storing extra message text. |
+| **Per-event alert destinations** | S | low | Route deletes, edits, and view-once alerts to different approved JIDs, while keeping one safe default. |
+| **Remote graceful restart** | M | medium | Owner-only `.restart`/`.stop` with explicit confirmation and a supervisor check; never execute arbitrary shell text from WhatsApp. |
+| **`.env test <provider>`** | M | low | Make a minimal provider request and report only pass/fail, latency, and provider name—never the key or prompt contents. |
+| **Safe configuration rollback** | M | low | `.env undo` reverts the last non-secret setting and reports a redacted diff. Secret values are never kept in rollback history. |
+
+### Private chat and AI controls
+
+| Idea | Effort | Risk | Notes |
+|---|---|---|---|
+| **`.ask preview`** | S | low | Before calling the provider, show selected chat labels, message counts, time range, and context size; require a one-time `YES` for that exact request. |
+| **Source-backed `.ask` answers** | M | medium | Ask the model to attach timestamps and short verbatim quotes to factual claims, then verify every quote against the selected local transcript. Easier to check than an unsupported summary. |
+| **`.ask after <date>`** | M | low | Select a date/time range as well as a count, so a question can focus on “last Tuesday” without sending unrelated newer history. |
+| **Temporary `.ask` follow-up session** | M | medium | Keep the same explicitly selected chats for a short expiry window; show a timer and `.ask end`, and never add a new chat automatically. |
+| **`.forget chat <n>`** | M | low | Delete the local one-to-one transcript cache for a chosen chat, separate from `.forget` which clears AI prompt memory. |
+| **Per-chat transcript retention** | M | low | Set a local text-cache expiry or exclusion for each direct chat, with a preview of what will be deleted; do not change media archives implicitly. |
 
 ### Still explicitly not building
 

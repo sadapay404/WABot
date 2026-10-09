@@ -26,6 +26,8 @@ import { MockWhatsAppSocket, MOCK_OWNER_JID } from './core/mockSocket.js';
 import { SessionRegistry } from './core/sessionRegistry.js';
 import { ContactStore } from './core/contactStore.js';
 import { MessageCache } from './core/messageCache.js';
+import { AskContext } from './core/askContext.js';
+import { EnvEditor } from './core/envEditor.js';
 import { MediaStore } from './core/mediaStore.js';
 import { AntiDelete } from './core/antiDelete.js';
 import { ViewOnceCapture } from './core/viewOnce.js';
@@ -100,12 +102,22 @@ function wireEvents(socket, app) {
         msg.upsertType = type || 'unknown';
         if (selfJid()) registry.countIn(selfJid());
 
+        // A pending owner API key is consumed before any cache, watcher, or
+        // command handler can persist the plaintext. The confirmation is sent
+        // directly and the secret message never enters ordinary dispatch.
+        if (await app.envEditor?.consumePending({
+          msg,
+          socket,
+          isOwner: dispatcher.isOwner(msg.sender),
+        })) continue;
+        if (app.envEditor?.shouldSkipMessage(msg)) msg.sensitive = true;
+
         // View-once FIRST: the media blob is invalidated once the message is
         // seen, so this must run before anything else can touch it.
         const vo = await viewOnce?.onMessage(raw, msg);
         if (vo) webhooks?.emit('viewonce', { from: msg.sender, kind: vo.kind, bytes: vo.mediaBytes });
 
-        antiDelete?.onMessage(raw, msg); // cache — a revoke may follow
+        await antiDelete?.onMessage(raw, msg); // cache — a revoke may follow, or handle an upsert revoke
         await dispatcher.handle(socket, msg);
       } catch (err) {
         log.error(`messages.upsert handler: ${err.stack || err.message}`);
@@ -275,6 +287,8 @@ async function main() {
   });
 
   const selfJid = normalizeJid(socket.user?.id || '');
+  const askContext = new AskContext({ db });
+  const envEditor = new EnvEditor({ config, logger, selfJid });
 
   // Watchers.
   const profileWatch = new ProfileWatch({ db, logger, presenceLog, selfJid });
@@ -301,7 +315,7 @@ async function main() {
     config, logger, db, startedAt,
     registry, contacts, cache, mediaStore, notes, audit, webhooks, triggers,
     presenceLog, profileWatch, groupWatch, editWatch, antiDelete, viewOnce,
-    scheduler, scheduleWizard, ai, backup, vault, plugins, dispatcher, queue, logs, connection,
+    scheduler, scheduleWizard, ai, askContext, envEditor, backup, vault, plugins, dispatcher, queue, logs, connection,
     selfJid,
     // Kill-switch: the only thing that can stop outbound instantly.
     safety: {

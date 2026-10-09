@@ -18,6 +18,7 @@
  */
 
 import { normalizeJid, isGroupJid, describeChat } from './jid.js';
+import { captureAlertJid } from './alertRouting.js';
 import { getSetting, setSetting } from '../database/index.js';
 
 /** WAProto.Message.ProtocolMessage.Type.REVOKE */
@@ -233,13 +234,13 @@ export class AntiDelete {
   }
 
   async #deliver(text, deletion, raw) {
-    const self = this.selfJid();
-    if (!self) {
-      this.logger.warn('no self JID resolved — nowhere to send the alert');
+    const destination = captureAlertJid(this.config, this.selfJid());
+    if (!destination) {
+      this.logger.warn('no capture-alert destination resolved — nowhere to send the alert');
       return;
     }
 
-    await this.socket.sendMessage(self, { text });
+    await this.socket.sendMessage(destination, { text });
 
     // Forward the actual deleted media when we still hold the original object.
     if (!deletion.mediaAvailable || !this.forwardMedia()) return;
@@ -253,16 +254,16 @@ export class AntiDelete {
       const mime = deletion.record?.media_mimetype || 'application/octet-stream';
       const caption = `⤴️ the deleted ${describeMedia(deletion.record)}`;
 
-      if (kind === 'image') await this.socket.sendMessage(self, { image: buffer, caption });
-      else if (kind === 'video') await this.socket.sendMessage(self, { video: buffer, caption });
-      else if (kind === 'sticker') await this.socket.sendMessage(self, { sticker: buffer });
+      if (kind === 'image') await this.socket.sendMessage(destination, { image: buffer, caption });
+      else if (kind === 'video') await this.socket.sendMessage(destination, { video: buffer, caption });
+      else if (kind === 'sticker') await this.socket.sendMessage(destination, { sticker: buffer });
       else if (kind === 'audio')
-        await this.socket.sendMessage(self, {
+        await this.socket.sendMessage(destination, {
           audio: buffer,
           mimetype: mime,
           ptt: /ogg|opus/i.test(mime),
         });
-      else await this.socket.sendMessage(self, { document: buffer, mimetype: mime, fileName: 'deleted' });
+      else await this.socket.sendMessage(destination, { document: buffer, mimetype: mime, fileName: 'deleted' });
 
       this.stats.mediaForwarded++;
     } catch (err) {

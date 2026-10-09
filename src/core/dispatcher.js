@@ -28,7 +28,6 @@
 import { parseCommand } from './message.js';
 import { normalizeJid } from './jid.js';
 
-const SELF_CHAT_SCHEDULE_COMMANDS = new Set(['schedule', 'sched', 'remind', 'reminder', 'agenda']);
 const SELF_ECHO_TTL_MS = 120_000;
 const SELF_ECHO_MAX_KEYS = 500;
 
@@ -125,8 +124,8 @@ export class Dispatcher {
   }
 
   /**
-   * Handle one normalised message. Owner-authored commands in the account's
-   * own “You” chat are allowed only for schedule/remind/agenda; plain-text
+   * Handle one normalised message. In the account's own “You” chat, explicitly
+   * owner-only commands are allowed only from configured owners; plain-text
    * replies are accepted only while a persisted scheduling draft is active.
    */
   async handle(socket, msg) {
@@ -149,8 +148,14 @@ export class Dispatcher {
 
       const parsed = parseCommand(msg, this.config.prefix);
       const isOwner = this.isOwner(msg.sender);
+      const candidate = parsed.isCommand ? this.plugins.resolve(parsed.command) : null;
+      // Any explicitly owner-only command may be used in the owner's own
+      // “You” chat. Echo tracking and the notify-vs-append guard above still
+      // prevent our replies/history from replaying as commands.
       const selfChatCommand =
-        parsed.isCommand && isOwner && SELF_CHAT_SCHEDULE_COMMANDS.has(parsed.command);
+        parsed.isCommand &&
+        isOwner &&
+        Boolean(candidate?.ownerOnly);
       const wizard = this.bot?.scheduleWizard;
       const pendingDraft = isOwner && wizard?.hasPending?.(msg.sender, msg.jid);
 
@@ -172,7 +177,7 @@ export class Dispatcher {
         return;
       }
 
-      const plugin = this.plugins.resolve(parsed.command);
+      const plugin = candidate;
       if (!plugin) {
         this.stats.rejected++;
         this.logger.debug(`unknown command: ${parsed.command}`);

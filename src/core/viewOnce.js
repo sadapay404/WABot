@@ -16,6 +16,7 @@
  */
 
 import { normalizeJid, isGroupJid, describeChat } from './jid.js';
+import { captureAlertJid } from './alertRouting.js';
 import { normalize, unwrap } from './message.js';
 import { flag, setFlag } from '../database/index.js';
 import { describeMedia, mediaIcon } from '../lib/media.js';
@@ -297,29 +298,29 @@ export class ViewOnceCapture {
   }
 
   async #deliver(record, buffer) {
-    const self = this.selfJid();
-    if (!self) {
-      this.logger.warn('no self JID — nowhere to send the view-once alert');
+    const destination = captureAlertJid(this.config, this.selfJid());
+    if (!destination) {
+      this.logger.warn('no capture-alert destination — nowhere to send the view-once alert');
       return;
     }
 
     const text = formatViewOnce(record);
-    await this.socket.sendMessage(self, { text });
+    await this.socket.sendMessage(destination, { text });
 
     if (!buffer?.length) return;
     try {
       const label = `${mediaIcon(record.kind)} view-once ${describeMedia(record)}`;
-      if (record.kind === 'image') await this.socket.sendMessage(self, { image: buffer, caption: label });
-      else if (record.kind === 'video') await this.socket.sendMessage(self, { video: buffer, caption: label });
-      else if (record.kind === 'sticker') await this.socket.sendMessage(self, { sticker: buffer });
+      if (record.kind === 'image') await this.socket.sendMessage(destination, { image: buffer, caption: label });
+      else if (record.kind === 'video') await this.socket.sendMessage(destination, { video: buffer, caption: label });
+      else if (record.kind === 'sticker') await this.socket.sendMessage(destination, { sticker: buffer });
       else if (record.kind === 'audio')
-        await this.socket.sendMessage(self, {
+        await this.socket.sendMessage(destination, {
           audio: buffer,
           mimetype: record.mimetype || 'audio/ogg',
           ptt: /ogg|opus/i.test(record.mimetype || ''),
         });
       else
-        await this.socket.sendMessage(self, {
+        await this.socket.sendMessage(destination, {
           document: buffer,
           mimetype: record.mimetype || 'application/octet-stream',
           fileName: `view-once-${record.stanzaId || 'unknown'}`,

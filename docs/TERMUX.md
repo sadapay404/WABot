@@ -175,11 +175,10 @@ it or `NO`/`CANCEL` to discard it. An unfinished draft survives a restart and
 expires after 24 hours. If a saved contact name is missing or ambiguous, reply
 with the exact saved name or a full phone number.
 
-`.schedule`, `.remind`, and the read-only `.agenda` can be entered in the “You”
-chat. The paired Business account’s own number must be in `OWNER_JIDS`; the
-dispatcher accepts these owner-authorized commands there only for fresh messages.
-It ignores the bot’s own sent-message echoes and replayed history, and does not
-open other commands in the self-chat.
+Any explicitly owner-only command can be entered in the “You” chat once the
+linked account’s number is in `OWNER_JIDS`. Fresh messages only are accepted:
+the dispatcher ignores the bot’s sent-message echoes and replayed history.
+Public commands remain unavailable in the self-chat.
 
 A `.remind` requires a receiving contact/number for that request. It is sent
 from the paired WhatsApp Business account to that destination; it does not go
@@ -201,6 +200,70 @@ occurrence of each repeating schedule; overdue pending sends appear first.
 One-time jobs that become overdue while the phone is offline are delivered once
 when it reconnects. Recurring jobs skip missed intervals rather than sending a
 catch-up burst.
+
+## Privacy capture and controller access
+
+The `.antidelete`, `.viewonce`, and `.edits` watchers process events for every
+chat the linked WhatsApp device actually receives; `OWNER_JIDS` restricts who
+can run commands, not whose messages can be recorded. Check the switches with
+`.watch`; enable them with `.watch antidelete on`, `.watch viewonce on`, and
+`.watch edits on` if needed.
+
+Capture alerts go to `CAPTURE_ALERT_JID` when set; otherwise they go to the first
+configured owner other than the linked number, falling back to the linked
+account’s own chat. You can set the destination remotely with
+`.env set CAPTURE_ALERT_JID <number>`. WhatsApp/Baileys can only capture edits,
+deletions, and view-once media that the linked device receives. A marker-only
+view-once event means WhatsApp supplied no media bytes to save; this cannot be
+fixed by changing the command whitelist.
+
+Keep the owner whitelist for administrative commands. From the current owner’s
+private controller chat, `.env owner add <linked-number>` adds the paired
+number without removing the main controller. Once added, owner-only commands
+also work in the linked account’s fresh “You” chat. `.env owner list` shows the
+current allowlist.
+
+## Ask AI about selected one-to-one chats
+
+`.ask chats` lists private chats with text currently cached by the linked
+session. The numbered selection lasts 30 minutes. Ask about one or more chats
+with:
+
+```text
+.ask 2 40 What should I reply?
+.ask 2 all Summarize our chat
+.ask 2,4 50 Compare what we discussed
+```
+
+The count applies to each selected chat. `all` uses the full cached text subject
+to the configured context-size limit; media bytes are not included. History
+starts when this device receives messages, so it is not a guaranteed export of
+messages from before pairing or while the bot was offline. Each `.ask` request
+sends only the selected text to the configured AI provider for that request; it
+does not store the transcript in AI chat memory and never sends a reply to the
+other person. Group selection is intentionally deferred for a separate design
+discussion.
+
+## Change approved settings from WhatsApp
+
+Use the owner’s private controller chat (or the linked account’s “You” chat
+once it is on the owner list):
+
+```text
+.env status
+.env set AI_PROVIDER groq
+.env set GROQ_API_KEY
+```
+
+After the last command, send the API key as the **next plain-text message** in
+the same private chat, within two minutes. The key is written with owner-only
+file permissions, is not echoed or placed in the bot’s message/AI-context cache,
+and becomes active without a restart. `.env status` never prints secret values.
+Only approved AI settings, capture-alert destination, and owner numbers can be
+changed; this command cannot edit arbitrary environment variables or touch the
+WhatsApp session directory. WhatsApp itself still keeps the key message in the
+chat history, so delete it locally after the confirmation if you want it removed
+from that chat on your phone.
 
 ## Day to day
 
@@ -257,8 +320,9 @@ That does a real push-then-pull and tells you which setting is wrong if it fails
 `status` reporting the real bot PID and memory, crash-restart by the supervisor
 (a killed bot came back under a new PID), clean stop leaving zero processes, and
 safe double-stop. The previous supervisor smoke test booted with
-`ready · 34 command(s) · 5 session(s)`. After adding `.agenda`, the current
-no-connection dry-run registry reports 35 commands across 13 plugin files.
+`ready · 34 command(s) · 5 session(s)`. The current no-connection dry-run
+registry, including `.agenda`, selected-chat `.ask`, and `.env` controls, reports
+37 commands across 15 plugin files.
 
 **Not verified:** Termux itself. This sandbox is Linux, not Android, so
 `pkg install`, `termux-wake-lock`, `Termux:Boot` autostart, and Android's

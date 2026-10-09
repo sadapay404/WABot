@@ -410,7 +410,8 @@ test('self-chat permits owner scheduling only, accepts guided replies, and ignor
   assert.equal(wizard.getDraft(OWNER, OWNER).step, 'target', 'an echo must not consume the guided answer');
 
   await socket.inject('.jobs', { jid: OWNER, from: OWNER, fromMe: true });
-  assert.equal(wizard.getDraft(OWNER, OWNER).step, 'target', 'other bot commands remain blocked in self chat');
+  assert.match(socket.outbox.at(-1).text, /Pending jobs|No pending jobs|Scheduled jobs/);
+  assert.equal(wizard.getDraft(OWNER, OWNER).step, 'target', 'owner commands do not consume wizard replies');
   const countBeforeExternalEcho = socket.outbox.length;
   await socket.inject('.schedule', { jid: SAM, from: OWNER, fromMe: true });
   assert.equal(socket.outbox.length, countBeforeExternalEcho, 'outgoing messages to other chats remain ignored');

@@ -228,7 +228,7 @@ test('cache: getMessage preserves the edit secret in memory and fails closed acr
   assert.equal(cache.getRecord('EDIT-ORIGINAL').messageSecret, undefined, 'secret is never persisted to SQLite');
 });
 
-test('cache: keeps own messages only in volatile storage for edit-secret lookups', async () => {
+test('cache: keeps own messages out of forensic search but records them for selected AI context', async () => {
   const db = await getMemoryDb();
   const cache = new MessageCache(db, quiet);
   const raw = rawMsg('OWN-EDIT', 'before');
@@ -237,7 +237,21 @@ test('cache: keeps own messages only in volatile storage for edit-secret lookups
   cache.store(raw, { ...normMsg('OWN-EDIT', 'before'), isBot: true }, SELF);
 
   assert.equal(cache.getMessage({ id: 'OWN-EDIT', remoteJid: MOM, fromMe: true }), raw.message);
-  assert.equal(cache.getRecord('OWN-EDIT'), null, 'own content is not added to the durable cache');
+  assert.equal(cache.getRecord('OWN-EDIT'), null, 'own content is not added to the forensic cache');
+  const transcript = db.prepare('SELECT * FROM conversation_cache WHERE id = ?').get('OWN-EDIT');
+  assert.equal(transcript.text, 'before');
+  assert.equal(transcript.from_me, 1);
+});
+
+test('cache: sensitive configuration messages never enter durable or volatile caches', async () => {
+  const db = await getMemoryDb();
+  const cache = new MessageCache(db, quiet);
+  const raw = rawMsg('ENV-SECRET', 'test-provider-key');
+  const msg = { ...normMsg('ENV-SECRET', 'test-provider-key'), sensitive: true };
+  cache.store(raw, msg, SELF);
+  assert.equal(cache.getRecord('ENV-SECRET'), null);
+  assert.equal(cache.getRaw('ENV-SECRET'), null);
+  assert.equal(db.prepare('SELECT 1 FROM conversation_cache WHERE id = ?').get('ENV-SECRET'), undefined);
 });
 
 test('cache: getMessage checks the participant for group originals', async () => {

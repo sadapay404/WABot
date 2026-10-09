@@ -120,9 +120,10 @@ These are the details that break setups quietly:
 - **Render restarts free services at will**, even one kept permanently awake.
   So the vault is not a fallback, it is the normal path. Budget for restarts
   you did not schedule.
-- **512 MB RAM / 0.1 CPU.** The bot uses ~73 MB RSS with all 33 plugins
-  loaded, so there is room — but do not turn on heavy media archiving and
-  expect it to stay there.
+- **512 MB RAM / 0.1 CPU.** An earlier smoke test used ~73 MB RSS with 33
+  commands. The current dry-run registry has 37 commands across 15 plugin
+  files; re-measure on the target host, and do not enable heavy media archiving
+  without checking its actual memory and disk budget.
 - Free Postgres expires after 30 days. We do not use it — everything is
   SQLite inside the vault.
 

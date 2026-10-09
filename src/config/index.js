@@ -128,6 +128,9 @@ export function buildConfig(overrides = {}) {
 
     safety: {
       ownerJids: list(process.env.OWNER_JIDS),
+      // Passive privacy alerts go to this WhatsApp number/JID. When unset,
+      // watchers choose the first configured owner who is not the linked account.
+      captureAlertJid: String(process.env.CAPTURE_ALERT_JID || '').trim(),
       rateLimitPerMin: int(process.env.RATE_LIMIT_PER_MIN, 12),
       // The window the per-minute budget is measured over. Configurable so the
       // throttling behaviour can actually be asserted on in tests.
@@ -192,6 +195,7 @@ export function buildConfig(overrides = {}) {
       provider: (process.env.AI_PROVIDER || 'groq').toLowerCase(),
       model: process.env.AI_MODEL || '',
       maxHistory: int(process.env.AI_MAX_HISTORY, 12),
+      askMaxChars: Math.max(4_000, Math.min(int(process.env.AI_ASK_MAX_CHARS, 60_000), 100_000)),
       keys: {
         groq: process.env.GROQ_API_KEY || '',
         gemini: process.env.GEMINI_API_KEY || '',

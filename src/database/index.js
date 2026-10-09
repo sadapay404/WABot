@@ -83,6 +83,19 @@ CREATE TABLE IF NOT EXISTS message_cache (
 CREATE INDEX IF NOT EXISTS idx_cache_ts   ON message_cache(ts);
 CREATE INDEX IF NOT EXISTS idx_cache_chat ON message_cache(chat_jid, ts DESC);
 
+-- Separate transcript for explicit AI questions. Unlike the forensic message
+-- cache, it includes both sides of a conversation and is never full-text indexed.
+CREATE TABLE IF NOT EXISTS conversation_cache (
+  id          TEXT PRIMARY KEY,
+  session_jid TEXT NOT NULL,
+  chat_jid    TEXT NOT NULL,
+  sender_jid  TEXT,
+  from_me     INTEGER NOT NULL DEFAULT 0,
+  text        TEXT NOT NULL,
+  ts          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_chat ON conversation_cache(chat_jid, ts DESC);
+
 CREATE TABLE IF NOT EXISTS deleted_messages (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   stanza_id      TEXT,
@@ -395,6 +408,21 @@ function migrate(db, logger) {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA);
+
+  // Seed selected-chat AI context with inbound text already captured by older
+  // builds. New outgoing messages are added by MessageCache from this version.
+  try {
+    db.prepare(
+      `INSERT OR IGNORE INTO conversation_cache
+         (id, session_jid, chat_jid, sender_jid, from_me, text, ts)
+       SELECT id, session_jid, chat_jid, sender_jid, 0, text, ts
+         FROM message_cache
+        WHERE text IS NOT NULL AND text <> ''
+          AND (chat_jid LIKE '%@s.whatsapp.net' OR chat_jid LIKE '%@lid')`
+    ).run();
+  } catch (err) {
+    logger?.child?.({ scope: 'db' })?.warn(`conversation context migration skipped: ${err.message}`);
+  }
 
   // Databases created before webhook failure tracking existed.
   if (addColumnIfMissing(db, 'webhooks', 'fail_count', 'INTEGER NOT NULL DEFAULT 0') ||

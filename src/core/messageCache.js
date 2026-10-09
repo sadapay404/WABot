@@ -5,15 +5,17 @@
  * It never repeats the content. So to tell you what was deleted, the content
  * has to have been captured on the way in.
  *
- * Two tiers, on purpose:
- *   • SQLite `message_cache` — durable. Survives restarts, so a message
- *     deleted 3 hours after a redeploy still resolves to its text.
+ * Storage is split by purpose:
+ *   • SQLite `message_cache` — inbound forensic records used by delete/edit
+ *     recovery and search.
+ *   • SQLite `conversation_cache` — text from both sides of one-to-one chats,
+ *     used only when the owner explicitly asks AI about selected chats.
  *   • in-memory raw map — volatile, TTL'd. Holds the ORIGINAL Baileys object,
  *     which is the only thing `downloadMediaMessage()` can work from. That is
  *     what lets us forward the actual deleted photo/video/voice note.
  *
- * The honest consequence: text survives restarts; media only survives as long
- * as the process does (and as long as WhatsApp still serves the blob).
+ * The honest consequence: captured text survives restarts; raw media access
+ * only survives as long as the process and WhatsApp keep the blob available.
  */
 
 import { normalizeJid } from './jid.js';
@@ -101,12 +103,32 @@ export class MessageCache {
    * @param {string} sessionJid
    */
   store(raw, msg, sessionJid) {
-    if (!msg?.id || !raw?.key) return;
+    if (!msg?.id || !raw?.key || msg.sensitive) return;
 
     // Keep the full protobuf only in memory: encrypted message edits require
     // messageContextInfo.messageSecret, but it is never written to SQLite.
     this.#rememberRaw(msg.id, raw);
-    if (msg.isBot) return; // own messages are kept only for scoped getMessage lookups
+
+    // AI context is a separate, explicit transcript store: it keeps both sides
+    // of a conversation, while the forensic cache below remains inbound-only.
+    const transcript = String(msg.text || '').trim();
+    if (transcript && !msg.isGroup) {
+      this.db.prepare(
+        `INSERT INTO conversation_cache(id, session_jid, chat_jid, sender_jid, from_me, text, ts)
+         VALUES (?,?,?,?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET text = excluded.text, from_me = excluded.from_me`
+      ).run(
+        msg.id,
+        normalizeJid(sessionJid),
+        normalizeJid(msg.jid),
+        normalizeJid(msg.sender),
+        raw.key.fromMe || msg.isBot ? 1 : 0,
+        transcript,
+        msg.timestamp * 1000
+      );
+    }
+
+    if (msg.isBot) return; // own messages stay out of the forensic search cache
 
     const kind = msg.media?.type || (msg.text ? 'text' : 'unknown');
 
