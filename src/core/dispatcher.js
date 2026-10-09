@@ -28,7 +28,7 @@
 import { parseCommand } from './message.js';
 import { normalizeJid } from './jid.js';
 
-const SELF_CHAT_SCHEDULE_COMMANDS = new Set(['schedule', 'sched', 'remind', 'reminder']);
+const SELF_CHAT_SCHEDULE_COMMANDS = new Set(['schedule', 'sched', 'remind', 'reminder', 'agenda']);
 const SELF_ECHO_TTL_MS = 120_000;
 const SELF_ECHO_MAX_KEYS = 500;
 
@@ -126,7 +126,7 @@ export class Dispatcher {
 
   /**
    * Handle one normalised message. Owner-authored commands in the account's
-   * own “You” chat are allowed only for schedule/remind; their plain-text
+   * own “You” chat are allowed only for schedule/remind/agenda; plain-text
    * replies are accepted only while a persisted scheduling draft is active.
    */
   async handle(socket, msg) {
@@ -149,13 +149,13 @@ export class Dispatcher {
 
       const parsed = parseCommand(msg, this.config.prefix);
       const isOwner = this.isOwner(msg.sender);
-      const scheduleCommand =
+      const selfChatCommand =
         parsed.isCommand && isOwner && SELF_CHAT_SCHEDULE_COMMANDS.has(parsed.command);
       const wizard = this.bot?.scheduleWizard;
       const pendingDraft = isOwner && wizard?.hasPending?.(msg.sender, msg.jid);
 
-      if (isFromSelfChat && parsed.isCommand && !scheduleCommand) return;
-      if (isFromSelfChat && !scheduleCommand && !pendingDraft) return;
+      if (isFromSelfChat && parsed.isCommand && !selfChatCommand) return;
+      if (isFromSelfChat && !selfChatCommand && !pendingDraft) return;
 
       if (!parsed.isCommand) {
         if (!pendingDraft || !wizard?.handleReply) return;

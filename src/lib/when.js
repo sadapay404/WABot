@@ -373,6 +373,271 @@ function makeOneTime(parsedDate, clock, now, timeZone, { explicitDate = true } =
   };
 }
 
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const ORDINALS = new Map([
+  ['first', 1], ['1st', 1],
+  ['second', 2], ['2nd', 2],
+  ['third', 3], ['3rd', 3],
+  ['fourth', 4], ['4th', 4],
+  ['last', -1],
+]);
+
+function monthParts(year, month, offset = 0) {
+  const index = year * 12 + (month - 1) + offset;
+  return { year: Math.floor(index / 12), month: ((index % 12) + 12) % 12 + 1 };
+}
+
+function daysInMonth(year, month) {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+function weekdayNumber(name) {
+  return WEEKDAYS[String(name || '').toLowerCase()];
+}
+
+function weekdayLabel(day) {
+  return WEEKDAY_NAMES[day];
+}
+
+function ordinalLabel(day) {
+  const mod100 = day % 100;
+  const suffix = mod100 >= 11 && mod100 <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[day % 10] || 'th');
+  return `${day}${suffix}`;
+}
+
+function candidateForMonth(year, month, recurrence) {
+  const lastDay = daysInMonth(year, month);
+  let day;
+  if (recurrence.type === 'monthly-day') {
+    if (recurrence.day > lastDay) {
+      if (recurrence.missingDatePolicy !== 'last-day') return null;
+      day = lastDay;
+    } else {
+      day = recurrence.day;
+    }
+  } else if (recurrence.type === 'monthly-weekday') {
+    if (recurrence.ordinal === -1) {
+      day = lastDay - ((weekdayIndex({ year, month, day: lastDay }) - recurrence.weekday + 7) % 7);
+    } else {
+      const firstOffset = (recurrence.weekday - weekdayIndex({ year, month, day: 1 }) + 7) % 7;
+      day = 1 + firstOffset + 7 * (recurrence.ordinal - 1);
+      if (day > lastDay) return null;
+    }
+  } else {
+    return null;
+  }
+  return localToEpoch({ year, month, day, hour: recurrence.hour, minute: recurrence.minute }, recurrence.timeZone);
+}
+
+function candidateForYear(year, recurrence) {
+  const lastDay = daysInMonth(year, recurrence.month);
+  let day = recurrence.day;
+  if (day > lastDay) {
+    if (recurrence.missingDatePolicy !== 'last-day') return null;
+    day = lastDay;
+  }
+  return localToEpoch({
+    year,
+    month: recurrence.month,
+    day,
+    hour: recurrence.hour,
+    minute: recurrence.minute,
+  }, recurrence.timeZone);
+}
+
+/** Return the next occurrence after a concrete calendar-rule occurrence. */
+export function nextCalendarOccurrence(afterEpoch, recurrence) {
+  if (!Number.isFinite(afterEpoch) || !recurrence?.timeZone) return null;
+  const after = zonedParts(afterEpoch, recurrence.timeZone);
+
+  if (recurrence.type === 'weekly') {
+    const every = Math.max(1, Number(recurrence.intervalWeeks) || 1);
+    for (let skip = 1; skip <= 4; skip++) {
+      const nextDate = addCalendarDays(after, every * 7 * skip);
+      const candidate = localToEpoch({
+        ...nextDate,
+        hour: recurrence.hour,
+        minute: recurrence.minute,
+      }, recurrence.timeZone);
+      if (candidate !== null && candidate > afterEpoch) return candidate;
+    }
+    return null;
+  }
+
+  if (recurrence.type === 'monthly-day' || recurrence.type === 'monthly-weekday') {
+    for (let offset = 1; offset <= 480; offset++) {
+      const period = monthParts(after.year, after.month, offset);
+      const candidate = candidateForMonth(period.year, period.month, recurrence);
+      if (candidate !== null && candidate > afterEpoch) return candidate;
+    }
+    return null;
+  }
+
+  if (recurrence.type === 'yearly-date') {
+    for (let offset = 1; offset <= 400; offset++) {
+      const candidate = candidateForYear(after.year + offset, recurrence);
+      if (candidate !== null && candidate > afterEpoch) return candidate;
+    }
+  }
+  return null;
+}
+
+/** Find the first matching local calendar occurrence after `afterEpoch`. */
+export function firstCalendarOccurrence(afterEpoch, recurrence) {
+  if (!Number.isFinite(afterEpoch) || !recurrence?.timeZone) return null;
+  const after = zonedParts(afterEpoch, recurrence.timeZone);
+
+  if (recurrence.type === 'weekly') {
+    const target = Number.isInteger(recurrence.weekday)
+      ? recurrence.weekday
+      : weekdayNumber(recurrence.weekday);
+    if (target === undefined || target < 0 || target > 6) return null;
+    const delta = (target - weekdayIndex(after) + 7) % 7;
+    const firstDate = addCalendarDays(after, delta);
+    const every = Math.max(1, Number(recurrence.intervalWeeks) || 1);
+    for (let skip = 0; skip <= 4; skip++) {
+      const date = addCalendarDays(firstDate, every * 7 * skip);
+      const candidate = localToEpoch({ ...date, hour: recurrence.hour, minute: recurrence.minute }, recurrence.timeZone);
+      if (candidate !== null && candidate > afterEpoch) return candidate;
+    }
+    return null;
+  }
+
+  if (recurrence.type === 'monthly-day' || recurrence.type === 'monthly-weekday') {
+    for (let offset = 0; offset <= 480; offset++) {
+      const period = monthParts(after.year, after.month, offset);
+      const candidate = candidateForMonth(period.year, period.month, recurrence);
+      if (candidate !== null && candidate > afterEpoch) return candidate;
+    }
+    return null;
+  }
+
+  if (recurrence.type === 'yearly-date') {
+    for (let offset = 0; offset <= 400; offset++) {
+      const candidate = candidateForYear(after.year + offset, recurrence);
+      if (candidate !== null && candidate > afterEpoch) return candidate;
+    }
+  }
+  return null;
+}
+
+/** Concrete future dates for a recurrence preview; no schedule is created. */
+export function listCalendarOccurrences(firstRunAt, recurrence, count = 3) {
+  const result = [];
+  let next = firstRunAt;
+  for (let i = 0; i < Math.max(0, Math.min(Number(count) || 0, 20)); i++) {
+    if (!Number.isFinite(next)) break;
+    result.push(next);
+    next = nextCalendarOccurrence(next, recurrence);
+  }
+  return result;
+}
+
+function parseAdvancedRecurring(raw, now, nowParts, timeZone, requireTime, options = {}) {
+  let cadence;
+  let timeText = '';
+  let recurrence;
+
+  const biweekly = raw.match(/^every\s+(?:(\d+)\s+)?weeks?\s+on\s+([a-z]+)(?:\s+at\s+(.+))?$/);
+  if (biweekly) {
+    const intervalWeeks = Number(biweekly[1] || 1);
+    const weekday = weekdayNumber(biweekly[2]);
+    if (!intervalWeeks || weekday === undefined) return null;
+    cadence = intervalWeeks === 1
+      ? `Every ${weekdayLabel(weekday)}`
+      : `Every ${intervalWeeks} weeks on ${weekdayLabel(weekday)}`;
+    timeText = biweekly[3] || '';
+    recurrence = { type: 'weekly', intervalWeeks, weekday, timeZone };
+  }
+
+  const monthlyDay = raw.match(/^every\s+month(?:\s+on)?\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?(?:\s+at\s+(.+))?$/) ||
+    raw.match(/^(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?\s+of\s+every\s+month(?:\s+at\s+(.+))?$/);
+  if (!recurrence && monthlyDay) {
+    const day = Number(monthlyDay[1]);
+    if (day < 1 || day > 31) return null;
+    cadence = `Every month on the ${ordinalLabel(day)}`;
+    timeText = monthlyDay[2] || '';
+    recurrence = { type: 'monthly-day', day, timeZone };
+  }
+
+  const monthlyWeekday = raw.match(/^(first|1st|second|2nd|third|3rd|fourth|4th|last)\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\s+of\s+every\s+month(?:\s+at\s+(.+))?$/);
+  if (!recurrence && monthlyWeekday) {
+    const ordinal = ORDINALS.get(monthlyWeekday[1]);
+    const weekday = weekdayNumber(monthlyWeekday[2]);
+    cadence = `Every month on the ${monthlyWeekday[1]} ${weekdayLabel(weekday)}`;
+    timeText = monthlyWeekday[3] || '';
+    recurrence = { type: 'monthly-weekday', ordinal, weekday, timeZone };
+  }
+
+  const yearly = raw.match(/^(?:every\s+year|annually)\s+on\s+(.+)$/);
+  if (!recurrence && yearly) {
+    const at = yearly[1].lastIndexOf(' at ');
+    const dateText = at >= 0 ? yearly[1].slice(0, at).trim() : yearly[1].trim();
+    timeText = at >= 0 ? yearly[1].slice(at + 4).trim() : '';
+    const date = parseCalendarDate(dateText, nowParts, now, timeZone);
+    if (!date) return null;
+    const monthName = Object.entries(MONTHS)
+      .filter(([, month]) => month === date.dateParts.month)
+      .sort(([a], [b]) => b.length - a.length)[0]?.[0];
+    const displayMonth = monthName ? `${monthName[0].toUpperCase()}${monthName.slice(1)}` : String(date.dateParts.month);
+    cadence = `Every year on ${date.dateParts.day} ${displayMonth}`;
+    recurrence = {
+      type: 'yearly-date',
+      month: date.dateParts.month,
+      day: date.dateParts.day,
+      timeZone,
+    };
+  }
+
+  if (!recurrence) return null;
+
+  const clockText = timeText.replace(/^at\s+/, '').trim();
+  let clock = clockText ? parseClock(clockText) : null;
+  const ambiguousTime = Boolean(clockText && !clock && looksLikeBareHour(clockText));
+  if (clockText && !clock && !ambiguousTime) return null;
+  if (!clock && !requireTime) clock = ambiguousTime ? parseLegacyClock(clockText) : { h: 9, m: 0 };
+
+  const needsTime = !clock;
+  if (!needsTime) {
+    recurrence.hour = clock.h;
+    recurrence.minute = clock.m;
+  }
+
+  const policyNeeded =
+    (recurrence.type === 'monthly-day' && recurrence.day >= 29) ||
+    (recurrence.type === 'yearly-date' && recurrence.month === 2 && recurrence.day === 29);
+  const selectedPolicy = ['skip', 'last-day'].includes(options.recurrenceDatePolicy)
+    ? options.recurrenceDatePolicy
+    : null;
+  if (policyNeeded) recurrence.missingDatePolicy = selectedPolicy || 'skip';
+  if (policyNeeded && !selectedPolicy) recurrence.needsDatePolicy = true;
+
+  if (needsTime) {
+    return {
+      kind: 'recurring',
+      needsTime: true,
+      recurrence,
+      dateExpression: cadence,
+      ambiguousTime,
+      label: `${cadence}; time needed`,
+      timeZone,
+    };
+  }
+
+  const runAt = firstCalendarOccurrence(now, recurrence);
+  if (runAt === null) return null;
+  const label = `${cadence} at ${clockLabel(clock)}`;
+  recurrence.label = label;
+  return {
+    kind: 'recurring',
+    runAt,
+    recurrence,
+    needsDatePolicy: Boolean(recurrence.needsDatePolicy),
+    label,
+    timeZone,
+  };
+}
+
 function parseRecurring(raw, now, nowParts, timeZone, requireTime) {
   const match = raw.match(/^every\s+(.+)$/);
   if (!match) return null;
@@ -518,6 +783,9 @@ export function parseWhen(input, now = Date.now(), timeZone = 'Asia/Karachi', op
 
   const nowParts = zonedParts(now, timeZone);
 
+  const advancedRecurring = parseAdvancedRecurring(raw, now, nowParts, timeZone, requireTime, options);
+  if (advancedRecurring) return advancedRecurring;
+
   const recurring = parseRecurring(raw, now, nowParts, timeZone, requireTime);
   if (recurring) return recurring;
 
@@ -636,6 +904,21 @@ export function parseWhen(input, now = Date.now(), timeZone = 'Asia/Karachi', op
   }
 
   return null;
+}
+
+/** Local midnight bounds for a calendar-day agenda; DST days may not be 24 hours. */
+export function localDayRange(now = Date.now(), timeZone = 'Asia/Karachi', dayCount = 1) {
+  try {
+    const current = zonedParts(now, timeZone);
+    const today = { year: current.year, month: current.month, day: current.day };
+    const tomorrow = addCalendarDays(today, Math.max(1, Math.min(Number(dayCount) || 1, 31)));
+    return {
+      start: localToEpoch({ ...today, hour: 0, minute: 0 }, timeZone),
+      end: localToEpoch({ ...tomorrow, hour: 0, minute: 0 }, timeZone),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Format a concrete epoch for a human-facing preview in the chosen timezone. */

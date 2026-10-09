@@ -17,6 +17,7 @@
 
 import { flag, setFlag } from '../database/index.js';
 import { normalizeJid } from './jid.js';
+import { nextCalendarOccurrence } from '../lib/when.js';
 
 export class Scheduler {
   /**
@@ -71,21 +72,30 @@ export class Scheduler {
    * @param {string} [job.kind]     'once' | 'recurring'
    * @param {number} [job.intervalMs] for recurring
    */
-  add({ jid, text, runAt, kind = 'once', intervalMs = null }) {
+  add({ jid, text, runAt, kind = 'once', intervalMs = null, recurrence = null }) {
     if (!jid) throw new Error('a job needs a destination JID');
     if (!Number.isFinite(runAt)) throw new Error('a job needs a numeric runAt');
+    if (recurrence?.needsDatePolicy) {
+      throw new Error('the recurring date rule needs a missing-date policy');
+    }
 
+    const storedKind = recurrence
+      ? 'calendar'
+      : kind === 'recurring'
+        ? `every:${intervalMs}`
+        : 'once';
+    const rule = recurrence ? JSON.stringify(recurrence) : intervalMs ? String(intervalMs) : null;
     const res = this.db
       .prepare(
         `INSERT INTO jobs(kind, jid, text, run_at, cron, status, created_at)
          VALUES (?,?,?,?,?, 'pending', ?)`
       )
       .run(
-        kind === 'recurring' ? `every:${intervalMs}` : 'once',
+        storedKind,
         normalizeJid(jid),
         text,
         Math.floor(runAt),
-        intervalMs ? String(intervalMs) : null,
+        rule,
         this.now()
       );
     const id = Number(res.lastInsertRowid);
@@ -105,6 +115,14 @@ export class Scheduler {
 
   pending() {
     return this.list({ status: 'pending' });
+  }
+
+  /** Pending sends whose next run is before `end`, including overdue jobs. */
+  agenda({ end, limit = 200 } = {}) {
+    if (!Number.isFinite(end)) throw new Error('agenda needs a numeric end time');
+    return this.db
+      .prepare("SELECT * FROM jobs WHERE status = 'pending' AND run_at < ? ORDER BY run_at LIMIT ?")
+      .all(end, Math.max(1, Math.min(Number(limit) || 200, 1_000)));
   }
 
   cancel(id) {
@@ -171,6 +189,35 @@ export class Scheduler {
   }
 
   #finish(job, now) {
+    if (job.kind === 'calendar') {
+      let recurrence;
+      try {
+        recurrence = JSON.parse(job.cron || 'null');
+      } catch {
+        recurrence = null;
+      }
+      let next = recurrence ? nextCalendarOccurrence(job.run_at, recurrence) : null;
+      let skipped = 0;
+      while (next !== null && next <= now && skipped < 10_000) {
+        next = nextCalendarOccurrence(next, recurrence);
+        skipped++;
+      }
+      if (next !== null && next > now) {
+        this.db
+          .prepare("UPDATE jobs SET status = 'pending', run_at = ?, fired_at = ?, last_error = NULL WHERE id = ?")
+          .run(next, now, job.id);
+        this.stats.rearmed++;
+        return;
+      }
+      // A malformed/unsupported rule is retired rather than being retried after
+      // a successful send, which could otherwise duplicate the message.
+      this.logger.error(`calendar job ${job.id} could not be re-armed; marking it done`);
+      this.db
+        .prepare("UPDATE jobs SET status = 'done', fired_at = ?, last_error = ? WHERE id = ?")
+        .run(now, 'Recurring rule could not be advanced', job.id);
+      return;
+    }
+
     if (job.kind.startsWith('every:')) {
       const interval = Number.parseInt(job.kind.split(':')[1], 10);
       if (Number.isFinite(interval) && interval > 0) {

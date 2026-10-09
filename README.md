@@ -84,7 +84,7 @@ will ask you for a card even though every guide says it will not.
 
 ### Commands
 
-33 commands across 13 plugin files. `.help` prints the live list; everything
+35 commands across 13 plugin files. `.help` prints the live list; everything
 below is generated from it. **owner** means it is refused unless the sender is
 in `OWNER_JIDS`.
 
@@ -117,6 +117,7 @@ in `OWNER_JIDS`.
 | `.todo <text> [in 10m \| at 8pm \| tomorrow 9am]` | owner | tasks, optionally with a reminder |
 | `.remind to <contact/number> <when> \| <text>` | owner | send a one-off or recurring reminder to that WhatsApp recipient |
 | `.schedule to <contact/number> <when> \| <message>` | owner | send to a recipient later, once or on a repeat; preview + confirmation |
+| `.agenda [today\|week]` | owner | read-only local-time view of pending sends |
 | `.jobs \| .jobs cancel <id>` | owner | list or cancel scheduled jobs |
 | `.search <terms>` | owner | full-text search over the message cache |
 | `.forward <stanzaId>` | owner | re-send a cached message, even a deleted one |

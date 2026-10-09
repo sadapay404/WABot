@@ -15,7 +15,15 @@ import { OutboundQueue } from '../src/core/outboundQueue.js';
 import { PluginLoader } from '../src/core/pluginLoader.js';
 import { ScheduleWizard, parseScheduleInput, resolveRecipient } from '../src/core/scheduleWizard.js';
 import { Scheduler } from '../src/core/scheduler.js';
-import { formatDateTime, parseClock, parseWhen } from '../src/lib/when.js';
+import {
+  firstCalendarOccurrence,
+  formatDateTime,
+  listCalendarOccurrences,
+  localDayRange,
+  nextCalendarOccurrence,
+  parseClock,
+  parseWhen,
+} from '../src/lib/when.js';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const quiet = createLogger('fatal');
@@ -121,6 +129,86 @@ test('when parser supports daily and weekly recurring local times', () => {
   assert.equal(incomplete.dateExpression, 'every day');
 });
 
+test('calendar recurrence supports biweekly, monthly weekday/day, and annual rules', () => {
+  const biweekly = parseWhen('every 2 weeks on Monday at 9 am', NOW, ZONE, { requireTime: true });
+  assert.equal(biweekly.kind, 'recurring');
+  assert.equal(biweekly.recurrence.type, 'weekly');
+  assert.equal(biweekly.runAt, Date.UTC(2026, 0, 5, 4));
+  assert.deepEqual(listCalendarOccurrences(biweekly.runAt, biweekly.recurrence, 3), [
+    Date.UTC(2026, 0, 5, 4),
+    Date.UTC(2026, 0, 19, 4),
+    Date.UTC(2026, 1, 2, 4),
+  ]);
+
+  const monthly = parseWhen('the 15th of every month at 9 am', NOW, ZONE, { requireTime: true });
+  assert.equal(monthly.runAt, Date.UTC(2026, 0, 15, 4));
+  assert.deepEqual(listCalendarOccurrences(monthly.runAt, monthly.recurrence, 2), [
+    Date.UTC(2026, 0, 15, 4),
+    Date.UTC(2026, 1, 15, 4),
+  ]);
+
+  const lastFriday = parseWhen('last Friday of every month at 5 pm', NOW, ZONE, { requireTime: true });
+  assert.equal(lastFriday.runAt, Date.UTC(2026, 0, 30, 12));
+  assert.equal(parseWhen('annually on 9 September at 9 am', NOW, ZONE, { requireTime: true }).label,
+    'Every year on 9 September at 9:00 am');
+});
+
+test('monthly and leap-day recurrences require an explicit missing-date rule', () => {
+  const monthly = parseWhen('every month on the 31st at 9 am', NOW, ZONE, { requireTime: true });
+  assert.equal(monthly.needsDatePolicy, true);
+  assert.equal(monthly.recurrence.needsDatePolicy, true);
+
+  const skip = parseWhen('every month on the 31st at 9 am', NOW, ZONE, {
+    requireTime: true,
+    recurrenceDatePolicy: 'skip',
+  });
+  assert.deepEqual(listCalendarOccurrences(skip.runAt, skip.recurrence, 3), [
+    Date.UTC(2026, 0, 31, 4),
+    Date.UTC(2026, 2, 31, 4),
+    Date.UTC(2026, 4, 31, 4),
+  ]);
+
+  const lastDay = parseWhen('every month on the 31st at 9 am', NOW, ZONE, {
+    requireTime: true,
+    recurrenceDatePolicy: 'last-day',
+  });
+  assert.deepEqual(listCalendarOccurrences(lastDay.runAt, lastDay.recurrence, 3), [
+    Date.UTC(2026, 0, 31, 4),
+    Date.UTC(2026, 1, 28, 4),
+    Date.UTC(2026, 2, 31, 4),
+  ]);
+
+  const leapSkip = parseWhen('annually on 29 February at 9 am', NOW, ZONE, {
+    requireTime: true,
+    recurrenceDatePolicy: 'skip',
+  });
+  assert.equal(leapSkip.runAt, Date.UTC(2028, 1, 29, 4));
+  const leapLastDay = parseWhen('annually on 29 February at 9 am', NOW, ZONE, {
+    requireTime: true,
+    recurrenceDatePolicy: 'last-day',
+  });
+  assert.equal(leapLastDay.runAt, Date.UTC(2026, 1, 28, 4));
+});
+
+test('calendar recurrence and agenda bounds preserve local wall-clock time', () => {
+  const range = localDayRange(NOW, ZONE, 1);
+  assert.deepEqual(range, {
+    start: Date.UTC(2026, 0, 1, 19),
+    end: Date.UTC(2026, 0, 2, 19),
+  });
+
+  const recurrence = {
+    type: 'weekly', intervalWeeks: 2, weekday: 1, hour: 9, minute: 0, timeZone: 'America/New_York',
+  };
+  const first = firstCalendarOccurrence(Date.UTC(2026, 2, 1, 14), recurrence);
+  const next = nextCalendarOccurrence(first, recurrence);
+  const localClock = (epoch) => new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hourCycle: 'h12',
+  }).format(new Date(epoch));
+  assert.match(localClock(first), /9:00/);
+  assert.match(localClock(next), /9:00/);
+});
+
 test('schedule input separates named/number recipients, date phrase and pipe body', async () => {
   const { contacts } = await wizardRig();
   const parsed = parseScheduleInput(
@@ -143,11 +231,11 @@ test('schedule requires preview confirmation and sends only at the due time', as
   await rig.wizard.begin('schedule', rig.command('to Sam in 2 days at 7:20 pm | Happy birthday, Sam!'));
 
   const preview = rig.replies.at(-1).text;
-  assert.match(preview, /To: Sam/);
+  assert.match(preview, /Recipient: Sam/);
   assert.match(preview, /Sunday, 4 January 2026 at 7:20 pm \(Asia\/Karachi\)/);
   assert.match(preview, /Happy birthday, Sam!/);
   assert.match(preview, /no advance notice/i);
-  assert.match(preview, /YES to confirm/);
+  assert.match(preview, /Confirm: reply YES/);
   assert.equal(rig.scheduler.pending().length, 0, 'preview must not persist a job');
   assert.ok(rig.socket.sent.every((message) => message.jid === OWNER), 'preview is private to the command chat');
 
@@ -165,6 +253,37 @@ test('schedule requires preview confirmation and sends only at the due time', as
   assert.ok(rig.socket.sent.some((message) => message.jid === SAM && message.text === 'Happy birthday, Sam!'));
 });
 
+test('wizard asks how to handle missing monthly dates and persists calendar recurrence', async () => {
+  const rig = await wizardRig();
+  await rig.wizard.begin(
+    'schedule',
+    rig.command('to Sam every month on the 31st at 9 am | Month-end update')
+  );
+  assert.match(rig.replies.at(-1).text, /Choose what happens when that date is missing/);
+  assert.match(rig.replies.at(-1).text, /1\. Skip/);
+  assert.match(rig.replies.at(-1).text, /2\. Use the last day/);
+  assert.equal(rig.scheduler.pending().length, 0);
+
+  await rig.answer('2');
+  const preview = rig.replies.at(-1).text;
+  assert.match(preview, /Missing-date rule: Use the last day/);
+  assert.match(preview, /Saturday, 31 January 2026 at 9:00 am/);
+  assert.match(preview, /Saturday, 28 February 2026 at 9:00 am/);
+  assert.match(preview, /Confirm: reply YES/);
+
+  await rig.answer('YES');
+  const job = rig.scheduler.pending()[0];
+  assert.equal(job.kind, 'calendar');
+  assert.equal(JSON.parse(job.cron).missingDatePolicy, 'last-day');
+  assert.equal(job.run_at, Date.UTC(2026, 0, 31, 4));
+
+  await rig.scheduler.tick(job.run_at);
+  const rearmed = rig.scheduler.get(job.id);
+  assert.equal(rearmed.status, 'pending');
+  assert.equal(rearmed.run_at, Date.UTC(2026, 1, 28, 4));
+  assert.ok(rig.socket.sent.some((message) => message.jid === SAM && message.text === 'Month-end update'));
+});
+
 test('guided schedule asks for missing fields in order and saves after YES', async () => {
   const rig = await wizardRig();
   await rig.wizard.begin('schedule', rig.command(''));
@@ -173,11 +292,11 @@ test('guided schedule asks for missing fields in order and saves after YES', asy
   await rig.answer('Sam');
   assert.match(rig.replies.at(-1).text, /What message should I send/);
   await rig.answer('Bring the folder');
-  assert.match(rig.replies.at(-1).text, /When should I send it/);
+  assert.match(rig.replies.at(-1).text, /When should it be sent/);
   await rig.answer('in 2 days');
-  assert.match(rig.replies.at(-1).text, /What time should I use/);
+  assert.match(rig.replies.at(-1).text, /Enter an exact time/);
   await rig.answer('7:20 pm');
-  assert.match(rig.replies.at(-1).text, /Please confirm/);
+  assert.match(rig.replies.at(-1).text, /Review scheduled message/);
   assert.equal(rig.scheduler.pending().length, 0);
   await rig.answer('yes');
   assert.equal(rig.scheduler.pending().length, 1);
@@ -190,7 +309,7 @@ test('remind requires a per-request recipient and never targets the self chat', 
     'remind',
     rig.command('to 923001234568 in 2 days at 7:20 pm | Take your medicine', 'remind')
   );
-  assert.match(rig.replies.at(-1).text, /To: \+923001234568/);
+  assert.match(rig.replies.at(-1).text, /Recipient: \+923001234568/);
   assert.equal(rig.scheduler.pending().length, 0);
   await rig.answer('yes');
 
@@ -205,7 +324,7 @@ test('remind requires a per-request recipient and never targets the self chat', 
     'remind',
     selfReminder.command('to 15550009999 in 2 days at 7:20 pm | Do the thing', 'remind')
   );
-  assert.match(selfReminder.replies.at(-1).text, /cannot go to the “You” chat/);
+  assert.match(selfReminder.replies.at(-1).text, /cannot be sent to the “You” chat/);
   assert.equal(selfReminder.scheduler.pending().length, 0);
 });
 
@@ -215,7 +334,7 @@ test('ambiguous saved contact names cause a choice instead of picking one', asyn
     { jid: '923001234569@s.whatsapp.net', name: 'Sam Two' },
   ] });
   await rig.wizard.begin('schedule', rig.command('to Sam in 2 days at 7:20 pm | Hello'));
-  assert.match(rig.replies.at(-1).text, /more than one contact/);
+  assert.match(rig.replies.at(-1).text, /Several contacts match/);
   assert.match(rig.replies.at(-1).text, /Sam One/);
   assert.match(rig.replies.at(-1).text, /Sam Two/);
   assert.equal(rig.scheduler.pending().length, 0);
@@ -254,11 +373,14 @@ test('self-chat permits owner scheduling only, accepts guided replies, and ignor
   const queue = new OutboundQueue(socket, config, quiet);
   queue.attach();
   const scheduler = new Scheduler({ db, socket, logger: quiet });
+  scheduler.now = () => NOW;
+  scheduler.add({ jid: SAM, text: 'Late item', runAt: NOW - 60 * 1_000 });
+  scheduler.add({ jid: SAM, text: 'Prepare the report', runAt: NOW + 60 * 60 * 1_000 });
   const wizard = new ScheduleWizard({
     db, scheduler, contacts, logger: quiet, config, selfJid: OWNER, now: () => NOW,
   });
   const dispatcher = new Dispatcher({ plugins, config, logger: quiet, db });
-  dispatcher.bot = { scheduler, scheduleWizard: wizard, selfJid: OWNER };
+  dispatcher.bot = { scheduler, scheduleWizard: wizard, contacts, selfJid: OWNER };
   dispatcher.trackSocket(socket);
   socket.on('messages.upsert', async ({ messages = [], type }) => {
     for (const raw of messages) {
@@ -267,6 +389,15 @@ test('self-chat permits owner scheduling only, accepts guided replies, and ignor
       await dispatcher.handle(socket, msg);
     }
   });
+
+  await socket.inject('.agenda today', { jid: OWNER, from: OWNER, fromMe: true });
+  assert.match(socket.outbox.at(-1).text, /Agenda — today/);
+  assert.match(socket.outbox.at(-1).text, /Timezone: Asia\/Karachi/);
+  assert.match(socket.outbox.at(-1).text, /Sam/);
+  assert.match(socket.outbox.at(-1).text, /923001234567/);
+  assert.match(socket.outbox.at(-1).text, /Prepare the report/);
+  assert.ok(socket.outbox.at(-1).text.indexOf('Overdue') < socket.outbox.at(-1).text.indexOf('Today'));
+  assert.equal(scheduler.pending().length, 2, 'agenda must not alter or send scheduled jobs');
 
   await socket.inject('.schedule', { jid: OWNER, from: OWNER, fromMe: true });
   assert.match(socket.outbox.at(-1).text, /Who should receive/);

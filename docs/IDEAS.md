@@ -33,6 +33,7 @@ The hard part (capturing content on the way in) was already done.
 |---|---|---|---|---|
 | **`.note` / `.todo`** | S | none | ✅ | Capture from any chat, list, complete. |
 | **`.remind` / `.schedule` guided flow** | M | none | ✅ | Deterministic local date parsing, saved-name/phone recipient resolution, Asia/Karachi timezone, persistent 24-hour drafts, and recipient/time/message preview with explicit confirmation. `.remind` sends to a per-request WhatsApp contact/number, never the self-chat or Telegram. |
+| **`.agenda`** | S | none | ✅ | Read-only `.agenda today\|week`; groups pending schedules by local date, shows overdue items first, and lists the next occurrence of each recurring schedule. |
 | **`.search`** | M | none | ✅ | FTS5 with `porter unicode61`, falls back to `LIKE` if the SQLite build lacks FTS5 or a MATCH expression is malformed. |
 | **`.forward`** | S | low | ✅ | Forwards a cached message, including one that was deleted. |
 | **Voice-note transcription** | M | none | 🟡 | Groq `whisper-large-v3-turbo` / OpenAI `whisper-1`. Gemini has no audio-transcription endpoint and says so rather than pretending. |
@@ -58,7 +59,8 @@ decision you should make explicitly, not one a bot should make for you.
 
 | Idea | Effort | Risk | Status | Notes |
 |---|---|---|---|---|
-| **Persistent scheduler** | M | none | ✅ | Survives restarts. Recurring jobs re-arm from `run_at + interval`, not from "now", so a delayed tick does not slide the schedule later. |
+| **Persistent scheduler** | M | none | ✅ | Survives restarts; fixed intervals skip missed runs, while calendar rules re-arm at the next local wall-clock occurrence. |
+| **Calendar recurrence rules** | M | none | ✅ | Biweekly weekday, monthly date/weekday, and annual rules; preview next three occurrences and require an explicit policy for missing dates. |
 | **Recurring templates** | S | low | ✅ | `every day 9am`, `every friday 5pm`, `every 30m`. |
 | **Keyword triggers** | M | **medium** | ✅ **off by default** | Per-chat 90s cooldown. Enabling it logs a warning and writes an audit entry — see the note below. |
 | **Webhooks out** | M | low | ✅ | Owner-added URLs only. Optional HMAC-SHA256 in `x-nexus-signature`. Payload is metadata + text, never media bytes. Consecutive failures are counted per hook. |

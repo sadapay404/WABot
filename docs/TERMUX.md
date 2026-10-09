@@ -151,15 +151,22 @@ or a WhatsApp number (country code included; `+` is optional; Pakistani local
 ```text
 .schedule to Sam on 9 September at 12:00 am | Happy birthday!
 .schedule to Sam every Friday at 8:00 pm | Your weekly update
+.schedule to Sam every 2 weeks on Monday at 9 am | Send the report
+.schedule to Sam the 15th of every month at 9 am | Rent is due
+.schedule to Sam last Friday of every month at 5 pm | Monthly update
+.schedule to Sam annually on 9 September at 9 am | Happy birthday!
 .remind to 923001234567 in 2 days at 7:20 pm | Take your medicine
 ```
 
 The first pipe separates the schedule details from the exact message body;
 additional pipes are kept in the message. Supported deterministic patterns
-include `in N days at H:MM am/pm`, `tomorrow at 9 am`, `on 9 September at
-12:00 am`, `Friday at 5 pm`, `every day at 8 pm`, and `every Friday at 8 pm`.
-Use an explicit AM/PM for bare hours. The parser is local and rules-based; it
-does not send your request to an AI service.
+include `in N days at H:MM am/pm`, `tomorrow at 9 am`, `every 2 weeks on Monday
+at 9 am`, `the 15th of every month at 9 am`, `last Friday of every month at
+5 pm`, and `annually on 9 September at 9 am`. Use AM/PM for a bare hour.
+For a date such as the 31st that is absent in some months, the bot asks whether
+to skip those months or use their last day. Recurring previews show the next
+three send times. The parser is local and rules-based; it does not send your
+request to an AI service.
 
 If you type only `.schedule` or `.remind`, or leave something out, the bot asks
 for the missing recipient, message, date/time, or time-of-day. It always shows
@@ -168,9 +175,9 @@ it or `NO`/`CANCEL` to discard it. An unfinished draft survives a restart and
 expires after 24 hours. If a saved contact name is missing or ambiguous, reply
 with the exact saved name or a full phone number.
 
-`.schedule` and `.remind` can be entered in the “You” chat. The paired
-Business account’s own number must be in `OWNER_JIDS`; the dispatcher accepts
-only owner-authorized schedule/remind commands there, only for fresh messages.
+`.schedule`, `.remind`, and the read-only `.agenda` can be entered in the “You”
+chat. The paired Business account’s own number must be in `OWNER_JIDS`; the
+dispatcher accepts these owner-authorized commands there only for fresh messages.
 It ignores the bot’s own sent-message echoes and replayed history, and does not
 open other commands in the self-chat.
 
@@ -182,13 +189,18 @@ and phone notifications still depend on the Business account being online and
 the recipient’s WhatsApp settings.
 
 ```text
+.agenda today  # pending sends due today
+.agenda week   # pending sends across the next 7 local calendar days
 .jobs          # list pending jobs
 .jobs cancel 12 # cancel job #12
 ```
 
+`.agenda` is read-only, groups schedules by local date, and shows the next
+occurrence of each repeating schedule; overdue pending sends appear first.
+`.jobs` remains available and currently displays timestamps in UTC.
 One-time jobs that become overdue while the phone is offline are delivered once
 when it reconnects. Recurring jobs skip missed intervals rather than sending a
-catch-up burst. `.jobs` currently displays timestamps in UTC.
+catch-up burst.
 
 ## Day to day
 

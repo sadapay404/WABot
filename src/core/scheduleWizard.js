@@ -6,14 +6,19 @@
  * after confirmation or when the owner cancels it.
  */
 
-import { formatDateTime, parseClock, parseWhen } from '../lib/when.js';
+import { formatDateTime, listCalendarOccurrences, parseClock, parseWhen } from '../lib/when.js';
 import { jidToPhone, normalizeJid, phoneToJid } from './jid.js';
 
 const DRAFT_TTL_MS = 24 * 60 * 60 * 1_000;
-const DATE_HELP =
-  'Examples: `in 2 days at 7:20 pm`, `tomorrow at 9 am`, ' +
-  '`on 9 September at 12:00 am`, or `every Friday at 8 pm`. ' +
-  'Use AM/PM for a bare hour.';
+const DATE_HELP = [
+  'Accepted examples:',
+  '• `tomorrow at 9 am`',
+  '• `in 2 days at 7:20 pm`',
+  '• `on 9 September at 12:00 am`',
+  '• `every 2 weeks on Monday at 9 am`',
+  '• `last Friday of every month at 5 pm`',
+  'Use AM/PM when entering a bare hour.',
+].join('\n');
 const TARGET_STOPWORDS = new Set([
   'at', 'in', 'on', 'every', 'tomorrow', 'today', 'next', 'day', 'days', 'week', 'weeks',
   'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
@@ -155,27 +160,52 @@ export function resolveRecipient(value, contacts = null) {
 
 function targetPrompt(kind, state) {
   if (state.targetProblem === 'self') {
-    return 'A reminder cannot go to the “You” chat. Enter a different WhatsApp contact or number (for example, your spare number).';
+    return [
+      '*Choose another recipient*',
+      'A reminder cannot be sent to the “You” chat.',
+      'Enter a different WhatsApp contact name or number.',
+    ].join('\n');
   }
   if (state.targetProblem === 'group' && kind === 'remind') {
-    return 'A reminder needs one receiving contact or phone number, not a group. Enter the contact name or number.';
+    return [
+      '*One recipient is required*',
+      'A reminder cannot be sent to a group.',
+      'Enter a saved contact name or one WhatsApp number.',
+    ].join('\n');
   }
   if (state.targetProblem === 'ambiguous' && state.targetMatches?.length) {
     const options = state.targetMatches
       .slice(0, 8)
       .map((item, index) => `${index + 1}. ${item.label}${item.phone ? ` (+${item.phone})` : ''}`)
       .join('\n');
-    return `I found more than one contact for “${state.targetQuery}”. Reply with the full saved name or a number:\n${options}`;
+    return [
+      `*Several contacts match “${state.targetQuery}”*`,
+      options,
+      'Reply with a number from this list, the full saved name, or a phone number.',
+    ].join('\n');
   }
   if (state.targetProblem === 'invalid-number') {
-    return 'That number does not look complete. Enter a full WhatsApp number with country code (the + sign is optional; Pakistani 03… mobile numbers also work), or a saved contact name.';
+    return [
+      '*Recipient number not recognized*',
+      'Enter a complete international number, with or without `+`, or a saved contact name.',
+      'Pakistani mobile numbers in `03…` format are also accepted.',
+    ].join('\n');
   }
   if (state.targetProblem === 'not-found') {
-    return `I could not find “${state.targetQuery}” in your saved contacts. Reply with the exact saved contact name, a full WhatsApp number with country code, or a Pakistani local 03… mobile number (the + is optional).`;
+    return [
+      `*Contact not found: “${state.targetQuery}”*`,
+      'Enter the exact saved contact name or a complete WhatsApp number.',
+      'Pakistani mobile numbers in `03…` format are accepted.',
+    ].join('\n');
   }
-  return kind === 'remind'
-    ? 'Who should receive this reminder? Reply with a saved contact name or a full WhatsApp number (country code included; + is optional; Pakistani 03… mobile format also works). It will be sent there, not to the “You” chat or Telegram.'
-    : 'Who should receive the scheduled message? Reply with a saved contact name or a full WhatsApp number (country code included; + is optional; Pakistani 03… mobile format also works).';
+
+  const lines = [
+    kind === 'remind' ? '*Who should receive the reminder?*' : '*Who should receive the message?*',
+    'Reply with a saved contact name or a WhatsApp number.',
+    'Number formats: international number with or without `+`, or Pakistani mobile `03…` format.',
+  ];
+  if (kind === 'remind') lines.push('The reminder goes to that contact—not to the “You” chat or Telegram.');
+  return lines.join('\n');
 }
 
 function showRecipientChoice(state, answer, contacts, kind, selfJid) {
@@ -197,24 +227,64 @@ function showRecipientChoice(state, answer, contacts, kind, selfJid) {
   return result;
 }
 
+function nextPreviewTimes(parsed) {
+  if (parsed.recurrence) {
+    return listCalendarOccurrences(parsed.runAt, parsed.recurrence, 3);
+  }
+  if (parsed.intervalMs) {
+    return [0, 1, 2].map((index) => parsed.runAt + index * parsed.intervalMs);
+  }
+  return [parsed.runAt];
+}
+
 function formatPreview(state, timeZone) {
   const phone = jidToPhone(state.targetJid);
   const recipient = `${state.targetLabel}${phone && !String(state.targetLabel).includes(phone) ? ` (+${phone})` : ''}`;
   const sentText = state.kind === 'remind' ? `Reminder: ${state.text}` : state.text;
+  const recurring = state.parsed.kind === 'recurring';
   const lines = [
-    `Please confirm this ${state.kind === 'remind' ? 'reminder' : 'scheduled message'}:`,
-    `To: ${recipient}`,
-    `Send time: ${formatDateTime(state.parsed.runAt, timeZone)}`,
+    `*Review ${state.kind === 'remind' ? 'reminder' : 'scheduled message'}*`,
+    `Recipient: ${recipient}`,
   ];
-  if (state.parsed.kind === 'recurring') lines.push(`Repeats: ${state.parsed.label}`);
-  lines.push(`Message: ${sentText}`);
-  lines.push('Only this message will be sent at the due time; no advance notice will be sent.');
-  lines.push('Reply YES to confirm, or NO/CANCEL to discard.');
+
+  if (recurring) {
+    lines.push(`Repeat: ${state.parsed.label}`);
+    if (state.parsed.recurrence?.missingDatePolicy) {
+      const policy = state.parsed.recurrence.missingDatePolicy === 'last-day'
+        ? 'Use the last day of the month/year.'
+        : 'Skip a month/year without that date.';
+      lines.push(`Missing-date rule: ${policy}`);
+    }
+    lines.push('Next send times:');
+    for (const [index, epoch] of nextPreviewTimes(state.parsed).entries()) {
+      lines.push(`${index + 1}. ${formatDateTime(epoch, timeZone)}`);
+    }
+  } else {
+    lines.push(`Send time: ${formatDateTime(state.parsed.runAt, timeZone)}`);
+  }
+
+  lines.push('Message:', sentText);
+  lines.push('Delivery: sent only at its due time; no advance notice is sent.');
+  lines.push('Confirm: reply YES. Discard: reply NO or CANCEL.');
   return lines.join('\n');
 }
 
 function answerText(value) {
   return String(value || '').trim();
+}
+
+function recurrencePolicyPrompt(parsed) {
+  const isLeapDay = parsed.recurrence?.type === 'yearly-date';
+  const condition = isLeapDay
+    ? '29 February does not occur every year.'
+    : `Day ${parsed.recurrence?.day} does not occur in every month.`;
+  return [
+    '*Choose what happens when that date is missing*',
+    condition,
+    '1. Skip that month or year.',
+    '2. Use the last day of that month instead.',
+    'Reply 1 or 2.',
+  ].join('\n');
 }
 
 export class ScheduleWizard {
@@ -332,10 +402,8 @@ export class ScheduleWizard {
     }
 
     this.saveDraft(state);
-    const reply = (message) => ctx.reply(message);
-    if (previous) {
-      await reply('I replaced the older unfinished scheduling draft with this one.');
-    }
+    const reply = (message) =>
+      ctx.reply(previous ? `Previous draft replaced.\n\n${message}` : message);
     return this.#advance(state, reply);
   }
 
@@ -348,6 +416,30 @@ export class ScheduleWizard {
       this.deleteDraft(state.ownerJid);
       await reply('Draft cancelled. Nothing was scheduled.');
       return true;
+    }
+
+    if (state.step === 'recurrence-policy') {
+      const choice = answer.toLowerCase().trim();
+      const recurrenceDatePolicy = /^(?:1|skip|skip months?|skip missing dates?)$/.test(choice)
+        ? 'skip'
+        : /^(?:2|last|last day|use last day|last-day)$/.test(choice)
+          ? 'last-day'
+          : null;
+      if (!recurrenceDatePolicy) {
+        await reply(recurrencePolicyPrompt(state.parsed));
+        return true;
+      }
+
+      const parsed = parseWhen(state.whenExpression, this.now(), this.timeZone, {
+        requireTime: true,
+        recurrenceDatePolicy,
+      });
+      if (!parsed || parsed.needsTime || parsed.needsDatePolicy) {
+        await reply('I could not apply that rule. Reply 1 to skip missing dates or 2 to use the last day.');
+        return true;
+      }
+      state.parsed = parsed;
+      return this.#advance(state, reply);
     }
 
     if (state.step === 'confirm') {
@@ -370,6 +462,7 @@ export class ScheduleWizard {
             runAt: state.parsed.runAt,
             kind: state.parsed.kind,
             intervalMs: state.parsed.intervalMs,
+            recurrence: state.parsed.recurrence || null,
           });
           this.deleteDraft(state.ownerJid);
           this.audit?.record?.({
@@ -379,10 +472,14 @@ export class ScheduleWizard {
             targetJid: state.targetJid,
             detail: `${state.parsed.label}: ${sendText.slice(0, 80)}`,
           });
-          await reply(
-            `${state.kind === 'remind' ? '🔔 Reminder' : '⏰ Scheduled message'} ` +
-            `confirmed as job #${job.id}. Nothing is sent to the recipient before its due time.`
-          );
+          await reply([
+            `*${state.kind === 'remind' ? 'Reminder' : 'Scheduled message'} saved*`,
+            `Job: #${job.id}`,
+            `Recipient: ${state.targetLabel}`,
+            `First send: ${formatDateTime(state.parsed.runAt, this.timeZone)}`,
+            ...(state.parsed.kind === 'recurring' ? [`Repeat: ${state.parsed.label}`] : []),
+            'No message is sent before its scheduled time.',
+          ].join('\n'));
         } catch (error) {
           this.logger.error(`could not create ${state.kind} job: ${error.message}`);
           await reply(`I could not save that schedule: ${error.message}. Your draft is still here; reply YES to retry or CANCEL to discard.`);
@@ -435,20 +532,21 @@ export class ScheduleWizard {
         state.parsed = null;
         state.step = 'when';
         this.saveDraft(state);
-        await reply(
-          parsed?.past
-            ? `That date/time is already in the past. Please give me a future one.\n${DATE_HELP}`
-            : `I could not understand “${answer}”. Please enter a supported date/time.\n${DATE_HELP}`
-        );
+        await reply([
+          parsed?.past ? '*That time has passed*' : '*Date/time not understood*',
+          parsed?.past ? 'Enter a future date and time.' : `I could not parse “${answer}”. Try one of these formats:`,
+          DATE_HELP,
+        ].join('\n'));
         return true;
       }
       if (parsed.needsTime) {
         state.whenBase = parsed.dateExpression || answer;
         state.step = 'time';
         this.saveDraft(state);
-        await reply(
-          `${parsed.ambiguousTime ? 'That clock time is ambiguous or invalid.' : 'I have the date/repeat pattern.'} What time should I use? Include AM/PM, for example 7:20 pm.`
-        );
+        await reply([
+          parsed.ambiguousTime ? '*Clock time is unclear*' : '*Date/repeat pattern understood*',
+          'Enter an exact time, such as `7:20 pm` or `19:20`.',
+        ].join('\n'));
         return true;
       }
       state.parsed = parsed;
@@ -469,9 +567,10 @@ export class ScheduleWizard {
       const parsed = parseWhen(expression, this.now(), this.timeZone, { requireTime: true });
       if (!parsed || parsed.needsTime || parsed.past) {
         this.saveDraft(state);
-        await reply(
-          `I still could not resolve that clock time. Use an exact time such as 7:20 pm or 19:20.\n${DATE_HELP}`
-        );
+        await reply([
+          '*Clock time not understood*',
+          'Enter an exact time, such as `7:20 pm` or `19:20`.',
+        ].join('\n'));
         return true;
       }
       state.whenExpression = expression;
@@ -496,18 +595,17 @@ export class ScheduleWizard {
     if (!state.text) {
       state.step = 'message';
       this.saveDraft(state);
-      await reply(
-        state.kind === 'remind'
-          ? 'What should I remind them about? This exact text will be sent at the due time.'
-          : 'What message should I send? This exact text will be sent at the due time.'
-      );
+      await reply([
+        state.kind === 'remind' ? '*What should I remind them about?*' : '*What message should I send?*',
+        'This exact text will be sent to the recipient at the due time.',
+      ].join('\n'));
       return true;
     }
 
     if (!state.whenExpression) {
       state.step = 'when';
       this.saveDraft(state);
-      await reply(`When should I send it?\n${DATE_HELP}`);
+      await reply([`*When should it be sent?*`, DATE_HELP].join('\n'));
       return true;
     }
 
@@ -517,20 +615,29 @@ export class ScheduleWizard {
       state.whenExpression = '';
       state.parsed = null;
       this.saveDraft(state);
-      await reply(
-        parsed?.past
-          ? `That date/time is already in the past. Please enter a future one.\n${DATE_HELP}`
-          : `I could not understand that date/time.\n${DATE_HELP}`
-      );
+      await reply([
+        parsed?.past ? '*That time has passed*' : '*Date/time not understood*',
+        parsed?.past ? 'Enter a future date and time.' : 'Use one of the supported formats below.',
+        DATE_HELP,
+      ].join('\n'));
       return true;
     }
     if (parsed.needsTime) {
       state.whenBase = parsed.dateExpression || state.whenExpression;
       state.step = 'time';
       this.saveDraft(state);
-      await reply(
-        `${parsed.ambiguousTime ? 'That clock time is ambiguous or invalid.' : 'I have the date/repeat pattern.'} What time should I use? Include AM/PM, for example 7:20 pm.`
-      );
+      await reply([
+        parsed.ambiguousTime ? '*Clock time is unclear*' : '*Date/repeat pattern understood*',
+        'Enter an exact time, such as `7:20 pm` or `19:20`.',
+      ].join('\n'));
+      return true;
+    }
+
+    if (parsed.needsDatePolicy) {
+      state.parsed = parsed;
+      state.step = 'recurrence-policy';
+      this.saveDraft(state);
+      await reply(recurrencePolicyPrompt(parsed));
       return true;
     }
 
@@ -539,7 +646,7 @@ export class ScheduleWizard {
       state.whenExpression = '';
       state.parsed = null;
       this.saveDraft(state);
-      await reply(`That date/time is not in the future. Please enter a future one.\n${DATE_HELP}`);
+      await reply(['*That time is not in the future*', DATE_HELP].join('\n'));
       return true;
     }
 
