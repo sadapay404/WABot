@@ -256,8 +256,9 @@ That does a real push-then-pull and tells you which setting is wrong if it fails
 **Verified on this machine:** the `nexus` control script end to end — start,
 `status` reporting the real bot PID and memory, crash-restart by the supervisor
 (a killed bot came back under a new PID), clean stop leaving zero processes, and
-safe double-stop. The bot itself booted under the supervisor with
-`ready · 34 command(s) · 5 session(s)`.
+safe double-stop. The previous supervisor smoke test booted with
+`ready · 34 command(s) · 5 session(s)`. After adding `.agenda`, the current
+no-connection dry-run registry reports 35 commands across 13 plugin files.
 
 **Not verified:** Termux itself. This sandbox is Linux, not Android, so
 `pkg install`, `termux-wake-lock`, `Termux:Boot` autostart, and Android's

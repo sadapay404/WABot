@@ -21,7 +21,7 @@ cp .env.example .env      # leave NEXUS_MODE=dry-run for now
 
 npm run preview           # interactive console, ZERO WhatsApp connection
 npm run dashboard         # headless + web dashboard on :3000
-npm test                  # 73 tests
+npm test                  # 168 tests
 ```
 
 In the preview console try:
