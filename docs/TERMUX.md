@@ -139,18 +139,51 @@ Xiaomi/Huawei/Oppo/Vivo are the worst offenders here. Check
 
 ## Scheduling messages and reminders
 
-The scheduler is already enabled and stores jobs in SQLite, so one-time and
-recurring jobs survive a bot restart. In `.env`, the default `TZ=UTC` controls
-how natural-language times such as `tomorrow 9am` are interpreted. For Bannu
-local time, set `TZ=Asia/Karachi` before creating new jobs; already saved jobs
-are absolute timestamps and will not shift when you change the timezone.
+The scheduler stores jobs in SQLite, so one-time and recurring jobs survive a
+bot restart. New schedule/reminder dates use `SCHEDULE_TIMEZONE=Asia/Karachi`
+(the default), not the Termux/server timezone. A saved job is an absolute
+instant, so changing this setting later does not move existing jobs.
+
+You can enter a complete request in the “You” chat using a saved contact name
+or a WhatsApp number (country code included; `+` is optional; Pakistani local
+`03…` mobile format is also accepted):
 
 ```text
-.schedule tomorrow 9am | Send the report     # send in the chat where you typed it
-.schedule every day 8am | Take your medicine # recurring message
-.remind in 20 minutes | Stretch               # reminder to your own chat
-.jobs                                           # list pending jobs
-.jobs cancel 12                                 # cancel job #12
+.schedule to Sam on 9 September at 12:00 am | Happy birthday!
+.schedule to Sam every Friday at 8:00 pm | Your weekly update
+.remind to 923001234567 in 2 days at 7:20 pm | Take your medicine
+```
+
+The first pipe separates the schedule details from the exact message body;
+additional pipes are kept in the message. Supported deterministic patterns
+include `in N days at H:MM am/pm`, `tomorrow at 9 am`, `on 9 September at
+12:00 am`, `Friday at 5 pm`, `every day at 8 pm`, and `every Friday at 8 pm`.
+Use an explicit AM/PM for bare hours. The parser is local and rules-based; it
+does not send your request to an AI service.
+
+If you type only `.schedule` or `.remind`, or leave something out, the bot asks
+for the missing recipient, message, date/time, or time-of-day. It always shows
+a preview of the recipient, local send time, and message. Reply `YES` to save
+it or `NO`/`CANCEL` to discard it. An unfinished draft survives a restart and
+expires after 24 hours. If a saved contact name is missing or ambiguous, reply
+with the exact saved name or a full phone number.
+
+`.schedule` and `.remind` can be entered in the “You” chat. The paired
+Business account’s own number must be in `OWNER_JIDS`; the dispatcher accepts
+only owner-authorized schedule/remind commands there, only for fresh messages.
+It ignores the bot’s own sent-message echoes and replayed history, and does not
+open other commands in the self-chat.
+
+A `.remind` requires a receiving contact/number for that request. It is sent
+from the paired WhatsApp Business account to that destination; it does not go
+to the “You” chat or Telegram, and the recipient does not need to message the
+bot first. No message is sent to the recipient before the due time. Delivery
+and phone notifications still depend on the Business account being online and
+the recipient’s WhatsApp settings.
+
+```text
+.jobs          # list pending jobs
+.jobs cancel 12 # cancel job #12
 ```
 
 One-time jobs that become overdue while the phone is offline are delivered once

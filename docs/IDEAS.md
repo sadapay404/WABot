@@ -32,7 +32,7 @@ The hard part (capturing content on the way in) was already done.
 | Idea | Effort | Risk | Status | Notes |
 |---|---|---|---|---|
 | **`.note` / `.todo`** | S | none | ✅ | Capture from any chat, list, complete. |
-| **`.remind`** | M | none | ✅ | Relative (`in 20 minutes`), clock (`at 8pm`), weekday (`friday 5pm`), recurring (`every day 9am`). Two shapes: `.remind call mom at 8pm` and `.remind in 20 minutes \| call mom`. |
+| **`.remind` / `.schedule` guided flow** | M | none | ✅ | Deterministic local date parsing, saved-name/phone recipient resolution, Asia/Karachi timezone, persistent 24-hour drafts, and recipient/time/message preview with explicit confirmation. `.remind` sends to a per-request WhatsApp contact/number, never the self-chat or Telegram. |
 | **`.search`** | M | none | ✅ | FTS5 with `porter unicode61`, falls back to `LIKE` if the SQLite build lacks FTS5 or a MATCH expression is malformed. |
 | **`.forward`** | S | low | ✅ | Forwards a cached message, including one that was deleted. |
 | **Voice-note transcription** | M | none | 🟡 | Groq `whisper-large-v3-turbo` / OpenAI `whisper-1`. Gemini has no audio-transcription endpoint and says so rather than pretending. |

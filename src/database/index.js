@@ -196,6 +196,17 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_due ON jobs(status, run_at);
 
+-- Guided schedule/reminder drafts survive restarts but expire after 24 hours.
+CREATE TABLE IF NOT EXISTS schedule_drafts (
+  owner_jid  TEXT PRIMARY KEY,
+  chat_jid   TEXT NOT NULL,
+  state_json TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_schedule_drafts_expiry ON schedule_drafts(expires_at);
+
 CREATE TABLE IF NOT EXISTS triggers (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   chat_jid    TEXT,

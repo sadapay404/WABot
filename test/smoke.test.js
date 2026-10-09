@@ -229,7 +229,7 @@ test('containment: a throwing plugin is caught, reported, and never crashes', as
   assert.match(socket.outbox.at(-1).text, /That command failed: deliberate plugin failure/);
 });
 
-test('dispatcher: the bot ignores its own messages (no feedback loop)', async () => {
+test('dispatcher: the bot ignores own messages outside the restricted self-chat scheduler flow', async () => {
   const { socket, dispatcher } = await dispatchFixture('.secret', { from: OWNER });
   socket.outbox.length = 0;
   await dispatcher.handle(socket, normalize(rawMessage('.secret', { jid: OWNER, fromMe: true })));

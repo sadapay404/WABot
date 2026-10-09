@@ -165,8 +165,9 @@ export class Scheduler {
 
   async #deliver(job) {
     if (!this.socket) throw new Error('no transport attached');
-    const prefix = job.kind.startsWith('every:') ? '🔁 ' : '⏰ ';
-    await this.socket.sendMessage(job.jid, { text: `${prefix}${job.text}` });
+    // Deliver the confirmed message body verbatim. Schedule metadata belongs in
+    // the owner-side preview, not as an unsolicited prefix sent to recipients.
+    await this.socket.sendMessage(job.jid, { text: String(job.text ?? '') });
   }
 
   #finish(job, now) {

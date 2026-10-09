@@ -121,6 +121,9 @@ export function buildConfig(overrides = {}) {
       // Lower it in tests so delivery can be observed without waiting.
       tickMs: int(process.env.SCHEDULER_TICK_MS, 15_000),
       maxPerTick: int(process.env.SCHEDULER_MAX_PER_TICK, 25),
+      // Scheduling dates follow the user's local wall clock, not the server's
+      // operating-system timezone. Existing jobs remain absolute timestamps.
+      timezone: String(overrides.schedulerTimezone ?? process.env.SCHEDULE_TIMEZONE ?? 'Asia/Karachi').trim(),
     },
 
     safety: {
@@ -209,6 +212,11 @@ export function validateConfig(cfg) {
     problems.push(
       'NEXUS_MODE=live but OWNER_JIDS is empty — every contact could run owner commands.'
     );
+  }
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: cfg.scheduler.timezone });
+  } catch {
+    problems.push(`SCHEDULE_TIMEZONE=${cfg.scheduler.timezone} is not a valid IANA timezone.`);
   }
   if (!cfg.isDryRun && !cfg.wa.pairingNumber) {
     warnings.push('WA_PAIRING_NUMBER empty — falling back to QR code (needs a camera).');

@@ -119,6 +119,7 @@ export class OutboundQueue {
     this.volumeWindow = [];
     this.lastVolumeAlertAt = 0;
     this.rawSendMessage = null;
+    this.beforeSendObservers = new Set();
     this.queue = [];
     this.active = 0;
     this.stats = {
@@ -135,6 +136,23 @@ export class OutboundQueue {
     this.logger.info(
       `outbound volume alert active (${this.volumeLimit} sends / ${Math.round(this.volumeWindowMs / 1000)}s)`
     );
+  }
+
+  /** Observe sends immediately before transport, for echo suppression/auditing. */
+  onBeforeSend(callback) {
+    if (typeof callback !== 'function') throw new TypeError('send observer must be a function');
+    this.beforeSendObservers.add(callback);
+    return () => this.beforeSendObservers.delete(callback);
+  }
+
+  #notifyBeforeSend(jid, content) {
+    for (const observer of this.beforeSendObservers) {
+      try {
+        observer(jid, content);
+      } catch (error) {
+        this.logger.warn(`outbound observer failed: ${error.message}`);
+      }
+    }
   }
 
   /** Wrap a socket with outbound pacing and loop protection. */
@@ -272,13 +290,15 @@ export class OutboundQueue {
       // This is sent on the original transport while the current queue item is
       // active; routing it back through the queue here would deadlock at
       // concurrency 1. It is one owner-only safety alert, not user traffic.
-      await this.rawSendMessage(ownerJid, {
+      const content = {
         text:
           `⚠️ Outbound volume warning.\n\n` +
           `${count} successful messages were sent across chats within ${seconds}s ` +
           `(threshold: ${this.volumeLimit}). Sending continues under normal limits; ` +
           `use ".panic" if this was unexpected.`,
-      });
+      };
+      this.#notifyBeforeSend(ownerJid, content);
+      await this.rawSendMessage(ownerJid, content);
     } catch (error) {
       this.logger.error(`outbound volume owner alert failed: ${error.message}`);
     }
@@ -359,6 +379,7 @@ export class OutboundQueue {
   async #run(item) {
     try {
       if (this.typing && item.jid) await this.#simulateTyping(item.jid);
+      this.#notifyBeforeSend(item.jid, item.content);
       const res = await item.task();
       if (item.jid) {
         this.windows.set(item.jid, [...(this.windows.get(item.jid) || []), Date.now()]);

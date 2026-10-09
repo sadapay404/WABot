@@ -34,6 +34,7 @@ import { ProfileWatch } from './core/profileWatch.js';
 import { PresenceLog } from './core/presenceLog.js';
 import { GroupWatch } from './core/groupWatch.js';
 import { Scheduler } from './core/scheduler.js';
+import { ScheduleWizard } from './core/scheduleWizard.js';
 import { Triggers } from './core/triggers.js';
 import { Webhooks } from './core/webhooks.js';
 import { AuditLog } from './core/audit.js';
@@ -87,13 +88,16 @@ function wireEvents(socket, app) {
   const { dispatcher, cache, antiDelete, viewOnce, editWatch, registry, contacts, presenceLog, profileWatch, groupWatch, webhooks, logger: log } = app;
   const selfJid = () => (socket.user?.id ? normalizeJid(socket.user.id) : '');
 
-  on('messages.upsert', async ({ messages = [] } = {}) => {
+  on('messages.upsert', async ({ messages = [], type = null } = {}) => {
     for (const raw of messages) {
       try {
         // Group membership stubs carry no `message` — handle them first.
         groupWatch?.onMessage(raw);
 
         const msg = normalize(raw);
+        // Needed to ignore replayed self-chat commands from Baileys' history
+        // (`append`) while still accepting a fresh command typed on the phone (`notify`).
+        msg.upsertType = type || 'unknown';
         if (selfJid()) registry.countIn(selfJid());
 
         // View-once FIRST: the media blob is invalidated once the message is
@@ -289,12 +293,15 @@ async function main() {
     tickMs: config.scheduler.tickMs,
     maxPerTick: config.scheduler.maxPerTick,
   });
+  const scheduleWizard = new ScheduleWizard({
+    db, scheduler, contacts, logger, config, audit, selfJid,
+  });
 
   const app = {
     config, logger, db, startedAt,
     registry, contacts, cache, mediaStore, notes, audit, webhooks, triggers,
     presenceLog, profileWatch, groupWatch, editWatch, antiDelete, viewOnce,
-    scheduler, ai, backup, vault, plugins, dispatcher, queue, logs, connection,
+    scheduler, scheduleWizard, ai, backup, vault, plugins, dispatcher, queue, logs, connection,
     selfJid,
     // Kill-switch: the only thing that can stop outbound instantly.
     safety: {
@@ -308,6 +315,9 @@ async function main() {
     shutdown: (why) => shutdown(why),
   };
   dispatcher.bot = app;
+  // Install before-send echo tracking before jobs or watcher alerts can target
+  // the account's own “You” chat.
+  dispatcher.trackSocket(socket);
 
   wireEvents(socket, app);
 

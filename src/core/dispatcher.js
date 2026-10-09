@@ -26,6 +26,11 @@
  */
 
 import { parseCommand } from './message.js';
+import { normalizeJid } from './jid.js';
+
+const SELF_CHAT_SCHEDULE_COMMANDS = new Set(['schedule', 'sched', 'remind', 'reminder']);
+const SELF_ECHO_TTL_MS = 120_000;
+const SELF_ECHO_MAX_KEYS = 500;
 
 export class Dispatcher {
   /**
@@ -50,6 +55,8 @@ export class Dispatcher {
     this.defaultOwnerJid = defaultOwnerJid;
     /** name -> last invocation ms */
     this.lastRun = new Map();
+    this.selfEchoes = new Map();
+    this.observedQueues = new WeakSet();
     this.stats = { handled: 0, rejected: 0, errors: 0 };
   }
 
@@ -69,18 +76,101 @@ export class Dispatcher {
     });
   }
 
+  /** Attach echo suppression to the shared outbound queue before it can send. */
+  trackSocket(socket) {
+    const queue = socket?.__outboundQueue;
+    if (!queue?.onBeforeSend || this.observedQueues.has(queue)) return false;
+    this.observedQueues.add(queue);
+    queue.onBeforeSend((jid, content) => this.#rememberSelfEcho(socket, jid, content));
+    return true;
+  }
+
+  #echoKey(jid, text) {
+    return `${normalizeJid(jid)}\u0000${String(text || '').normalize('NFKC').replace(/\r\n/g, '\n').trim()}`;
+  }
+
+  #rememberSelfEcho(socket, jid, content) {
+    const selfJid = normalizeJid(socket?.user?.id);
+    if (!selfJid || normalizeJid(jid) !== selfJid) return;
+    const text = typeof content === 'string' ? content : content?.text ?? content?.caption ?? '';
+    if (!String(text).trim()) return;
+    const now = Date.now();
+    for (const [key, expiries] of this.selfEchoes) {
+      const live = expiries.filter((expires) => expires > now);
+      if (live.length) this.selfEchoes.set(key, live);
+      else this.selfEchoes.delete(key);
+    }
+    const key = this.#echoKey(selfJid, text);
+    const expiries = this.selfEchoes.get(key) || [];
+    expiries.push(now + SELF_ECHO_TTL_MS);
+    this.selfEchoes.set(key, expiries);
+    while (this.selfEchoes.size > SELF_ECHO_MAX_KEYS) {
+      this.selfEchoes.delete(this.selfEchoes.keys().next().value);
+    }
+  }
+
+  #consumeSelfEcho(socket, msg) {
+    const selfJid = normalizeJid(socket?.user?.id);
+    if (!selfJid || normalizeJid(msg.jid) !== selfJid || !msg.text) return false;
+    const key = this.#echoKey(selfJid, msg.text);
+    const expiries = (this.selfEchoes.get(key) || []).filter((expires) => expires > Date.now());
+    if (!expiries.length) {
+      this.selfEchoes.delete(key);
+      return false;
+    }
+    expiries.shift();
+    if (expiries.length) this.selfEchoes.set(key, expiries);
+    else this.selfEchoes.delete(key);
+    return true;
+  }
+
   /**
-   * Handle one normalised message.
-   * @param {object} socket real or mock socket
-   * @param {object} msg normalised message from core/message.js
+   * Handle one normalised message. Owner-authored commands in the account's
+   * own “You” chat are allowed only for schedule/remind; their plain-text
+   * replies are accepted only while a persisted scheduling draft is active.
    */
   async handle(socket, msg) {
     try {
-      if (msg.isBot) return; // never react to our own messages
+      this.trackSocket(socket);
       if (!msg.text) return; // media-only handling arrives in Phase 3
 
+      const selfJid = normalizeJid(socket?.user?.id);
+      const isSelfChat = Boolean(selfJid && normalizeJid(msg.jid) === selfJid);
+      const isFromSelfChat = Boolean(msg.isBot && isSelfChat);
+
+      // Our own queued messages (including prompts) can arrive as fromMe
+      // upserts in the “You” chat. Drop the exact outbound echo before looking
+      // for a command or a pending free-text answer.
+      if (isFromSelfChat && this.#consumeSelfEcho(socket, msg)) return;
+      if (msg.isBot && !isSelfChat) return; // ignore every outgoing message to other chats
+      // Baileys marks history replays and emitted local-send echoes as append.
+      // Never execute these as phone-entered self-chat commands.
+      if (isFromSelfChat && msg.upsertType && msg.upsertType !== 'notify') return;
+
       const parsed = parseCommand(msg, this.config.prefix);
-      if (!parsed.isCommand) return; // ignore ordinary chat
+      const isOwner = this.isOwner(msg.sender);
+      const scheduleCommand =
+        parsed.isCommand && isOwner && SELF_CHAT_SCHEDULE_COMMANDS.has(parsed.command);
+      const wizard = this.bot?.scheduleWizard;
+      const pendingDraft = isOwner && wizard?.hasPending?.(msg.sender, msg.jid);
+
+      if (isFromSelfChat && parsed.isCommand && !scheduleCommand) return;
+      if (isFromSelfChat && !scheduleCommand && !pendingDraft) return;
+
+      if (!parsed.isCommand) {
+        if (!pendingDraft || !wizard?.handleReply) return;
+        if (this.config.isObserve && !(isOwner && this.config.safety.observeAllowReplyToOwner)) {
+          this.stats.rejected++;
+          return;
+        }
+        this.stats.handled++;
+        await wizard.handleReply({
+          socket,
+          msg,
+          reply: (text, options) => this.#reply(socket, msg, text, options),
+        });
+        return;
+      }
 
       const plugin = this.plugins.resolve(parsed.command);
       if (!plugin) {
@@ -89,15 +179,12 @@ export class Dispatcher {
         return;
       }
 
-      const isOwner = this.isOwner(msg.sender);
-
       // ── Gate 1: authorisation ──────────────────────────────────
       if (plugin.ownerOnly && !isOwner) {
         this.stats.rejected++;
         // Deliberately SILENT. Answering a stranger with "that's owner-only"
         // confirms a bot exists on this number and invites probing — exactly
-        // the traffic pattern that gets a personal account flagged. We log it
-        // for you and say nothing to them.
+        // the traffic pattern that gets a personal account flagged.
         this.logger.warn(`blocked owner-only .${plugin.name} from ${msg.sender}`);
         return;
       }
@@ -117,7 +204,7 @@ export class Dispatcher {
         this.lastRun.set(key, Date.now());
       }
 
-      // ── Gate 3: observe-mode outbound block ────────────────────
+      // ── Gate 3: observe-mode outbound block ─────────────────────
       if (this.config.isObserve && !(isOwner && this.config.safety.observeAllowReplyToOwner)) {
         this.stats.rejected++;
         this.logger.info(
@@ -167,6 +254,7 @@ export class Dispatcher {
 
   async #reply(socket, msg, text, options = {}) {
     if (!text) return;
+    this.trackSocket(socket);
     // Baileys' hard ceiling per message; split rather than truncate silently.
     const LIMIT = 4000;
     const chunks = [];
@@ -175,6 +263,9 @@ export class Dispatcher {
     }
     let last;
     for (const chunk of chunks) {
+      if (!socket?.__outboundQueue?.onBeforeSend) {
+        this.#rememberSelfEcho(socket, msg.jid, { text: chunk });
+      }
       last = await socket.sendMessage(msg.jid, { text: chunk }, options);
     }
     return last;

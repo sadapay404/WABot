@@ -80,7 +80,7 @@ export default {
         let remindAt = null;
         let label = null;
         if (when) {
-          const parsed = parseWhen(when.expr);
+          const parsed = parseWhen(when.expr, Date.now(), ctx.config?.timezone || 'UTC');
           if (!parsed) return ctx.reply(`I could not understand the time "${when.expr}".`);
           remindAt = parsed.runAt;
           label = parsed.label;

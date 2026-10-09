@@ -115,8 +115,8 @@ in `OWNER_JIDS`.
 |---|---|---|
 | `.note <text> \| list \| del <id>` | owner | notes to yourself |
 | `.todo <text> [in 10m \| at 8pm \| tomorrow 9am]` | owner | tasks, optionally with a reminder |
-| `.remind <text> <when>` | owner | one-off or recurring reminder |
-| `.schedule <when> \| <message>` | owner | send a message later, once or on a repeat |
+| `.remind to <contact/number> <when> \| <text>` | owner | send a one-off or recurring reminder to that WhatsApp recipient |
+| `.schedule to <contact/number> <when> \| <message>` | owner | send to a recipient later, once or on a repeat; preview + confirmation |
 | `.jobs \| .jobs cancel <id>` | owner | list or cancel scheduled jobs |
 | `.search <terms>` | owner | full-text search over the message cache |
 | `.forward <stanzaId>` | owner | re-send a cached message, even a deleted one |

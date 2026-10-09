@@ -120,6 +120,33 @@ export class ContactStore {
     return this.db.prepare('SELECT COUNT(*) AS n FROM contacts').get().n;
   }
 
+  /**
+   * Resolve a saved address-book name without silently choosing an ambiguous
+   * partial match. Exact local-name matches are preferred; if none exist,
+   * return matching substrings so the caller can ask which person was meant.
+   */
+  findByName(query) {
+    const needle = String(query || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+    if (!needle) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT jid, local_name, notify_name, verified_name, phone_e164
+           FROM contacts
+          WHERE local_name IS NOT NULL AND local_name <> ''
+          ORDER BY local_name`
+      )
+      .all();
+    const exact = rows.filter(
+      (row) => String(row.local_name).trim().replace(/\s+/g, ' ').toLocaleLowerCase() === needle
+    );
+    const matches = exact.length
+      ? exact
+      : rows.filter((row) =>
+          String(row.local_name).trim().replace(/\s+/g, ' ').toLocaleLowerCase().includes(needle)
+        );
+    return matches.map((row) => ({ ...row, jid: normalizeJid(row.jid) }));
+  }
+
   /** Contacts that have a name saved in YOUR address book. */
   named() {
     return this.db
