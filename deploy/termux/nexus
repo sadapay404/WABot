@@ -143,11 +143,46 @@ status() {
     echo "$(c '31' '✗') not running"
   fi
   [ -f "$DATA_DIR/nexus.db" ] && printf '  db:     %s\n' "$(du -h "$DATA_DIR/nexus.db" | cut -f1)"
-  local auth
-  auth=$(ls -1 "$DATA_DIR/auth" 2>/dev/null | wc -l)
-  if [ "$auth" -gt 0 ]; then echo "  session: linked ($auth credential file(s))"; else echo "  session: $(c '33' 'not paired yet')"; fi
+  session_report
   command -v termux-battery-status >/dev/null && termux-battery-status 2>/dev/null \
     | tr -d '{}",' | grep -E 'percentage|plugged|status' | sed 's/^/  battery: /'
+}
+
+# Where the bot keeps its WhatsApp session, from .env (relative paths are
+# relative to the app folder, as the bot itself resolves them).
+session_dir() {
+  local d
+  d=$(grep -E '^WA_SESSION_DIR=' "$APP_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2-)
+  d="${d:-./data/auth}"
+  case "$d" in /*) ;; *) d="$APP_DIR/$d" ;; esac
+  printf '%s\n' "$d"
+}
+
+# Who is linked, and whether that account can run owner commands.
+session_report() {
+  local sdir creds me lid lid_num owners
+  sdir=$(session_dir)
+  creds="$sdir/creds.json"
+  if [ ! -f "$creds" ]; then
+    echo "  session: $(c '33' 'not paired yet') (no $creds)"
+    return 0
+  fi
+  me=$(grep -o '"id":"[^"]*@s.whatsapp.net"' "$creds" | head -1 | cut -d'"' -f4)
+  lid=$(grep -o '"lid":"[^"]*@lid"' "$creds" | head -1 | cut -d'"' -f4)
+  echo "  session: linked as ${me:-unknown} (${sdir})"
+  if [ -z "$lid" ]; then
+    echo "  LID:     $(c '33' 'not known yet — wait a minute after linking, then run nexus status')"
+    return 0
+  fi
+  echo "  LID:     $lid"
+  owners=$(grep -E '^OWNER_JIDS=' "$APP_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2-)
+  lid_num="${lid%@lid}"; lid_num="${lid_num%%:*}"
+  if printf '%s' "$owners" | grep -q "$lid_num"; then
+    echo "  owner:   $(c '32' 'LID is in OWNER_JIDS — commands from You chat work')"
+  else
+    echo "  owner:   $(c '33' 'LID is NOT in OWNER_JIDS — add it, then nexus restart:')"
+    echo "           OWNER_JIDS=...,${lid_num}@lid"
+  fi
 }
 
 logs() { tail -f "$LOG"; }
@@ -274,9 +309,9 @@ On the WhatsApp Business phone for $number:
   and enter the code above.
 
 Then, from that account's "You" chat, send .ping.
-If it gets no reply, run: nexus logs
-and look for the LID of that account. Add it to OWNER_JIDS in $envfile
-(comma-separated), then run: nexus restart
+If it gets no reply, run: nexus status
+It shows the account's LID and whether it is in OWNER_JIDS. Add the LID to
+OWNER_JIDS in $envfile (comma-separated), then run: nexus restart
 
 When commands work, switch to live: set NEXUS_MODE=live in $envfile and run nexus restart.
 Rollback: nexus stop, then restore .env.bak-$ts and move auth-old-$ts back to $DATA_DIR/auth.
