@@ -325,7 +325,24 @@ nexus logs       # follow the log (Ctrl-C stops watching, not the bot)
 nexus restart
 nexus stop
 nexus pair       # reprint the pairing code
+nexus pair --new 923001234567   # switch the bot to another WhatsApp number
 ```
+
+### Switching to another WhatsApp number
+
+`nexus pair --new <number>` does the whole move in one step:
+
+1. Stops the bot.
+2. Moves the current session and database into `~/.nexus-wa` (renamed, not deleted).
+   Scheduled jobs from the old account go with the database, so they cannot fire from the new one.
+3. Points `.env` at a fresh session, makes the new number the owner, and uses a separate remote-vault file so the old backup is not restored.
+4. Starts the bot in `observe` mode and prints the pairing code.
+
+Then link the account on its phone (Settings → Linked devices → Link a device → Link with phone number). Add `--yes` to skip the confirmation prompt.
+
+Rollback: `nexus stop`, restore the `.env.bak-*` copy it saved, and move the `auth-old-*` folder back to `~/.nexus-wa/auth`.
+
+After the phone update below, reinstall the command once: `install -m 755 ~/nexus-wa/deploy/termux/nexus $PREFIX/bin/nexus`.
 
 `nexus status` reports memory deliberately: Android kills the largest process
 first, so it is worth knowing. Expect roughly **80 MB**.
