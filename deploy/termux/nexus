@@ -7,8 +7,8 @@
 #   nexus restart   stop, then start
 #   nexus status    is it running, linked, how much memory
 #   nexus logs      follow the log (Ctrl-C to stop watching)
-#   nexus pair      print the pairing code / QR again
-#   nexus pair --new [number]  move to a different WhatsApp number
+#   nexus pair [number]   link a WhatsApp account and make it the owner
+#   nexus pair remove     delete everything about previous pairs
 #
 set -uo pipefail
 
@@ -187,17 +187,22 @@ session_report() {
 
 logs() { tail -f "$LOG"; }
 
-pair() {
-  # The pairing code is printed once at startup, so dig it out of the log
-  # instead of making you restart the bot to see it again.
-  local line
-  line=$(grep -aE "pairing code|Pairing code|[0-9A-Z]{4}-[0-9A-Z]{4}" "$LOG" 2>/dev/null | tail -1)
-  if [ -n "$line" ]; then
-    echo "$line"
-  else
-    echo "$(c '33' '!') no pairing code in the log yet."
-    echo "   Check WA_PAIRING_NUMBER in .env, then: nexus restart && nexus logs"
-  fi
+creds_file() { printf '%s\n' "$(session_dir)/creds.json"; }
+
+# The phone number this session is linked to (empty if not linked).
+linked_number() {
+  local f
+  f=$(creds_file)
+  [ -f "$f" ] || return 0
+  grep -o '"id":"[^"]*@s.whatsapp.net"' "$f" | head -1 | cut -d'"' -f4 | cut -d: -f1 | cut -d@ -f1
+}
+
+# The account's LID (empty until the bot has connected once after linking).
+linked_lid() {
+  local f
+  f=$(creds_file)
+  [ -f "$f" ] || return 0
+  grep -o '"lid":"[^"]*@lid"' "$f" | head -1 | cut -d'"' -f4 | cut -d: -f1 | cut -d@ -f1
 }
 
 # Set KEY=VALUE in the app's .env, replacing the line if it exists.
@@ -211,92 +216,100 @@ set_env() {
   fi
 }
 
-# nexus pair --new [number] [--yes]
-# Moves the bot onto a different WhatsApp account in one step:
-#   1. stops the bot
-#   2. moves the old session and database aside (nothing is deleted)
-#   3. points .env at a fresh session, owner and remote-vault file for the new number
-#   4. starts the bot and prints the new pairing code
-pair_new() {
-  local number="" yes=0 arg
-  for arg in "${@:3}"; do
+# nexus pair remove [--yes]
+# Deletes every trace of previous pairings: sessions, database, backups, old .env copies.
+pair_remove() {
+  local yes=0 arg answer ts
+  for arg in "$@"; do
+    case "$arg" in --yes|-y) yes=1 ;; esac
+  done
+  [ -f "$APP_DIR/.env" ] || { echo "$(c '31' '✗') no .env in $APP_DIR — run setup.sh first"; exit 1; }
+
+  if [ "$yes" -ne 1 ]; then
+    echo "This deletes EVERYTHING about previous pairs:"
+    echo "  • every WhatsApp session (all linked accounts)"
+    echo "  • the database: contacts, scheduled jobs, notes, message history"
+    echo "  • local backups and old .env copies"
+    echo "  • the pairing number and owner in .env"
+    echo "The bot code and the logs are kept. This cannot be undone."
+    read -r -p "Type REMOVE to continue: " answer
+    [ "$answer" = "REMOVE" ] || { echo "cancelled"; exit 0; }
+  fi
+
+  echo "$(c '33' '·') stopping the bot"
+  stop >/dev/null 2>&1
+  ts=$(date +%Y%m%d-%H%M%S)
+
+  rm -rf "$DATA_DIR"/auth "$DATA_DIR"/auth-* \
+    "$DATA_DIR"/nexus.db "$DATA_DIR"/nexus.db-wal "$DATA_DIR"/nexus.db-shm "$DATA_DIR"/nexus.db.old-* \
+    "$DATA_DIR"/backups "$APP_DIR"/.env.bak-*
+
+  set_env WA_PAIRING_NUMBER ""
+  set_env OWNER_JIDS ""
+  set_env WA_SESSION_DIR "$DATA_DIR/auth"
+  # A remote vault restores the old session on boot when local data is empty.
+  # Pointing it at a new file name stops that.
+  set_env REMOTE_VAULT_PATH "nexus-backup-removed-$ts.nwb"
+
+  echo "$(c '32' '✓') removed. Next: nexus pair"
+  echo "  If you use the remote vault, also delete the old backup file in its GitHub repo."
+}
+
+# nexus pair [number] [--yes]   (also accepts: nexus pair --new [number])
+# Links a WhatsApp account and makes it the owner, with no IDs to copy by hand.
+pair_link() {
+  local number="" yes=0 arg answer linked lid owners i code offset
+  for arg in "$@"; do
     case "$arg" in
+      --new) ;;
       --yes|-y) yes=1 ;;
       *) [ -z "$number" ] && number="$arg" ;;
     esac
   done
-
   [ -f "$APP_DIR/.env" ] || { echo "$(c '31' '✗') no .env in $APP_DIR — run setup.sh first"; exit 1; }
+
+  linked=$(linked_number)
+  if [ -n "$linked" ]; then
+    echo "$(c '33' '!') already linked to $linked."
+    echo "  To link a different account, first run: nexus pair remove"
+    exit 1
+  fi
 
   if [ -z "$number" ]; then
     read -r -p "WhatsApp number to link (country code, no +, e.g. 923001234567): " number
   fi
   number=$(printf '%s' "$number" | tr -cd '0-9')
   if ! [[ "$number" =~ ^[0-9]{8,15}$ ]]; then
-    echo "$(c '31' '✗') that is not a valid number — digits with country code only"
+    echo "$(c '31' '✗') not a valid number — digits with country code only"
     exit 1
   fi
 
   if [ "$yes" -ne 1 ]; then
-    echo "This will:"
-    echo "  • stop the bot"
-    echo "  • move the current session and database to $DATA_DIR (not deleted)"
-    echo "  • link WhatsApp number $number as the new account"
-    echo "  • make $number the owner"
-    read -r -p "Continue? [y/N] " answer
+    read -r -p "Link WhatsApp $number and make it the owner? [y/N] " answer
     case "$answer" in y|Y|yes|YES) ;; *) echo "cancelled"; exit 0 ;; esac
   fi
 
-  local ts new_auth envfile
-  ts=$(date +%Y%m%d-%H%M%S)
-  envfile="$APP_DIR/.env"
-
-  echo "$(c '33' '·') stopping the bot"
-  stop >/dev/null
-
-  cp "$envfile" "$APP_DIR/.env.bak-$ts"
-  echo "$(c '32' '✓') .env saved as .env.bak-$ts"
-
-  # Move, never delete: the old session stays available for rollback.
-  if [ -d "$DATA_DIR/auth" ] && [ -n "$(ls -A "$DATA_DIR/auth" 2>/dev/null)" ]; then
-    mv "$DATA_DIR/auth" "$DATA_DIR/auth-old-$ts"
-    echo "$(c '32' '✓') old session moved to $DATA_DIR/auth-old-$ts"
-  fi
-  # The database holds the old account's scheduled jobs; leaving it in place
-  # would let them fire from the new account.
-  local f
-  for f in "$DATA_DIR/nexus.db" "$DATA_DIR/nexus.db-wal" "$DATA_DIR/nexus.db-shm"; do
-    [ -e "$f" ] && mv "$f" "$f.old-$ts"
-  done
-  [ -e "$DATA_DIR/nexus.db.old-$ts" ] && echo "$(c '32' '✓') old database moved aside (scheduled jobs included)"
-
-  new_auth="$DATA_DIR/auth-$number-$ts"
-  mkdir -p "$new_auth"
+  stop >/dev/null 2>&1
+  # Nothing is linked at this point, so leftovers from an unfinished try are safe to clear.
+  rm -rf "$DATA_DIR/auth"
+  mkdir -p "$DATA_DIR/auth"
 
   set_env WA_PAIRING_NUMBER "$number"
-  set_env WA_SESSION_DIR "$new_auth"
+  set_env WA_SESSION_DIR "$DATA_DIR/auth"
   set_env WA_COMPANION_PROFILE "web"
-  set_env OWNER_JIDS "${number}@s.whatsapp.net"
-  set_env NEXUS_MODE "observe"
-  # A remote vault restores the old session on boot when the local one is
-  # empty. A separate file per number keeps the old account's backup out of it.
   set_env REMOTE_VAULT_PATH "nexus-backup-$number.nwb"
-  echo "$(c '32' '✓') .env now points at $number (mode: observe)"
+  set_env OWNER_JIDS "${number}@s.whatsapp.net"
 
-  # Find the pairing code printed by this start, not an old one in the log.
-  local offset code=""
-  offset=$(wc -c <"$LOG" 2>/dev/null || echo 0)
+  offset=0
+  [ -f "$LOG" ] && offset=$(wc -c <"$LOG")
   start || exit 1
 
-  echo "$(c '33' '·') waiting for the pairing code…"
-  local i
+  code=""
   for i in $(seq 1 60); do
     code=$(tail -c +"$((offset + 1))" "$LOG" 2>/dev/null | grep -a "pairing code:" | tail -1)
     [ -n "$code" ] && break
     sleep 2
   done
-
-  echo
   if [ -n "$code" ]; then
     echo "$(c '32' '✓') $code"
   else
@@ -304,17 +317,49 @@ pair_new() {
   fi
   cat <<EOF
 
-On the WhatsApp Business phone for $number:
+On the phone with $number:
   Settings → Linked devices → Link a device → Link with phone number instead
   and enter the code above.
 
-Then, from that account's "You" chat, send .ping.
-If it gets no reply, run: nexus status
-It shows the account's LID and whether it is in OWNER_JIDS. Add the LID to
-OWNER_JIDS in $envfile (comma-separated), then run: nexus restart
+Waiting up to 10 minutes for the link…
+EOF
 
-When commands work, switch to live: set NEXUS_MODE=live in $envfile and run nexus restart.
-Rollback: nexus stop, then restore .env.bak-$ts and move auth-old-$ts back to $DATA_DIR/auth.
+  linked=""
+  for i in $(seq 1 200); do
+    linked=$(linked_number)
+    [ -n "$linked" ] && break
+    sleep 3
+  done
+  if [ -z "$linked" ]; then
+    echo "$(c '33' '!') not linked yet. Check: nexus status   or   nexus logs"
+    exit 1
+  fi
+  echo "$(c '32' '✓') linked as $linked"
+
+  # The LID is saved once the bot has connected. Wait for it so commands from
+  # the "You" chat are recognised without any manual step.
+  lid=""
+  for i in $(seq 1 20); do
+    lid=$(linked_lid)
+    [ -n "$lid" ] && break
+    sleep 3
+  done
+  owners="${linked}@s.whatsapp.net"
+  [ -n "$lid" ] && owners="$owners,${lid}@lid"
+  set_env OWNER_JIDS "$owners"
+  echo "$(c '32' '✓') owner set: $owners"
+
+  echo "$(c '33' '·') restarting so the owner takes effect"
+  stop >/dev/null 2>&1
+  start || exit 1
+
+  if [ -z "$lid" ]; then
+    echo "$(c '33' '!') LID not seen yet. Wait a minute, then run: nexus restart"
+  fi
+  cat <<EOF
+
+Done. Send .ping in the "You" chat to test.
+Mode is $(grep -E '^NEXUS_MODE=' "$APP_DIR/.env" | tail -1 | cut -d= -f2-) (set NEXUS_MODE=live in .env when you are ready).
 EOF
 }
 
@@ -324,7 +369,11 @@ case "${1:-}" in
   restart) stop; sleep 1; start ;;
   status)  status ;;
   logs)    logs ;;
-  pair)    if [ "${2:-}" = "--new" ]; then pair_new "$@"; else pair; fi ;;
+  pair)
+    case "${2:-}" in
+      remove) pair_remove "${@:3}" ;;
+      *)      pair_link "${@:2}" ;;
+    esac ;;
   harden)  exec bash "$APP_DIR/deploy/termux/harden.sh" "${2:-}" ;;
   *)
     cat <<EOF
@@ -335,8 +384,8 @@ nexus — control Nexus-WA on this phone
   nexus restart   restart
   nexus status    running? linked? memory? battery?
   nexus logs      follow the log
-  nexus pair      show the pairing code again
-  nexus pair --new [number]   link a different WhatsApp number (moves the old session aside)
+  nexus pair [number]   link a WhatsApp account (asks for the number)
+  nexus pair remove     delete everything about previous pairs
   nexus harden    stop Android killing the bot (needs Shizuku)
   nexus harden --check   report what is in place, change nothing
 EOF
