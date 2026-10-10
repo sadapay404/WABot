@@ -42,6 +42,11 @@ export function classifyDisconnect(reason, DisconnectReason) {
       // Session revoked (logged out from the phone). Retrying is pointless and
       // looks like an attacker; wipe credentials and ask for a fresh link.
       return 'relogin';
+    case D.connectionReplaced:
+    case 440:
+      // Another device took this session. Reconnecting would just take it back
+      // and loop forever, so stop; the device that was started last keeps it.
+      return 'replaced';
     case D.restartRequired:
     case 515:
     case D.timedOut:
@@ -54,7 +59,6 @@ export function classifyDisconnect(reason, DisconnectReason) {
     case 500:
     case D.connectionClosed:
     case D.connectionLost:
-    case D.connectionReplaced:
     case 503:
     case D.unavailableService:
       return 'restart';
@@ -238,6 +242,15 @@ export class WhatsAppConnection {
 
         if (this.stopped) return;
 
+        if (action === 'replaced') {
+          this.logger.error(
+            'this session was taken over by another device — stopping so the two do not fight. '
+              + 'Start this one again with: nexus start (only after the other device is stopped)'
+          );
+          this.#emit('replaced', { reason });
+          setTimeout(() => process.exit(0), 1500);
+          return;
+        }
         if (action === 'relogin') {
           this.logger.error('session is no longer valid — credentials must be re-linked');
           this.#emit('relogin', { reason });
