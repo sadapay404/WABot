@@ -21,7 +21,7 @@ cp .env.example .env      # leave NEXUS_MODE=dry-run for now
 
 npm run preview           # interactive console, ZERO WhatsApp connection
 npm run dashboard         # headless + web dashboard on :3000
-npm test                  # 180 tests
+npm test                  # 203 tests
 ```
 
 In the preview console try:
@@ -84,9 +84,10 @@ will ask you for a card even though every guide says it will not.
 
 ### Commands
 
-37 commands across 15 plugin files. `.help` prints the live list; everything
-below is generated from it. **owner** means it is refused unless the sender is
-in `OWNER_JIDS`.
+40 commands across 17 plugin files. `.help` prints the live list; everything
+below is generated from it. See the full [sorted command reference](docs/COMMANDS.md)
+for every subcommand, alias, option, and example. **owner** means it is refused
+unless the sender is in `OWNER_JIDS`.
 
 **Basics**
 
@@ -116,6 +117,15 @@ or the linked account’s own chat. Keep the main controller whitelisted; add th
 linked number with `.env owner add <number>` to enable fresh owner commands in
 its “You” chat.
 
+`.receive 03001234567 5` (or the legacy spelling `.recieve`) inspects cached
+inbound messages and forwards available media only to the private owner control
+chat (up to five attachments, 16 MB each). `.receive unread` reports WhatsApp’s synced chat-level unread counts and
+clearly labels any cached text as an unverified recent preview—not as an
+individually confirmed unread message. It does not attach media in unread mode,
+because WhatsApp does not identify the exact unread message IDs. The command
+never calls `readMessages`/`markRead`, but WhatsApp read-state behavior is not
+guaranteed without live account testing.
+
 **Notes, reminders, search**
 
 | Command | Access | What |
@@ -124,10 +134,11 @@ its “You” chat.
 | `.todo <text> [in 10m \| at 8pm \| tomorrow 9am]` | owner | tasks, optionally with a reminder |
 | `.remind to <contact/number> <when> \| <text>` | owner | send a one-off or recurring reminder to that WhatsApp recipient |
 | `.schedule to <contact/number> <when> \| <message>` | owner | send to a recipient later, once or on a repeat; preview + confirmation |
-| `.agenda [today\|week]` | owner | read-only local-time view of pending sends |
-| `.jobs \| .jobs cancel <id>` | owner | list or cancel scheduled jobs |
+| `.agenda [today\|week\|missed]` | owner | pending agenda; missed jobs require an explicit send-now/skip choice |
+| `.jobs \| .jobs edit <id> [recipient\|text\|time\|all] \| .jobs cancel <id>` | owner | list, preview/edit, or cancel queued schedules |
 | `.search <terms>` | owner | full-text search over the message cache |
 | `.forward <stanzaId>` | owner | re-send a cached message, even a deleted one |
+| `.receive <phone> [count]` / `.recieve unread [max]` | owner | inspect cached messages privately; unread status is chat-level only and no explicit read-receipt API is called |
 | `.digest [hours]` | owner | what happened while you were away |
 
 **AI** — needs `GROQ_API_KEY`, `GEMINI_API_KEY` or `OPENAI_API_KEY`
@@ -135,26 +146,31 @@ its “You” chat.
 | Command | Access | What |
 |---|---|---|
 | `.ai <prompt>` | anyone | ask the model, with per-chat memory |
-| `.ask chats` / `.ask <n> <count|all|after|from|on|to> ... <question>` | owner | ask about selected cached one-to-one chats by count or local date range; explicit transcript is sent to the configured AI provider |
+| `.ask chats` / `.ask <number|phone> <count|date filter> ... <question>` | owner | ask only about explicitly selected cached direct chats; phone/email/phrase redaction is available before provider transmission |
 | `.summarize [n]` | owner | summarise recent messages in this chat |
 | `.vision [instruction]` | owner | describe or OCR an attached image |
 | `.translate <lang> [text]` | anyone | translate the last message, or your own text |
 | `.draft [tone]` | owner | draft a reply **for your approval** — never auto-sends |
 | `.forget` | owner | clear this chat's AI memory |
 
-`.ask chats` creates a numbered list of private one-to-one conversations. Ask by
-count as above, or use dates in the configured schedule timezone (usually
+`.ask chats` creates a numbered list of private one-to-one conversations. You can
+select by list number or phone number (Pakistani `03…` numbers are accepted),
+then use a count or dates in the configured schedule timezone (usually
 `Asia/Karachi`):
 
 ```text
+.ask 2 40 What should I reply?
+.ask 03001234567 40 What should I reply?
 .ask 2 after 2026-10-01 What did we decide?
-.ask 2 after 2026-10-01 to 2026-10-07 Summarize that period
+.ask 2 after 2026-10-01 to 2026-10-07 | Summarize that period
 .ask 2 on 2026-10-07 What did we discuss that day?
-.ask 2 to 2026-10-07 Summarize everything up to that date
+.ask 2 40 --redact phones,emails | What should I reply?
+.ask 2 40 --phrase "private phrase" | Summarize
 ```
 
-Date endpoints are inclusive. Dates use `YYYY-MM-DD`; the result is bounded by
-the same transcript/context limits as `.ask ... all`. Group selection is deferred.
+Date endpoints are inclusive. Redaction runs locally on the selected transcript
+and question before anything is sent to the AI provider. The result is bounded
+by the same transcript/context limits as `.ask ... all`. Group selection is deferred.
 
 **Media**
 
@@ -192,13 +208,15 @@ the same transcript/context limits as `.ask ... all`. Group selection is deferre
 │   │   ├── jid.js            JID + phone + country resolution
 │   │   ├── outboundQueue.js  ⭐ rate limits, loop and volume protection
 │   │   ├── messageCache.js   two-tier cache that makes anti-delete possible
+│   │   ├── messageInbox.js   read-only cached message/unread lookups
 │   │   ├── antiDelete.js     ⭐ revoke detection, recovery, notification
 │   │   ├── contactStore.js   your saved names vs. their push names
 │   │   ├── sessionRegistry.js every number ever linked
 │   │   ├── logBuffer.js      ring buffer for /logs
 │   │   ├── whatsapp.js       Baileys connection + reconnect policy
 │   │   ├── telegram.js       Telegram control panel
-│   │   └── scheduler.js      SQLite-backed reminders and recurring jobs
+│   │   ├── scheduler.js      SQLite-backed sends + owner-controlled missed recovery
+│   │   └── reconnectCatchup.js reports outage windows and pending decisions
 │   ├── database/index.js     node:sqlite, better-sqlite3 fallback
 │   ├── lib/{format,demoSeed}.js
 │   ├── web/{dashboard.js,index.html}

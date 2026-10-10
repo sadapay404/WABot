@@ -121,7 +121,7 @@ These are the details that break setups quietly:
   So the vault is not a fallback, it is the normal path. Budget for restarts
   you did not schedule.
 - **512 MB RAM / 0.1 CPU.** An earlier smoke test used ~73 MB RSS with 33
-  commands. The current dry-run registry has 37 commands across 15 plugin
+  commands. The current dry-run registry has 38 commands across 16 plugin
   files; re-measure on the target host, and do not enable heavy media archiving
   without checking its actual memory and disk budget.
 - Free Postgres expires after 30 days. We do not use it — everything is

@@ -251,6 +251,8 @@ export class WhatsAppConnection {
     socket.ev.on('messages.upsert', (p) => this.#emit('messages.upsert', p));
     socket.ev.on('messages.update', (p) => this.#emit('messages.update', p));
     socket.ev.on('contacts.update', (p) => this.#emit('contacts.update', p));
+    socket.ev.on('chats.update', (p) => this.#emit('chats.update', p));
+    socket.ev.on('chats.upsert', (p) => this.#emit('chats.upsert', p));
     socket.ev.on('messaging-history.set', (p) => this.#emit('messaging-history.set', p));
   }
 

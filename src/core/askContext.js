@@ -21,14 +21,16 @@ export class AskContext {
       [selfJid, ...ownerJids].map(normalizeJid).filter(Boolean)
     );
     const rows = this.db.prepare(
-      `SELECT chat_jid, COUNT(*) AS message_count, MAX(ts) AS last_at
+      `SELECT chat_jid, MAX(chat_jid_alt) AS chat_jid_alt,
+              COUNT(*) AS message_count, MAX(ts) AS last_at
          FROM conversation_cache
         WHERE (chat_jid LIKE '%@s.whatsapp.net' OR chat_jid LIKE '%@lid')
         GROUP BY chat_jid
         ORDER BY last_at DESC
         LIMIT ?`
     ).all(MENU_LIMIT + excluded.size + 1)
-      .filter((row) => !excluded.has(normalizeJid(row.chat_jid)))
+      .filter((row) => !excluded.has(normalizeJid(row.chat_jid)) &&
+        !(row.chat_jid_alt && excluded.has(normalizeJid(row.chat_jid_alt))))
       .slice(0, MENU_LIMIT);
 
     const key = menuKey(ownerJid, controlChat);
@@ -53,11 +55,38 @@ export class AskContext {
     return rows;
   }
 
-  messages(chatJid, { limit = 200, all = false, startTs = null, endTs = null } = {}) {
+  /** Resolve only the explicitly supplied direct JID/phone aliases. */
+  resolveDirect(jids, { selfJid, ownerJids = [] } = {}) {
+    const excluded = new Set([selfJid, ...ownerJids].map(normalizeJid).filter(Boolean));
+    const selected = [];
+    for (const value of jids || []) {
+      const jid = normalizeJid(value);
+      if (!jid || excluded.has(jid)) return null;
+      const matches = this.db.prepare(
+        `SELECT chat_jid, MAX(chat_jid_alt) AS chat_jid_alt
+           FROM conversation_cache
+          WHERE chat_jid = ? OR chat_jid_alt = ?
+          GROUP BY chat_jid
+          ORDER BY MAX(ts) DESC
+          LIMIT 2`
+      ).all(jid, jid);
+      if (!matches.length) return null;
+      const match = matches[0];
+      if (excluded.has(normalizeJid(match.chat_jid)) ||
+          (match.chat_jid_alt && excluded.has(normalizeJid(match.chat_jid_alt)))) return null;
+      if (!selected.some((item) => normalizeJid(item.chat_jid) === normalizeJid(match.chat_jid))) {
+        selected.push(match);
+      }
+    }
+    return selected.length ? selected : null;
+  }
+
+  messages(chatJid, { altJid = null, limit = 200, all = false, startTs = null, endTs = null } = {}) {
     const jid = normalizeJid(chatJid);
+    const alt = altJid ? normalizeJid(altJid) : null;
     const safeLimit = all ? MAX_FETCH : Math.max(1, Math.min(Number(limit) || 1, MAX_FETCH));
-    const conditions = ['chat_jid = ?', "text <> ''"];
-    const params = [jid];
+    const conditions = ['(chat_jid = ? OR (? IS NOT NULL AND chat_jid_alt = ?))', "text <> ''"];
+    const params = [jid, alt, alt];
     if (Number.isFinite(startTs)) {
       conditions.push('ts >= ?');
       params.push(startTs);

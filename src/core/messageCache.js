@@ -19,6 +19,7 @@
  */
 
 import { normalizeJid } from './jid.js';
+import { unwrap } from './message.js';
 
 const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_RAW = 1000;
@@ -49,6 +50,33 @@ function addressSet(key, fields) {
 function intersects(left, right) {
   for (const value of left) if (right.has(value)) return true;
   return false;
+}
+
+const NON_MEDIA_KINDS = [
+  ['locationMessage', 'location'],
+  ['liveLocationMessage', 'live_location'],
+  ['contactMessage', 'contact'],
+  ['contactsArrayMessage', 'contacts'],
+  ['reactionMessage', 'reaction'],
+  ['pollCreationMessageV3', 'poll'],
+  ['pollCreationMessage', 'poll'],
+  ['pollUpdateMessage', 'poll_vote'],
+  ['eventMessage', 'event'],
+  ['groupInviteMessage', 'group_invite'],
+  ['interactiveResponseMessage', 'interactive'],
+  ['buttonsResponseMessage', 'interactive'],
+  ['listResponseMessage', 'interactive'],
+  ['protocolMessage', 'system'],
+];
+
+function cacheKind(raw, msg) {
+  if (msg?.media?.type) return msg.media.type;
+  const { inner } = unwrap(raw?.message);
+  for (const [key, kind] of NON_MEDIA_KINDS) {
+    if (inner?.[key]) return kind;
+  }
+  if (msg?.text) return 'text';
+  return 'unknown';
 }
 
 /** Fail closed unless id, direction and chat (including known PN/LID aliases) agree. */
@@ -111,16 +139,25 @@ export class MessageCache {
 
     // AI context is a separate, explicit transcript store: it keeps both sides
     // of a conversation, while the forensic cache below remains inbound-only.
+    const chatJid = normalizeJid(msg.jid);
+    const chatJidAlt = raw.key.remoteJidAlt && normalizeJid(raw.key.remoteJidAlt) !== chatJid
+      ? normalizeJid(raw.key.remoteJidAlt)
+      : null;
     const transcript = String(msg.text || '').trim();
     if (transcript && !msg.isGroup) {
       this.db.prepare(
-        `INSERT INTO conversation_cache(id, session_jid, chat_jid, sender_jid, from_me, text, ts)
-         VALUES (?,?,?,?,?,?,?)
-         ON CONFLICT(id) DO UPDATE SET text = excluded.text, from_me = excluded.from_me`
+        `INSERT INTO conversation_cache
+           (id, session_jid, chat_jid, chat_jid_alt, sender_jid, from_me, text, ts)
+         VALUES (?,?,?,?,?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET
+           chat_jid_alt = COALESCE(excluded.chat_jid_alt, conversation_cache.chat_jid_alt),
+           text = excluded.text,
+           from_me = excluded.from_me`
       ).run(
         msg.id,
         normalizeJid(sessionJid),
-        normalizeJid(msg.jid),
+        chatJid,
+        chatJidAlt,
         normalizeJid(msg.sender),
         raw.key.fromMe || msg.isBot ? 1 : 0,
         transcript,
@@ -130,22 +167,24 @@ export class MessageCache {
 
     if (msg.isBot) return; // own messages stay out of the forensic search cache
 
-    const kind = msg.media?.type || (msg.text ? 'text' : 'unknown');
+    const kind = cacheKind(raw, msg);
 
     this.db
       .prepare(
         `INSERT INTO message_cache
-           (id, session_jid, chat_jid, sender_jid, kind, text, media_mimetype,
+           (id, session_jid, chat_jid, chat_jid_alt, sender_jid, kind, text, media_mimetype,
             media_seconds, media_bytes, has_media, view_once, ts)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(id) DO UPDATE SET
+           chat_jid_alt = COALESCE(excluded.chat_jid_alt, message_cache.chat_jid_alt),
            text = excluded.text,
            kind = excluded.kind`
       )
       .run(
         msg.id,
         normalizeJid(sessionJid),
-        normalizeJid(msg.jid),
+        chatJid,
+        chatJidAlt,
         normalizeJid(msg.sender),
         kind,
         msg.text || null,

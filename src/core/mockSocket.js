@@ -43,6 +43,8 @@ export class MockWhatsAppSocket extends EventEmitter {
     this.outbox = [];
     /** Every presence/read side-effect, for asserting human-like pacing. */
     this.signals = [];
+    /** Mock chat-level unread counts, mirroring synced chats.update events. */
+    this.unreadCounts = new Map();
   }
 
   // ── Baileys lifecycle surface ────────────────────────────────────
@@ -172,7 +174,19 @@ export class MockWhatsAppSocket extends EventEmitter {
 
     this.logger.info(`← ${raw.pushName}: ${text}${opts.viewOnce ? ' 👁(view-once)' : ''}`);
     await this.#emitSettled('messages.upsert', { messages: [raw], type: 'notify' });
+    if (!raw.key.fromMe) {
+      const unreadCount = (this.unreadCounts.get(chatJid) || 0) + 1;
+      this.unreadCounts.set(chatJid, unreadCount);
+      await this.#emitSettled('chats.update', [{ id: chatJid, unreadCount }]);
+    }
     return raw;
+  }
+
+  /** Explicitly change a mock chat unread count to model WhatsApp sync. */
+  async setUnreadCount(jid, unreadCount) {
+    const chatJid = normalizeJid(jid);
+    this.unreadCounts.set(chatJid, unreadCount);
+    await this.#emitSettled('chats.update', [{ id: chatJid, unreadCount }]);
   }
 
   /** Convenience: inject into a simulated group chat. */

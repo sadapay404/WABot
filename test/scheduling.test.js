@@ -384,7 +384,7 @@ test('self-chat permits owner scheduling only, accepts guided replies, and ignor
   queue.attach();
   const scheduler = new Scheduler({ db, socket, logger: quiet });
   scheduler.now = () => NOW;
-  scheduler.add({ jid: SAM, text: 'Late item', runAt: NOW - 60 * 1_000 });
+  const lateJob = scheduler.add({ jid: SAM, text: 'Late item', runAt: NOW - 60 * 1_000 });
   scheduler.add({ jid: SAM, text: 'Prepare the report', runAt: NOW + 60 * 60 * 1_000 });
   const wizard = new ScheduleWizard({
     db, scheduler, contacts, logger: quiet, config, selfJid: OWNER, now: () => NOW,
@@ -407,7 +407,18 @@ test('self-chat permits owner scheduling only, accepts guided replies, and ignor
   assert.match(socket.outbox.at(-1).text, /923001234567/);
   assert.match(socket.outbox.at(-1).text, /Prepare the report/);
   assert.ok(socket.outbox.at(-1).text.indexOf('Overdue') < socket.outbox.at(-1).text.indexOf('Today'));
+  assert.match(socket.outbox.at(-1).text, /60-second timer grace; stale sends require owner review/);
+  assert.doesNotMatch(socket.outbox.at(-1).text, /will send when the bot is online/);
   assert.equal(scheduler.pending().length, 2, 'agenda must not alter or send scheduled jobs');
+
+  scheduler.markMissedDue(NOW, { allOverdue: true });
+  await socket.inject('.agenda missed', { jid: OWNER, from: OWNER, fromMe: true });
+  assert.match(socket.outbox.at(-1).text, /Nothing is sent late automatically/);
+  assert.match(socket.outbox.at(-1).text, new RegExp(`#${lateJob.id}.*Send now: \\.agenda missed send ${lateJob.id}.*Skip: \\.agenda missed skip ${lateJob.id}`, 's'));
+  const sentBeforeSkip = socket.outbox.filter((item) => item.jid === SAM).length;
+  await socket.inject(`.agenda missed skip ${lateJob.id}`, { jid: OWNER, from: OWNER, fromMe: true });
+  assert.equal(scheduler.get(lateJob.id).status, 'skipped');
+  assert.equal(socket.outbox.filter((item) => item.jid === SAM).length, sentBeforeSkip, 'skipping a missed message never reaches the recipient');
 
   await socket.inject('.schedule', { jid: OWNER, from: OWNER, fromMe: true });
   assert.match(socket.outbox.at(-1).text, /Who should receive/);
@@ -443,4 +454,134 @@ test('self-chat permits owner scheduling only, accepts guided replies, and ignor
   const beforeUnauthorized = socket.outbox.length;
   await socket.inject('.remind', { jid: OWNER, from: OWNER, fromMe: true });
   assert.equal(socket.outbox.length, beforeUnauthorized, 'self-chat scheduling still requires the configured owner');
+});
+
+test('scheduler moves stale sends to an explicit missed queue and never late-sends automatically', async () => {
+  const db = await getMemoryDb();
+  const socket = fakeSocket();
+  const scheduler = new Scheduler({ db, socket, logger: quiet });
+  const job = scheduler.add({ jid: SAM, text: 'Only send after I choose', runAt: 1_000 });
+
+  await scheduler.tick(62_000);
+  assert.equal(socket.sent.length, 0);
+  assert.equal(scheduler.get(job.id).status, 'missed');
+  assert.equal(scheduler.missed()[0].id, job.id);
+
+  const result = await scheduler.recoverMissed(job.id, 'send', 62_000);
+  assert.equal(result.ok, true);
+  assert.equal(socket.sent.length, 1);
+  assert.equal(socket.sent[0].jid, SAM);
+  assert.equal(scheduler.get(job.id).status, 'done');
+});
+
+test('a job cancelled while an earlier due send is in flight is not delivered from the stale tick snapshot', async () => {
+  const db = await getMemoryDb();
+  let releaseFirst;
+  let announceFirst;
+  const firstStarted = new Promise((resolve) => { announceFirst = resolve; });
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const sent = [];
+  const socket = {
+    async sendMessage(jid, content) {
+      if (content.text === 'first') {
+        announceFirst();
+        await firstGate;
+      }
+      sent.push({ jid, text: content.text });
+    },
+  };
+  const scheduler = new Scheduler({ db, socket, logger: quiet });
+  const now = Date.now();
+  const first = scheduler.add({ jid: SAM, text: 'first', runAt: now - 1_000 });
+  const second = scheduler.add({ jid: SPARE, text: 'cancel before claim', runAt: now - 500 });
+
+  const tick = scheduler.tick(now);
+  await firstStarted;
+  assert.equal(scheduler.cancel(second.id), true);
+  releaseFirst();
+  await tick;
+
+  assert.deepEqual(sent, [{ jid: SAM, text: 'first' }]);
+  assert.equal(scheduler.get(second.id).status, 'cancelled');
+});
+
+test('skipping a missed one-off retires it; skipping a missed recurrence advances without delivery', async () => {
+  const db = await getMemoryDb();
+  const socket = fakeSocket();
+  const scheduler = new Scheduler({ db, socket, logger: quiet });
+  const once = scheduler.add({ jid: SAM, text: 'skip me', runAt: 1_000 });
+  const recurring = scheduler.add({ jid: SAM, text: 'repeat', runAt: 1_000, kind: 'recurring', intervalMs: 10_000 });
+  scheduler.markMissedDue(65_000, { allOverdue: true });
+
+  const skippedOnce = await scheduler.recoverMissed(once.id, 'skip', 65_000);
+  const skippedRecurring = await scheduler.recoverMissed(recurring.id, 'skip', 65_000);
+  assert.equal(skippedOnce.job.status, 'skipped');
+  assert.equal(skippedRecurring.job.status, 'pending');
+  assert.ok(skippedRecurring.nextRunAt > 65_000);
+  assert.equal(socket.sent.length, 0);
+});
+
+test('pending schedule edits preview recipient, text and time, and apply only after YES', async () => {
+  const rig = await wizardRig();
+  const original = rig.scheduler.add({
+    jid: SAM,
+    text: 'Original message',
+    runAt: NOW + 2 * 24 * 60 * 60 * 1_000,
+  });
+
+  await rig.wizard.beginEdit(original.id, null, rig.command(''));
+  assert.match(rig.replies.at(-1).text, /Reply `recipient`, `text`, `time`, or `all`/);
+  await rig.answer('all');
+  assert.match(rig.replies.at(-1).text, /Current recipient/);
+  await rig.answer('03001234567');
+  assert.match(rig.replies.at(-1).text, /replacement message text/);
+  await rig.answer('Revised message body');
+  assert.match(rig.replies.at(-1).text, /new future date\/time/);
+  await rig.answer('in 3 days at 9:00 am');
+  assert.match(rig.replies.at(-1).text, /Review changes to job/);
+  assert.match(rig.replies.at(-1).text, /Revised message body/);
+  assert.equal(rig.scheduler.get(original.id).text, 'Original message', 'preview is not an update');
+  assert.equal(rig.socket.sent.filter((entry) => entry.jid === SAM).length, 0, 'editing never sends to the recipient');
+
+  await rig.answer('YES');
+  const updated = rig.scheduler.get(original.id);
+  assert.equal(updated.status, 'pending');
+  assert.equal(updated.jid, SAM);
+  assert.equal(updated.text, 'Revised message body');
+  assert.equal(updated.run_at, parseWhen('in 3 days at 9:00 am', NOW, ZONE, { requireTime: true }).runAt);
+  assert.match(rig.replies.at(-1).text, /Schedule #\d+ updated/);
+});
+
+test('declining an edit leaves the original queued job unchanged', async () => {
+  const rig = await wizardRig();
+  const original = rig.scheduler.add({ jid: SAM, text: 'Keep this', runAt: NOW + 86_400_000 });
+  await rig.wizard.beginEdit(original.id, 'text', rig.command(''));
+  await rig.answer('Do not save this');
+  assert.match(rig.replies.at(-1).text, /Review changes to job/);
+  await rig.answer('NO');
+  const unchanged = rig.scheduler.get(original.id);
+  assert.equal(unchanged.text, 'Keep this');
+  assert.equal(unchanged.run_at, original.run_at);
+  assert.equal(unchanged.status, 'pending');
+  assert.match(rig.replies.at(-1).text, /existing schedule is unchanged/);
+});
+
+test('a pending schedule cannot be edited after its original due time has passed', async () => {
+  const db = await getMemoryDb();
+  const socket = fakeSocket();
+  let now = 100_000;
+  const scheduler = new Scheduler({ db, socket, logger: quiet });
+  scheduler.now = () => now;
+  const job = scheduler.add({ jid: SAM, text: 'Original', runAt: now + 1_000 });
+  now += 1_001;
+
+  const updated = scheduler.update(job.id, {
+    jid: SPARE,
+    text: 'Revised',
+    runAt: now + 60_000,
+  });
+  assert.equal(updated, null);
+  assert.equal(scheduler.get(job.id).jid, SAM);
+  assert.equal(scheduler.get(job.id).text, 'Original');
+  assert.equal(scheduler.get(job.id).status, 'pending');
 });

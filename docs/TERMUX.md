@@ -3,7 +3,9 @@
 Free forever, no credit card, no account verification. This is the recommended
 host: it has a **real filesystem**, so there is no re-pairing and no need for the
 GitHub vault, and it connects from your own home IP, which looks normal to
-WhatsApp rather than like a datacentre login.
+WhatsApp rather than like a datacentre login. For the complete sorted list of
+WhatsApp commands, aliases, subcommands, and examples, see
+[`COMMANDS.md`](COMMANDS.md).
 
 ---
 
@@ -79,9 +81,10 @@ cannot fix. What happens during a gap:
 
 | | |
 |---|---|
-| **Scheduled reminders** | **Not lost, but late.** Overdue jobs still match the query `run_at <= now` (`src/core/scheduler.js:142`), so a 9am reminder fires the moment the phone reconnects — once, at whatever time that is. |
-| **Recurring jobs** | **Fire once, not in a burst.** The next run is rolled forward past the current time (`scheduler.js:179`), so an hourly job missed four times fires once and reschedules. No drift. |
-| **A job interrupted mid-send** | Recovered. `resumeOrphans()` flips anything left `running` back to `pending` at boot. |
+| **Scheduled reminders/messages** | A job that is stale or whose time passed during a disconnect is moved to `missed`; it is **not automatically sent late**. The ordinary timer allows up to 60 seconds of scheduling jitter. |
+| **Recurring jobs** | A missed occurrence pauses that schedule until you choose `send` (send this occurrence now, then re-arm) or `skip` (advance to the next future occurrence). It never bursts through missed occurrences. |
+| **A job interrupted mid-send** | Its `running` state is recovered as pending; if its due time has passed, it enters the missed queue for an explicit owner decision. |
+| **Reconnect catch-up** | On reconnect, the owner control chat receives the outage window and the missed schedules awaiting a decision. `.agenda missed` lists them again at any time. |
 | **Messages sent to you** | Partial. WhatsApp replays recent history to linked devices on reconnect, but this is not guaranteed for everything. Do not treat the bot as a reliable archive of what arrived while it was down. |
 | **View-once media** | Captured only when WhatsApp delivers the media to this linked-device profile. Some profiles receive just a view-once marker; the bot records and alerts on that event but cannot recover bytes it never received. If the bot is offline, a short-lived blob may also expire before reconnect. |
 
@@ -112,7 +115,8 @@ companion consumes one linked-device slot. Do not delete the old auth directory
 or remove the old linked device unless you later choose to do so.
 
 **Practical advice:** keep the phone at home on a charger when you can. If it
-has to travel, expect reminders to land late rather than on time.
+has to travel, delivery may pause during the outage; missed schedules wait for
+your send-now/skip choice instead of being sent late automatically.
 
 ---
 
@@ -188,18 +192,27 @@ and phone notifications still depend on the Business account being online and
 the recipient’s WhatsApp settings.
 
 ```text
-.agenda today  # pending sends due today
-.agenda week   # pending sends across the next 7 local calendar days
-.jobs          # list pending jobs
-.jobs cancel 12 # cancel job #12
+.agenda today                 # pending sends due today
+.agenda week                  # pending sends across the next 7 local calendar days
+.agenda missed                # list missed schedules awaiting your choice
+.agenda missed send 12        # explicitly send missed job #12 now
+.agenda missed skip 12        # skip it; a recurring job advances to its next time
+.jobs                         # list pending jobs
+.jobs edit 12                 # choose recipient, text, time, or all
+.jobs edit 12 all             # change all three fields
+.jobs cancel 12               # cancel job #12
 ```
 
-`.agenda` is read-only, groups schedules by local date, and shows the next
-occurrence of each repeating schedule; overdue pending sends appear first.
-`.jobs` remains available and currently displays timestamps in UTC.
-One-time jobs that become overdue while the phone is offline are delivered once
-when it reconnects. Recurring jobs skip missed intervals rather than sending a
-catch-up burst.
+`.agenda today/week` are read-only local-time views. If a schedule is missed,
+`.agenda missed` shows each one separately; choose `send` or `skip` by job ID.
+A one-time skip retires that job; for a recurring schedule it advances to the
+next future occurrence. Reconnecting also sends the private owner chat an outage
+window and a short list of schedules needing a decision. No recipient receives
+an advance notice.
+
+`.jobs edit <id>` prompts for recipient, text, time, or all three. The proposed
+change is previewed and saved only after `YES`; `NO`/`CANCEL` leaves the queued
+job unchanged. Due/missed jobs are not editable through this flow.
 
 ## Privacy capture and controller access
 
@@ -226,17 +239,21 @@ current allowlist.
 ## Ask AI about selected one-to-one chats
 
 `.ask chats` lists private chats with text currently cached by the linked
-session. The numbered selection lasts 30 minutes. Ask about one or more chats
-with:
+session. The numbered selection lasts 30 minutes; you can also select one
+cached direct chat by phone number (`03…` Pakistani format is accepted). Ask
+about one or more chats with:
 
 ```text
 .ask 2 40 What should I reply?
+.ask 03001234567 40 What should I reply?
 .ask 2 all Summarize our chat
 .ask 2,4 50 Compare what we discussed
 .ask 2 after 2026-10-01 What did we decide?
-.ask 2 after 2026-10-01 to 2026-10-07 Summarize that period
+.ask 2 after 2026-10-01 to 2026-10-07 | Summarize that period
 .ask 2 on 2026-10-07 What did we discuss that day?
 .ask 2 to 2026-10-07 Summarize everything up to that date
+.ask 2 40 --redact phones,emails | What should I reply?
+.ask 2 40 --phrase "private phrase" | Summarize
 ```
 
 The count applies to each selected chat. `all` or a date-filtered query uses
@@ -249,8 +266,35 @@ that local date. History starts when this device receives messages, so it is
 not a guaranteed export of messages from before pairing or while the bot was
 offline. Each `.ask` request sends only the selected text/date range to the
 configured AI provider for that request; it does not store the transcript in AI
-chat memory and never sends a reply to the other person. Group selection is
-intentionally deferred for a separate design discussion.
+chat memory and never sends a reply to the other person. Optional
+`--redact phones,emails` and `--phrase "text to hide"` rules run locally on both the
+transcript and question before the provider call. The phrase form requires `|`
+before the question. Group selection is intentionally deferred for a separate
+design discussion.
+
+## Read cached messages privately
+
+Use either spelling in the owner's private controller chat or the linked
+account’s “You” chat:
+
+```text
+.receive 03001234567 5  # latest 5 cached messages from one direct chat
+.recieve 03001234567 5  # accepted spelling alias
+.receive unread         # chats WhatsApp currently reports as unread
+.receive unread 25      # cap cached text previews at 25 entries
+.receive 03001234567 5 --text-only
+```
+
+The report stays in the private control chat. A direct phone/contact lookup
+identifies message kinds (text, voice note, view-once, photo, video, document,
+location, contact, and other cached types); locally available media may be
+attached, up to five files per request and 16 MB per file. In `unread` mode WhatsApp provides only a
+**chat-level** count, not the IDs of individual unread messages: the command
+reports that count and labels cached text only as an unverified recent preview.
+It does not attach media in that mode. Unknown counts are not treated as unread,
+and cache recency alone is never used as evidence. The receiver does not call
+`readMessages`/`markRead` or message the source chat. No blue-tick behavior is
+guaranteed without live WhatsApp testing.
 
 ## Change approved settings from WhatsApp
 
@@ -303,6 +347,21 @@ cd ~/nexus-wa && git pull --ff-only && npm install --omit=optional --no-audit --
 Your database, session and notes live in `~/.nexus-wa`, outside the repo, so an
 update never touches them.
 
+After this version is installed, the owner can also manage the Termux bot from
+WhatsApp's private controller chat or the linked account's “You” chat:
+
+```text
+.update check   # see whether the configured GitHub branch is ahead
+.update         # fast-forward, install dependencies, and restart
+.restart        # restart only
+```
+
+These controls require the standard `~/nexus-wa` install running under
+`nexus start`. Updates refuse a dirty or diverged/local-ahead Git branch rather
+than resetting or overwriting it. A successful update restarts only after
+`npm install` completes; the WhatsApp session, database, and notes remain in
+`~/.nexus-wa`. The existing `.env` and linked session are kept; the update does not re-pair WhatsApp.
+
 ---
 
 ## Backup
@@ -329,8 +388,8 @@ That does a real push-then-pull and tells you which setting is wrong if it fails
 (a killed bot came back under a new PID), clean stop leaving zero processes, and
 safe double-stop. The previous supervisor smoke test booted with
 `ready · 34 command(s) · 5 session(s)`. The current no-connection dry-run
-registry, including `.agenda`, selected-chat `.ask`, and `.env` controls, reports
-37 commands across 15 plugin files.
+registry, including `.agenda`, selected-chat `.ask`, `.env`, and Termux controls,
+reports 40 commands across 17 plugin files.
 
 **Not verified:** Termux itself. This sandbox is Linux, not Android, so
 `pkg install`, `termux-wake-lock`, `Termux:Boot` autostart, and Android's

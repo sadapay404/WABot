@@ -162,8 +162,15 @@ function targetPrompt(kind, state) {
   if (state.targetProblem === 'self') {
     return [
       '*Choose another recipient*',
-      'A reminder cannot be sent to the “You” chat.',
+      'A scheduled message cannot be sent to the “You” chat.',
       'Enter a different WhatsApp contact name or number.',
+    ].join('\n');
+  }
+  if (state.targetProblem === 'group' && kind === 'edit') {
+    return [
+      '*Direct recipient required*',
+      'Schedule edits currently accept one direct WhatsApp contact, not a group.',
+      'Enter a saved contact name or phone number.',
     ].join('\n');
   }
   if (state.targetProblem === 'group' && kind === 'remind') {
@@ -218,10 +225,10 @@ function showRecipientChoice(state, answer, contacts, kind, selfJid) {
   }
   result ||= resolveRecipient(trimmed, contacts);
   if (result.status !== 'resolved') return result;
-  if (kind === 'remind' && normalizeJid(result.jid) === normalizeJid(selfJid)) {
+  if ((kind === 'remind' || kind === 'edit') && normalizeJid(result.jid) === normalizeJid(selfJid)) {
     return { status: 'self', query: trimmed };
   }
-  if (kind === 'remind' && result.jid.endsWith('@g.us')) {
+  if ((kind === 'remind' || kind === 'edit') && result.jid.endsWith('@g.us')) {
     return { status: 'group', query: trimmed };
   }
   return result;
@@ -242,10 +249,10 @@ function formatPreview(state, timeZone) {
   const recipient = `${state.targetLabel}${phone && !String(state.targetLabel).includes(phone) ? ` (+${phone})` : ''}`;
   const sentText = state.kind === 'remind' ? `Reminder: ${state.text}` : state.text;
   const recurring = state.parsed.kind === 'recurring';
-  const lines = [
-    `*Review ${state.kind === 'remind' ? 'reminder' : 'scheduled message'}*`,
-    `Recipient: ${recipient}`,
-  ];
+  const title = state.kind === 'edit'
+    ? `*Review changes to job #${state.jobId}*`
+    : `*Review ${state.kind === 'remind' ? 'reminder' : 'scheduled message'}*`;
+  const lines = [title, `Recipient: ${recipient}`];
 
   if (recurring) {
     lines.push(`Repeat: ${state.parsed.label}`);
@@ -265,6 +272,7 @@ function formatPreview(state, timeZone) {
 
   lines.push('Message:', sentText);
   lines.push('Delivery: sent only at its due time; no advance notice is sent.');
+  if (state.kind === 'edit') lines.push('The existing schedule changes only after confirmation.');
   lines.push('Confirm: reply YES. Discard: reply NO or CANCEL.');
   return lines.join('\n');
 }
@@ -285,6 +293,31 @@ function recurrencePolicyPrompt(parsed) {
     '2. Use the last day of that month instead.',
     'Reply 1 or 2.',
   ].join('\n');
+}
+
+function parseStoredSchedule(job) {
+  if (job.kind === 'calendar') {
+    let recurrence = null;
+    try { recurrence = JSON.parse(job.cron || 'null'); } catch { /* shown as one-off if malformed */ }
+    return {
+      runAt: Number(job.run_at),
+      kind: 'recurring',
+      recurrence,
+      intervalMs: null,
+      label: recurrence?.label || 'calendar recurrence',
+    };
+  }
+  if (String(job.kind).startsWith('every:')) {
+    const intervalMs = Number.parseInt(String(job.kind).split(':')[1], 10);
+    return {
+      runAt: Number(job.run_at),
+      kind: 'recurring',
+      recurrence: null,
+      intervalMs,
+      label: `every ${Math.round(intervalMs / 60_000)} minute(s)`,
+    };
+  }
+  return { runAt: Number(job.run_at), kind: 'once', recurrence: null, intervalMs: null, label: 'one time' };
 }
 
 export class ScheduleWizard {
@@ -407,6 +440,118 @@ export class ScheduleWizard {
     return this.#advance(state, reply);
   }
 
+  async beginEdit(jobId, field, ctx) {
+    const idText = String(jobId ?? '');
+    const id = /^\d+$/.test(idText) ? Number(idText) : NaN;
+    const job = Number.isSafeInteger(id) && id > 0 ? this.scheduler.get(id) : null;
+    if (!job || job.status !== 'pending') return ctx.reply(`No pending schedule #${jobId} can be edited.`);
+    if (Number(job.run_at) <= this.now()) {
+      return ctx.reply(`Schedule #${id} is already due. Use the agenda missed recovery command; an overdue message is never edited or sent automatically.`);
+    }
+
+    const ownerJid = normalizeJid(ctx.sender);
+    const chatJid = normalizeJid(ctx.jid);
+    if (!ownerJid || !chatJid) return ctx.reply('I could not identify this chat or owner.');
+    this.deleteDraft(ownerJid);
+    const target = resolveRecipient(job.jid, this.contacts);
+    const storedTargetName = this.contacts?.displayName(job.jid)?.name || job.jid;
+    const state = {
+      kind: 'edit',
+      jobId: id,
+      ownerJid,
+      chatJid,
+      createdAt: this.now(),
+      step: 'edit-select',
+      originalRunAt: Number(job.run_at),
+      targetJid: normalizeJid(job.jid),
+      targetLabel: target.status === 'resolved' ? target.label : storedTargetName,
+      targetQuery: '',
+      targetProblem: null,
+      targetMatches: null,
+      text: String(job.text ?? ''),
+      whenExpression: 'existing stored schedule',
+      whenBase: null,
+      parsed: parseStoredSchedule(job),
+      editRemaining: [],
+    };
+    this.saveDraft(state);
+    if (field) return this.#selectEditField(state, field, (message) => ctx.reply(message));
+    const prompt = [
+      `*Edit pending schedule #${id}*`,
+      `Recipient: ${state.targetLabel}`,
+      `Time: ${formatDateTime(job.run_at, this.timeZone)}`,
+      `Message: ${String(job.text || '').slice(0, 180)}`,
+      '',
+      'Reply `recipient`, `text`, `time`, or `all`. Nothing changes until you confirm the preview with YES.',
+      'Reply CANCEL to leave the schedule unchanged.',
+    ].join('\n');
+    return ctx.reply(prompt);
+  }
+
+  async #selectEditField(state, field, reply) {
+    const choice = String(field || '').toLowerCase().trim();
+    const selected = choice === 'all'
+      ? 'all'
+      : ['recipient', 'to'].includes(choice)
+        ? 'target'
+        : ['text', 'message', 'body'].includes(choice)
+          ? 'message'
+          : ['time', 'date', 'when'].includes(choice)
+            ? 'time'
+            : null;
+    if (!selected) {
+      state.step = 'edit-select';
+      this.saveDraft(state);
+      await reply('Reply `recipient`, `text`, `time`, or `all`; CANCEL leaves the existing job unchanged.');
+      return true;
+    }
+
+    state.editRemaining = selected === 'all' ? ['message', 'time'] : [];
+    if (selected === 'target' || selected === 'all') {
+      state.step = 'target';
+      state.targetProblem = null;
+      state.targetQuery = '';
+      this.saveDraft(state);
+      await reply(`Current recipient: ${state.targetLabel}\n${targetPrompt('edit', state)}`);
+      return true;
+    }
+    if (selected === 'message') {
+      state.step = 'message';
+      this.saveDraft(state);
+      await reply(`Current message: ${String(state.text).slice(0, 180)}\n\nEnter the replacement message text.`);
+      return true;
+    }
+    state.step = 'when';
+    state.whenExpression = '';
+    state.whenBase = null;
+    state.parsed = null;
+    this.saveDraft(state);
+    await reply(`Current time: ${formatDateTime(state.originalRunAt, this.timeZone)}\nEnter a new future date/time:\n${DATE_HELP}`);
+    return true;
+  }
+
+  async #advanceEdit(state, reply) {
+    if (Array.isArray(state.editRemaining) && state.editRemaining.length) {
+      const next = state.editRemaining.shift();
+      state.step = next;
+      this.saveDraft(state);
+      if (next === 'message') {
+        await reply(`Enter the replacement message text. Current: ${String(state.text).slice(0, 180)}`);
+        return true;
+      }
+      if (next === 'time') {
+        state.whenExpression = '';
+        state.whenBase = null;
+        state.parsed = null;
+        this.saveDraft(state);
+        await reply(`Enter a new future date/time.\n${DATE_HELP}`);
+        return true;
+      }
+      return this.#selectEditField(state, next, reply);
+    }
+    return this.#advance(state, reply);
+  }
+
   async handleReply({ msg, reply }) {
     const state = this.getDraft(msg.sender, msg.jid);
     if (!state) return false;
@@ -414,8 +559,14 @@ export class ScheduleWizard {
     const answer = answerText(msg.text);
     if (/^(?:cancel|stop|abort)$/i.test(answer)) {
       this.deleteDraft(state.ownerJid);
-      await reply('Draft cancelled. Nothing was scheduled.');
+      await reply(state.kind === 'edit'
+        ? 'Edit cancelled. The existing schedule is unchanged.'
+        : 'Draft cancelled. Nothing was scheduled.');
       return true;
+    }
+
+    if (state.step === 'edit-select') {
+      return this.#selectEditField(state, answer, reply);
     }
 
     if (state.step === 'recurrence-policy') {
@@ -439,7 +590,7 @@ export class ScheduleWizard {
         return true;
       }
       state.parsed = parsed;
-      return this.#advance(state, reply);
+      return state.kind === 'edit' ? this.#advanceEdit(state, reply) : this.#advance(state, reply);
     }
 
     if (state.step === 'confirm') {
@@ -456,6 +607,38 @@ export class ScheduleWizard {
 
         const sendText = state.kind === 'remind' ? `Reminder: ${state.text}` : state.text;
         try {
+          if (state.kind === 'edit') {
+            const updated = this.scheduler.update(state.jobId, {
+              jid: state.targetJid,
+              text: state.text,
+              runAt: state.parsed.runAt,
+              kind: state.parsed.kind,
+              intervalMs: state.parsed.intervalMs,
+              recurrence: state.parsed.recurrence || null,
+            });
+            if (!updated) {
+              this.deleteDraft(state.ownerJid);
+              await reply(`Schedule #${state.jobId} is no longer pending, so no edit was applied.`);
+              return true;
+            }
+            this.deleteDraft(state.ownerJid);
+            this.audit?.record?.({
+              action: 'schedule-edit',
+              actorJid: state.ownerJid,
+              plugin: 'schedule',
+              targetJid: state.targetJid,
+              detail: `job #${state.jobId}: ${state.parsed.label}: ${state.text.slice(0, 80)}`,
+            });
+            await reply([
+              `*Schedule #${updated.id} updated*`,
+              `Recipient: ${state.targetLabel}`,
+              `Send time: ${formatDateTime(updated.run_at, this.timeZone)}`,
+              ...(state.parsed.kind === 'recurring' ? [`Repeat: ${state.parsed.label}`] : []),
+              'The revised message will still be sent only at its due time.',
+            ].join('\n'));
+            return true;
+          }
+
           const job = this.scheduler.add({
             jid: state.targetJid,
             text: sendText,
@@ -488,7 +671,9 @@ export class ScheduleWizard {
       }
       if (/^(?:no|n|decline)$/i.test(answer)) {
         this.deleteDraft(state.ownerJid);
-        await reply('Discarded. Nothing was scheduled.');
+        await reply(state.kind === 'edit'
+          ? 'Edit discarded. The existing schedule is unchanged.'
+          : 'Discarded. Nothing was scheduled.');
         return true;
       }
       await reply('Please reply YES to confirm, or NO/CANCEL to discard.');
@@ -515,12 +700,12 @@ export class ScheduleWizard {
       state.targetQuery = '';
       state.targetProblem = null;
       state.targetMatches = null;
-      return this.#advance(state, reply);
+      return state.kind === 'edit' ? this.#advanceEdit(state, reply) : this.#advance(state, reply);
     }
 
     if (state.step === 'message') {
       state.text = answer;
-      return this.#advance(state, reply);
+      return state.kind === 'edit' ? this.#advanceEdit(state, reply) : this.#advance(state, reply);
     }
 
     if (state.step === 'when') {
@@ -550,7 +735,7 @@ export class ScheduleWizard {
         return true;
       }
       state.parsed = parsed;
-      return this.#advance(state, reply);
+      return state.kind === 'edit' ? this.#advanceEdit(state, reply) : this.#advance(state, reply);
     }
 
     if (state.step === 'time') {
@@ -576,7 +761,7 @@ export class ScheduleWizard {
       state.whenExpression = expression;
       state.whenBase = null;
       state.parsed = parsed;
-      return this.#advance(state, reply);
+      return state.kind === 'edit' ? this.#advanceEdit(state, reply) : this.#advance(state, reply);
     }
 
     // A persisted draft may have been created by an older version. Re-evaluate

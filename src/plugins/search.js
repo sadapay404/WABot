@@ -61,7 +61,8 @@ export default {
           const who = r.sender_jid ? ctx.bot?.contacts?.displayName(r.sender_jid).name : 'unknown';
           const body = (r.snip || r.text || '').replace(/\s+/g, ' ').slice(0, 110);
           const flags = [r.view_once ? '👁' : '', r.has_media ? '📎' : ''].join('');
-          lines.push(`• *${who}* ${timeAgo(r.ts)} ${flags}\n  ${body}`);
+          const id = String(r.id || '').replace(/`/g, '');
+          lines.push(`• *${who}* ${timeAgo(r.ts)} ${flags} · id \`${id}\`\n  ${body}`);
         }
         await ctx.reply(lines.join('\n'));
       },

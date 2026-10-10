@@ -9,7 +9,7 @@ import { MessageCache } from '../src/core/messageCache.js';
 import { ContactStore } from '../src/core/contactStore.js';
 import { normalize } from '../src/core/message.js';
 import { localDateRange } from '../src/lib/when.js';
-import askPlugin from '../src/plugins/ask.js';
+import askPlugin, { redactText } from '../src/plugins/ask.js';
 
 const quiet = createLogger('fatal');
 const SELF = '15550009999@s.whatsapp.net';
@@ -18,9 +18,9 @@ const ALICE = '15550002222@s.whatsapp.net';
 const BOB = '15550003333@s.whatsapp.net';
 const GROUP = '120363000000000000@g.us';
 
-function store(cache, id, jid, text, { fromMe = false, ts = Date.now() } = {}) {
+function store(cache, id, jid, text, { fromMe = false, ts = Date.now(), remoteJidAlt = null } = {}) {
   const raw = {
-    key: { id, remoteJid: jid, fromMe },
+    key: { id, remoteJid: jid, remoteJidAlt, fromMe },
     messageTimestamp: Math.floor(ts / 1_000),
     message: { conversation: text },
   };
@@ -55,6 +55,7 @@ test('.ask lists numbered direct chats and asks from both sides of the selected 
   store(cache, 'G1', GROUP, 'Group conversation must be deferred');
   store(cache, 'O1', OWNER, 'Control chat must not be offered');
   store(cache, 'S1', SELF, 'Self chat must not be offered');
+  store(cache, 'O-LID', '123456789013579@lid', 'Owner LID alias must not be offered', { remoteJidAlt: SELF });
 
   const askContext = new AskContext({ db });
   const config = buildConfig({ mode: 'dry-run' });
@@ -71,7 +72,7 @@ test('.ask lists numbered direct chats and asks from both sides of the selected 
   assert.match(replies.at(-1), /Cached one-to-one chats/);
   assert.match(replies.at(-1), /Alice/);
   assert.match(replies.at(-1), /Bob/);
-  assert.doesNotMatch(replies.at(-1), /Group conversation|Control chat|Self chat/);
+  assert.doesNotMatch(replies.at(-1), /Group conversation|Control chat|Self chat|Owner LID alias/);
 
   await askPlugin.execute(context({
     args: ['2', 'all', 'What', 'should', 'I', 'reply?'],
@@ -147,4 +148,100 @@ test('.ask requires the numbered snapshot and does not read group history', asyn
   ctx.args = ['1', '20', 'summarize'];
   await askPlugin.execute(ctx);
   assert.match(replies.at(-1), /list expired|Run `\.ask chats`/i);
+});
+
+test('.ask can select a cached LID conversation by its Pakistani phone-number alias', async () => {
+  const db = await getMemoryDb();
+  const cache = new MessageCache(db, quiet);
+  const contacts = new ContactStore(db, quiet);
+  const lid = '123456789012345@lid';
+  const pn = '923001234567@s.whatsapp.net';
+  store(cache, 'LID-1', lid, 'A private conversation selected by phone.', { remoteJidAlt: pn });
+  const askContext = new AskContext({ db });
+  const config = buildConfig({ mode: 'dry-run' });
+  config.safety.ownerJids = [OWNER];
+  const replies = [];
+  let request;
+  const ai = {
+    provider: 'groq',
+    configured: () => true,
+    async complete(value) { request = value; return 'Answer'; },
+  };
+
+  await askPlugin.execute(context({
+    args: ['03001234567', '10', 'What', 'was', 'said?'],
+    db, askContext, contacts, ai, replies, config,
+  }));
+  assert.match(request.prompt, /A private conversation selected by phone/);
+  assert.match(replies.at(-1), /Answer/);
+});
+
+test('.ask accepts multiple explicit direct-phone selections', async () => {
+  const db = await getMemoryDb();
+  const cache = new MessageCache(db, quiet);
+  const contacts = new ContactStore(db, quiet);
+  contacts.upsertMany([
+    { id: ALICE, name: 'Alice' },
+    { id: BOB, name: 'Bob' },
+  ]);
+  store(cache, 'ALICE-DIRECT', ALICE, 'Alice selected this chat.');
+  store(cache, 'BOB-DIRECT', BOB, 'Bob selected this chat.');
+
+  const askContext = new AskContext({ db });
+  const config = buildConfig({ mode: 'dry-run' });
+  config.safety.ownerJids = [OWNER];
+  const replies = [];
+  let request;
+  const ai = {
+    provider: 'groq',
+    configured: () => true,
+    async complete(value) { request = value; return 'Combined answer'; },
+  };
+  await askPlugin.execute(context({
+    args: ['+15550002222,+15550003333', '40', 'Compare', 'these', 'chats.'],
+    db, askContext, contacts, ai, replies, config,
+  }));
+
+  assert.match(request.prompt, /Alice selected this chat/);
+  assert.match(request.prompt, /Bob selected this chat/);
+  assert.match(replies.at(-1), /Using 2 text messages from Alice .*Bob/);
+});
+
+test('.ask locally redacts phone numbers, emails and specified phrases before provider transmission', async () => {
+  const db = await getMemoryDb();
+  const cache = new MessageCache(db, quiet);
+  const contacts = new ContactStore(db, quiet);
+  store(cache, 'SENSITIVE', ALICE,
+    'Call +923001234567 or dana@example.com. Project phrase: Blue Lantern.',
+    { ts: Date.UTC(2026, 9, 10, 12, 34) });
+  const askContext = new AskContext({ db });
+  const config = buildConfig({ mode: 'dry-run' });
+  config.safety.ownerJids = [OWNER];
+  const replies = [];
+  let request;
+  const ai = {
+    provider: 'groq',
+    configured: () => true,
+    async complete(value) { request = value; return 'Safe answer'; },
+  };
+  await askPlugin.execute(context({ args: ['chats'], db, askContext, contacts, ai, replies, config }));
+
+  await askPlugin.execute(context({
+    args: ['1', 'all', '--redact', 'phones,emails', '--phrase', 'Blue', 'Lantern', '|', 'Summarize'],
+    db, askContext, contacts, ai, replies, config,
+  }));
+  assert.doesNotMatch(request.prompt, /923001234567|dana@example\.com|Blue Lantern/);
+  assert.match(request.prompt, /\[PHONE REDACTED\]/);
+  assert.match(request.prompt, /\[EMAIL REDACTED\]/);
+  assert.match(request.prompt, /\[PHRASE REDACTED\]/);
+  assert.match(request.prompt, /\[2026-10-10 17:34\]/, 'local transcript timestamps must not be mistaken for phone numbers');
+  assert.match(replies.at(-1), /Local redaction applied.*phone numbers, email addresses/);
+});
+
+test('redactText leaves timestamps/date strings unchanged while replacing opted-in identifiers', () => {
+  const value = '[2026-10-10 17:34] Phone +923001234567, e-mail a@example.org';
+  const result = redactText(value, { phones: true, emails: true });
+  assert.match(result.text, /2026-10-10 17:34/);
+  assert.doesNotMatch(result.text, /923001234567|a@example\.org/);
+  assert.deepEqual(result.counts, { phones: 1, emails: 1, phrases: 0 });
 });

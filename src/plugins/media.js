@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { formatBytes, timeAgo } from '../lib/format.js';
 import { describeMedia, mediaIcon } from '../lib/media.js';
+import { downloadWhatsAppMedia } from '../core/mediaDownloader.js';
 
 const run = promisify(execFile);
 
@@ -27,12 +28,12 @@ export default {
     {
       name: 'sticker',
       aliases: ['s', 'stick'],
-      description: 'Turn an attached image into a WebP sticker',
-      usage: '.sticker (with an image attached)',
+      description: 'Turn an attached image into a WebP sticker (put the command in its caption)',
+      usage: '.sticker (image caption)',
       ownerOnly: false,
       async execute(ctx) {
         if (!ctx.msg.media || ctx.msg.media.type !== 'image') {
-          return ctx.reply('Attach an image, then send .sticker');
+          return ctx.reply('Send an image with `.sticker` in its caption.');
         }
         if (!(await hasFfmpeg())) {
           return ctx.reply(
@@ -43,7 +44,7 @@ export default {
 
         let buffer;
         try {
-          buffer = await ctx.socket.downloadMediaMessage(ctx.msg.raw);
+          buffer = await downloadWhatsAppMedia(ctx.socket, ctx.msg.raw, ctx.logger);
         } catch (err) {
           return ctx.reply(`⚠️ Could not download the image: ${err.message}`);
         }
@@ -103,12 +104,12 @@ export default {
     {
       name: 'transcribe',
       aliases: ['stt'],
-      description: 'Transcribe an attached voice note (needs an AI key)',
-      usage: '.transcribe (with audio attached)',
+      description: 'Transcribe an attached audio message with its command caption (needs an AI key)',
+      usage: '.transcribe (audio attachment caption)',
       ownerOnly: true,
       async execute(ctx) {
         const audio = ctx.msg.media && ctx.msg.media.type === 'audio';
-        if (!audio) return ctx.reply('Attach a voice note, then send .transcribe');
+        if (!audio) return ctx.reply('Send an audio attachment with `.transcribe` in its caption.');
 
         const ai = ctx.bot?.ai;
         if (!ai) return ctx.reply('The AI orchestrator is not active in this mode.');
@@ -121,7 +122,7 @@ export default {
 
         let buffer;
         try {
-          buffer = await ctx.socket.downloadMediaMessage(ctx.msg.raw);
+          buffer = await downloadWhatsAppMedia(ctx.socket, ctx.msg.raw, ctx.logger);
         } catch (err) {
           return ctx.reply(`⚠️ Could not download the audio: ${err.message}`);
         }

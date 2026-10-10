@@ -7,6 +7,7 @@
  */
 
 import { AiNotConfigured, AiError } from '../core/ai.js';
+import { downloadWhatsAppMedia } from '../core/mediaDownloader.js';
 
 const SYSTEM_BASE =
   'You are Nexus-WA, a concise personal assistant running inside WhatsApp. ' +
@@ -86,16 +87,16 @@ export default {
     {
       name: 'vision',
       aliases: ['describe', 'ocr'],
-      description: 'Describe or read text from an attached image',
-      usage: '.vision [instruction]',
+      description: 'Describe or read text from an attached image (put the command in its caption)',
+      usage: '.vision [instruction] (image caption)',
       ownerOnly: true,
       async execute(ctx) {
         if (!ctx.msg.media || ctx.msg.media.type !== 'image') {
-          return ctx.reply('Attach an image, then send .vision');
+          return ctx.reply('Send an image with `.vision` in its caption.');
         }
         let buffer;
         try {
-          buffer = await ctx.socket.downloadMediaMessage(ctx.msg.raw);
+          buffer = await downloadWhatsAppMedia(ctx.socket, ctx.msg.raw, ctx.logger);
         } catch (err) {
           return ctx.reply(`⚠️ Could not download the image: ${err.message}`);
         }

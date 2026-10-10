@@ -96,7 +96,7 @@ export function formatAgenda({ jobs, timezone, now, mode, contacts }) {
   for (const [key, items] of groups) {
     const first = items[0];
     const heading = key === 'overdue'
-      ? 'Overdue — will send when the bot is online'
+      ? 'Overdue — 60-second timer grace; stale sends require owner review'
       : key === todayKey
         ? `Today — ${localDateLabel(first.runAt, timezone)}`
         : key === tomorrowKey
@@ -148,19 +148,66 @@ export default {
     },
     {
       name: 'agenda',
-      description: 'Show pending sends due today or within the next 7 days',
-      usage: '.agenda [today|week]',
+      description: 'Show pending sends or decide how to recover missed schedules',
+      usage: '.agenda [today|week|missed [send|skip <id>]]',
       ownerOnly: true,
       async execute(ctx) {
         const scheduler = ctx.bot?.scheduler;
         if (!scheduler) return ctx.reply('The scheduler is not active in this mode.');
 
         const requested = String(ctx.args[0] || 'week').toLowerCase();
+        if (requested === 'missed') {
+          const action = String(ctx.args[1] || '').toLowerCase();
+          if (['send', 'skip'].includes(action)) {
+            const idText = String(ctx.args[2] ?? '');
+            const id = /^\d+$/.test(idText) ? Number(idText) : NaN;
+            if (!Number.isSafeInteger(id) || id < 1) {
+              return ctx.reply('Choose a valid job ID: `.agenda missed send <id>` or `.agenda missed skip <id>`.');
+            }
+            const result = await scheduler.recoverMissed(id, action, scheduler.now?.() ?? Date.now());
+            if (!result.ok) {
+              if (result.reason === 'delivery-failed') {
+                return ctx.reply(`Could not send missed job #${id}: ${result.error}. It remains in the missed queue for another explicit decision.`);
+              }
+              return ctx.reply(`Job #${id} is not waiting for a missed-send decision.`);
+            }
+            if (action === 'send') {
+              return ctx.reply([
+                `*Missed job #${id} sent now by your request.*`,
+                ...(result.job?.status === 'pending'
+                  ? [`Next recurring send: ${formatDateTime(result.nextRunAt, ctx.config?.scheduler?.timezone || 'Asia/Karachi')}`]
+                  : []),
+              ].join('\n'));
+            }
+            return ctx.reply(result.job?.status === 'pending'
+              ? `Missed occurrence #${id} skipped. The next recurring send is ${formatDateTime(result.nextRunAt, ctx.config?.scheduler?.timezone || 'Asia/Karachi')}.`
+              : `Missed job #${id} skipped. It will not be sent.`);
+          }
+
+          const totalMissed = scheduler.missedCount?.() ?? scheduler.missed({ limit: 500 }).length;
+          const missed = scheduler.missed({ limit: 50 });
+          if (!missed.length) return ctx.reply('No missed schedules are waiting for an owner decision.');
+          const timezone = ctx.config?.scheduler?.timezone || 'Asia/Karachi';
+          return ctx.reply([
+            `*Missed sends — ${totalMissed} awaiting your decision${totalMissed > missed.length ? ` (showing ${missed.length})` : ''}*`,
+            'Nothing is sent late automatically. Choose separately for each job:',
+            '',
+            ...missed.flatMap((job) => [
+              `#${job.id} · ${formatDateTime(job.run_at, timezone)} · ${recipientLabel(ctx.bot?.contacts, job)}`,
+              `   ${String(job.text || '').slice(0, 180)}`,
+              `   Send now: \.agenda missed send ${job.id} · Skip: \.agenda missed skip ${job.id}`,
+            ]),
+            ...(totalMissed > missed.length ? ['', `${totalMissed - missed.length} more missed schedule(s) remain; resolve these IDs first, then run \.agenda missed again.`] : []),
+            '',
+            'For repeating schedules, skipping advances to the next future occurrence; sending now delivers only this missed occurrence.',
+          ].join('\n'));
+        }
         if (!['today', 'week'].includes(requested)) {
           return ctx.reply([
             '*Agenda usage*',
             '`.agenda today` — pending sends for today.',
             '`.agenda week` — pending sends across the next 7 local calendar days.',
+            '`.agenda missed` — decide send-now or skip for each overdue job.',
             'The default view is `week`.',
           ].join('\n'));
         }
@@ -182,34 +229,46 @@ export default {
     {
       name: 'jobs',
       aliases: ['schedules'],
-      description: 'List or cancel scheduled jobs',
-      usage: '.jobs | .jobs cancel <id>',
+      description: 'List, edit, or cancel scheduled jobs',
+      usage: '.jobs | .jobs edit <id> [recipient|text|time|all] | .jobs cancel <id>',
       ownerOnly: true,
       async execute(ctx) {
         const scheduler = ctx.bot?.scheduler;
         if (!scheduler) return ctx.reply('The scheduler is not active in this mode.');
 
-        if (ctx.args[0] === 'cancel') {
-          const id = Number.parseInt(ctx.args[1], 10);
+        if (String(ctx.args[0] || '').toLowerCase() === 'edit') {
+          if (!ctx.bot?.scheduleWizard) return ctx.reply('The schedule edit flow is not active in this mode.');
+          if (!ctx.args[1]) return ctx.reply('Use `.jobs edit <id>` to choose a field, or `.jobs edit <id> all` to change recipient, text, and time.');
+          return ctx.bot.scheduleWizard.beginEdit(ctx.args[1], ctx.args[2], ctx);
+        }
+
+        if (String(ctx.args[0] || '').toLowerCase() === 'cancel') {
+          const idText = String(ctx.args[1] ?? '');
+          const id = /^\d+$/.test(idText) ? Number(idText) : NaN;
+          if (!Number.isSafeInteger(id) || id < 1) return ctx.reply('Use `.jobs cancel <id>` with a valid job ID.');
           return ctx.reply(
             scheduler.cancel(id) ? `🚫 Job #${id} cancelled.` : `No pending job #${id}.`
           );
         }
 
         const rows = scheduler.list({ status: 'pending' });
-        if (!rows.length) return ctx.reply('No pending jobs.');
+        const missedCount = scheduler.missedCount?.() || 0;
+        if (!rows.length) return ctx.reply(missedCount
+          ? `No pending jobs. ${missedCount} missed schedule(s) need your decision; run .agenda missed.`
+          : 'No pending jobs.');
 
         const s = scheduler.summary();
+        const timezone = ctx.config?.scheduler?.timezone || 'Asia/Karachi';
         await ctx.reply(
           [
             `⏰ *Pending jobs (${rows.length})*`,
             '',
             ...rows.map(
               (j) =>
-                `\`#${j.id}\` ${new Date(j.run_at).toISOString().slice(0, 16).replace('T', ' ')} — ${String(j.text).slice(0, 60)}`
+                `\`#${j.id}\` ${formatDateTime(j.run_at, timezone)} — ${String(j.text).slice(0, 60)}`
             ),
             '',
-            `_${s.done} done · ${s.cancelled} cancelled · ${s.fired} fired since start_`,
+            `_${s.done} done · ${s.cancelled} cancelled · ${s.fired} fired since start · ${missedCount} missed need a decision_`,
           ].join('\n')
         );
       },

@@ -26,6 +26,7 @@ import { MockWhatsAppSocket, MOCK_OWNER_JID } from './core/mockSocket.js';
 import { SessionRegistry } from './core/sessionRegistry.js';
 import { ContactStore } from './core/contactStore.js';
 import { MessageCache } from './core/messageCache.js';
+import { MessageInbox } from './core/messageInbox.js';
 import { AskContext } from './core/askContext.js';
 import { EnvEditor } from './core/envEditor.js';
 import { MediaStore } from './core/mediaStore.js';
@@ -37,6 +38,7 @@ import { PresenceLog } from './core/presenceLog.js';
 import { GroupWatch } from './core/groupWatch.js';
 import { Scheduler } from './core/scheduler.js';
 import { ScheduleWizard } from './core/scheduleWizard.js';
+import { ReconnectCatchup } from './core/reconnectCatchup.js';
 import { Triggers } from './core/triggers.js';
 import { Webhooks } from './core/webhooks.js';
 import { AuditLog } from './core/audit.js';
@@ -46,6 +48,7 @@ import { NoteStore } from './core/notes.js';
 import { AiClient } from './core/ai.js';
 import { OutboundQueue } from './core/outboundQueue.js';
 import { LogBuffer } from './core/logBuffer.js';
+import { TermuxControl } from './core/termuxControl.js';
 import { Dashboard } from './web/dashboard.js';
 import { normalizeJid } from './core/jid.js';
 import { formatUptime } from './lib/format.js';
@@ -87,7 +90,7 @@ function banner() {
 function wireEvents(socket, app) {
   // The mock is a plain EventEmitter; Baileys emits through `socket.ev`.
   const on = socket.ev ? (e, f) => socket.ev.on(e, f) : (e, f) => socket.on(e, f);
-  const { dispatcher, cache, antiDelete, viewOnce, editWatch, registry, contacts, presenceLog, profileWatch, groupWatch, webhooks, logger: log } = app;
+  const { dispatcher, cache, antiDelete, viewOnce, editWatch, registry, contacts, presenceLog, profileWatch, groupWatch, messageInbox, webhooks, logger: log } = app;
   const selfJid = () => (socket.user?.id ? normalizeJid(socket.user.id) : '');
 
   on('messages.upsert', async ({ messages = [], type = null } = {}) => {
@@ -141,6 +144,22 @@ function wireEvents(socket, app) {
     }
   });
 
+  on('chats.update', (list = []) => {
+    try {
+      messageInbox?.syncChats(list);
+    } catch (err) {
+      log.error(`chats.update handler: ${err.message}`);
+    }
+  });
+
+  on('chats.upsert', (list = []) => {
+    try {
+      messageInbox?.syncChats(list);
+    } catch (err) {
+      log.error(`chats.upsert handler: ${err.message}`);
+    }
+  });
+
   on('contacts.update', (list = []) => {
     try {
       contacts.upsertMany(list);
@@ -162,6 +181,7 @@ function wireEvents(socket, app) {
         contacts.upsertMany(payload.contacts);
         log.info(`history sync: cached ${payload.contacts.length} contacts`);
       }
+      if (payload.chats?.length) messageInbox?.syncChats(payload.chats);
     } catch (err) {
       log.error(`history sync handler: ${err.message}`);
     }
@@ -262,12 +282,30 @@ async function main() {
   // Transport.
   let socket;
   let connection = null;
+  let reconnectCatchup = null;
+  const connectionEvents = [];
   if (config.isDryRun) {
     socket = new MockWhatsAppSocket({ logger });
     await socket.connect();
   } else {
     const { WhatsAppConnection } = await import('./core/whatsapp.js');
     connection = new WhatsAppConnection({ config, logger, cache });
+    // Register before connect() so the initial open or an early close cannot
+    // race service construction and disappear from the outage history.
+    const dispatchConnectionEvent = (type, payload) => {
+      const event = { type, payload, at: Date.now() };
+      if (!reconnectCatchup) {
+        connectionEvents.push(event);
+      } else if (type === 'close') {
+        reconnectCatchup.onClose(payload, event.at);
+      } else {
+        reconnectCatchup.onOpen(payload, event.at).catch((error) =>
+          logger.error(`reconnect catch-up: ${error.message}`)
+        );
+      }
+    };
+    connection.on('open', (payload) => dispatchConnectionEvent('open', payload));
+    connection.on('close', (payload) => dispatchConnectionEvent('close', payload));
     socket = await connection.connect();
   }
 
@@ -287,7 +325,16 @@ async function main() {
   });
 
   const selfJid = normalizeJid(socket.user?.id || '');
+  const termuxControl = new TermuxControl({ root: config.root, logger });
   const askContext = new AskContext({ db });
+  const messageInbox = new MessageInbox({
+    db,
+    cache,
+    mediaStore,
+    socket,
+    logger,
+    downloader: config.isDryRun ? (raw) => socket.downloadMediaMessage(raw) : null,
+  });
   const envEditor = new EnvEditor({ config, logger, selfJid });
 
   // Watchers.
@@ -310,12 +357,24 @@ async function main() {
   const scheduleWizard = new ScheduleWizard({
     db, scheduler, contacts, logger, config, audit, selfJid,
   });
+  reconnectCatchup = connection
+    ? new ReconnectCatchup({ db, scheduler, socket, config, selfJid, logger })
+    : null;
+  if (reconnectCatchup) {
+    reconnectCatchup.noteBoot(startedAt);
+    for (const event of connectionEvents.splice(0)) {
+      if (event.type === 'close') reconnectCatchup.onClose(event.payload, event.at);
+      else reconnectCatchup.onOpen(event.payload, event.at).catch((error) =>
+        logger.error(`reconnect catch-up: ${error.message}`)
+      );
+    }
+  }
 
   const app = {
     config, logger, db, startedAt,
-    registry, contacts, cache, mediaStore, notes, audit, webhooks, triggers,
+    registry, contacts, cache, mediaStore, messageInbox, notes, audit, webhooks, triggers,
     presenceLog, profileWatch, groupWatch, editWatch, antiDelete, viewOnce,
-    scheduler, scheduleWizard, ai, askContext, envEditor, backup, vault, plugins, dispatcher, queue, logs, connection,
+    scheduler, scheduleWizard, reconnectCatchup, ai, askContext, envEditor, backup, vault, termuxControl, plugins, dispatcher, queue, logs, connection,
     selfJid,
     // Kill-switch: the only thing that can stop outbound instantly.
     safety: {

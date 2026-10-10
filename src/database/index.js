@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS message_cache (
   id             TEXT PRIMARY KEY,
   session_jid    TEXT    NOT NULL,
   chat_jid       TEXT    NOT NULL,
+  chat_jid_alt   TEXT,
   sender_jid     TEXT,
   kind           TEXT    NOT NULL,
   text           TEXT,
@@ -89,12 +90,21 @@ CREATE TABLE IF NOT EXISTS conversation_cache (
   id          TEXT PRIMARY KEY,
   session_jid TEXT NOT NULL,
   chat_jid    TEXT NOT NULL,
+  chat_jid_alt TEXT,
   sender_jid  TEXT,
   from_me     INTEGER NOT NULL DEFAULT 0,
   text        TEXT NOT NULL,
   ts          INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_conversation_chat ON conversation_cache(chat_jid, ts DESC);
+
+-- WhatsApp's synced chat-level unread count; this is not a per-message read flag.
+CREATE TABLE IF NOT EXISTS inbox_chat_state (
+  chat_jid    TEXT PRIMARY KEY,
+  unread_count INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_inbox_unread ON inbox_chat_state(unread_count, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS deleted_messages (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -409,13 +419,25 @@ function migrate(db, logger) {
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA);
 
+  // Keep phone-number and LID chat identities together when Baileys supplies
+  // both forms. Old databases gain the nullable alias columns in place.
+  const addedMessageAlias = addColumnIfMissing(db, 'message_cache', 'chat_jid_alt', 'TEXT');
+  const addedConversationAlias = addColumnIfMissing(db, 'conversation_cache', 'chat_jid_alt', 'TEXT');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_cache_chat_alt ON message_cache(chat_jid_alt, ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_conversation_chat_alt ON conversation_cache(chat_jid_alt, ts DESC);
+  `);
+  if (addedMessageAlias || addedConversationAlias) {
+    logger?.child?.({ scope: 'db' })?.info('migrated cached chat identity aliases');
+  }
+
   // Seed selected-chat AI context with inbound text already captured by older
   // builds. New outgoing messages are added by MessageCache from this version.
   try {
     db.prepare(
       `INSERT OR IGNORE INTO conversation_cache
-         (id, session_jid, chat_jid, sender_jid, from_me, text, ts)
-       SELECT id, session_jid, chat_jid, sender_jid, 0, text, ts
+         (id, session_jid, chat_jid, chat_jid_alt, sender_jid, from_me, text, ts)
+       SELECT id, session_jid, chat_jid, chat_jid_alt, sender_jid, 0, text, ts
          FROM message_cache
         WHERE text IS NOT NULL AND text <> ''
           AND (chat_jid LIKE '%@s.whatsapp.net' OR chat_jid LIKE '%@lid')`

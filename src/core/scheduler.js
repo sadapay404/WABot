@@ -6,9 +6,9 @@
  *
  * Crash safety:
  *   A job is marked 'running' the moment it is picked up. On boot, anything
- *   still 'running' is reset to 'pending' — that can only mean the process
- *   died mid-delivery, and re-sending is the lesser evil compared to a
- *   reminder that silently vanishes.
+ *   still 'running' is reset to 'pending'. If its scheduled time has passed,
+ *   it enters the durable 'missed' queue instead of being delivered late; the
+ *   owner must explicitly choose send-now or skip.
  *
  * Delivery goes through `socket.sendMessage`, which the OutboundQueue has
  * already wrapped. Scheduled blasts therefore inherit the same rate limits as
@@ -18,6 +18,9 @@
 import { flag, setFlag } from '../database/index.js';
 import { normalizeJid } from './jid.js';
 import { nextCalendarOccurrence } from '../lib/when.js';
+
+/** Allow normal timer jitter, but never automatically deliver a stale send. */
+export const MISFIRE_GRACE_MS = 60_000;
 
 export class Scheduler {
   /**
@@ -39,7 +42,7 @@ export class Scheduler {
     this.maxPerTick = Math.max(1, maxPerTick);
     this.onFire = onFire;
     this.timer = null;
-    this.stats = { fired: 0, failed: 0, rearmed: 0, resumed: 0 };
+    this.stats = { fired: 0, failed: 0, missed: 0, skipped: 0, rearmed: 0, resumed: 0 };
     /** Injectable clock, so tests do not have to sleep. */
     this.now = () => Date.now();
   }
@@ -117,6 +120,50 @@ export class Scheduler {
     return this.list({ status: 'pending' });
   }
 
+  missed({ limit = 100 } = {}) {
+    return this.db.prepare("SELECT * FROM jobs WHERE status = 'missed' ORDER BY run_at LIMIT ?")
+      .all(Math.max(1, Math.min(Number(limit) || 100, 500)));
+  }
+
+  missedCount() {
+    return this.db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE status = 'missed'").get().count;
+  }
+
+  /**
+   * Persist a revised pending job. Callers must preview and confirm first.
+   * A due or already-missed job cannot be silently moved by this method.
+   */
+  update(id, { jid, text, runAt, kind = 'once', intervalMs = null, recurrence = null }) {
+    if (!jid) throw new Error('a job needs a destination JID');
+    if (!Number.isFinite(runAt) || runAt <= this.now()) throw new Error('the revised send time must be in the future');
+    if (recurrence?.needsDatePolicy) throw new Error('the recurring date rule needs a missing-date policy');
+
+    const storedKind = recurrence
+      ? 'calendar'
+      : kind === 'recurring'
+        ? `every:${intervalMs}`
+        : 'once';
+    const rule = recurrence ? JSON.stringify(recurrence) : intervalMs ? String(intervalMs) : null;
+    const result = this.db.prepare(
+      `UPDATE jobs SET jid = ?, text = ?, run_at = ?, kind = ?, cron = ?, last_error = NULL
+        WHERE id = ? AND status = 'pending' AND run_at > ?`
+    ).run(normalizeJid(jid), String(text ?? ''), Math.floor(runAt), storedKind, rule, Number(id), this.now());
+    return result.changes ? this.get(id) : null;
+  }
+
+  /** Move overdue pending sends into a durable owner-decision queue. */
+  markMissedDue(now = this.now(), { allOverdue = false } = {}) {
+    const cutoff = allOverdue ? now : now - MISFIRE_GRACE_MS;
+    const result = this.db.prepare(
+      `UPDATE jobs SET status = 'missed', last_error = ?
+        WHERE status = 'pending' AND run_at <= ?`
+    ).run('Scheduled time passed; owner must choose send now or skip.', cutoff);
+    const count = result.changes || 0;
+    this.stats.missed += count;
+    if (count) this.logger.warn(`moved ${count} overdue job(s) to owner review`);
+    return count;
+  }
+
   /** Pending sends whose next run is before `end`, including overdue jobs. */
   agenda({ end, limit = 200 } = {}) {
     if (!Number.isFinite(end)) throw new Error('agenda needs a numeric end time');
@@ -130,6 +177,54 @@ export class Scheduler {
       .prepare("UPDATE jobs SET status = 'cancelled' WHERE id = ? AND status = 'pending'")
       .run(Number(id));
     return (res.changes || 0) > 0;
+  }
+
+  /** Owner-confirmed recovery for a missed occurrence. */
+  async recoverMissed(id, action, now = this.now()) {
+    const job = this.get(id);
+    if (!job || job.status !== 'missed') return { ok: false, reason: 'not-missed' };
+    if (!['send', 'skip'].includes(action)) return { ok: false, reason: 'invalid-action' };
+
+    if (action === 'skip') {
+      const next = this.#nextOccurrence(job, now);
+      if (next === null) {
+        const result = this.db.prepare(
+          `UPDATE jobs SET status = 'skipped', last_error = NULL
+            WHERE id = ? AND status = 'missed'`
+        ).run(Number(id));
+        if (!result.changes) return { ok: false, reason: 'changed' };
+        this.stats.skipped++;
+        return { ok: true, action, job: this.get(id), nextRunAt: null };
+      }
+
+      const result = this.db.prepare(
+        `UPDATE jobs SET status = 'pending', run_at = ?, last_error = NULL
+          WHERE id = ? AND status = 'missed'`
+      ).run(next, Number(id));
+      if (!result.changes) return { ok: false, reason: 'changed' };
+      this.stats.skipped++;
+      return { ok: true, action, job: this.get(id), nextRunAt: next };
+    }
+
+    const claim = this.db.prepare(
+      `UPDATE jobs SET status = 'running', attempts = attempts + 1, last_error = NULL
+        WHERE id = ? AND status = 'missed'`
+    ).run(Number(id));
+    if (!claim.changes) return { ok: false, reason: 'changed' };
+    try {
+      await this.#deliver(job);
+      this.#finish(job, now);
+      this.stats.fired++;
+      this.onFire?.(job);
+      return { ok: true, action, job: this.get(id), nextRunAt: this.get(id)?.run_at };
+    } catch (error) {
+      this.stats.failed++;
+      this.db.prepare(
+        `UPDATE jobs SET status = 'missed', last_error = ? WHERE id = ? AND status = 'running'`
+      ).run(String(error.message).slice(0, 400), Number(id));
+      this.logger.error(`owner-requested send for missed job ${id} failed: ${error.message}`);
+      return { ok: false, reason: 'delivery-failed', error: error.message, job: this.get(id) };
+    }
   }
 
   start() {
@@ -150,19 +245,29 @@ export class Scheduler {
   }
 
   /**
-   * Fire everything that is due. Returns the jobs handled.
+   * Deliver fresh due jobs; stale due jobs require an owner decision. Returns the jobs handled.
    * @param {number} [now]
    */
   async tick(now = this.now()) {
     if (!this.enabled()) return [];
 
+    this.markMissedDue(now);
     const due = this.db
       .prepare('SELECT * FROM jobs WHERE status = ? AND run_at <= ? ORDER BY run_at LIMIT ?')
       .all('pending', now, this.maxPerTick);
 
     const done = [];
-    for (const job of due) {
-      this.db.prepare("UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE id = ?").run(job.id);
+    for (const listedJob of due) {
+      // Another command may have edited/cancelled this row while an earlier
+      // send in the same tick was awaiting the network. Claim only if it is
+      // still due, then send the current persisted revision.
+      const claim = this.db.prepare(
+        `UPDATE jobs SET status = 'running', attempts = attempts + 1
+          WHERE id = ? AND status = 'pending' AND run_at <= ?`
+      ).run(listedJob.id, now);
+      if (!claim.changes) continue;
+      const job = this.get(listedJob.id);
+      if (!job) continue;
       try {
         await this.#deliver(job);
         this.#finish(job, now);
@@ -173,7 +278,7 @@ export class Scheduler {
         this.logger.error(`job ${job.id} failed: ${err.message}`);
         // Keep it pending so it retries on the next tick, but record why.
         this.db
-          .prepare("UPDATE jobs SET status = 'pending', last_error = ? WHERE id = ?")
+          .prepare("UPDATE jobs SET status = 'pending', last_error = ? WHERE id = ? AND status = 'running'")
           .run(String(err.message).slice(0, 400), job.id);
       }
       done.push(job.id);
@@ -188,7 +293,7 @@ export class Scheduler {
     await this.socket.sendMessage(job.jid, { text: String(job.text ?? '') });
   }
 
-  #finish(job, now) {
+  #nextOccurrence(job, now) {
     if (job.kind === 'calendar') {
       let recurrence;
       try {
@@ -202,7 +307,23 @@ export class Scheduler {
         next = nextCalendarOccurrence(next, recurrence);
         skipped++;
       }
-      if (next !== null && next > now) {
+      return next !== null && next > now ? next : null;
+    }
+
+    if (String(job.kind).startsWith('every:')) {
+      const interval = Number.parseInt(String(job.kind).split(':')[1], 10);
+      if (!Number.isFinite(interval) || interval <= 0) return null;
+      let next = job.run_at + interval;
+      while (next <= now) next += interval;
+      return next;
+    }
+    return null;
+  }
+
+  #finish(job, now) {
+    if (job.kind === 'calendar' || String(job.kind).startsWith('every:')) {
+      const next = this.#nextOccurrence(job, now);
+      if (next !== null) {
         this.db
           .prepare("UPDATE jobs SET status = 'pending', run_at = ?, fired_at = ?, last_error = NULL WHERE id = ?")
           .run(next, now, job.id);
@@ -211,27 +332,13 @@ export class Scheduler {
       }
       // A malformed/unsupported rule is retired rather than being retried after
       // a successful send, which could otherwise duplicate the message.
-      this.logger.error(`calendar job ${job.id} could not be re-armed; marking it done`);
+      this.logger.error(`recurring job ${job.id} could not be re-armed; marking it done`);
       this.db
         .prepare("UPDATE jobs SET status = 'done', fired_at = ?, last_error = ? WHERE id = ?")
         .run(now, 'Recurring rule could not be advanced', job.id);
       return;
     }
 
-    if (job.kind.startsWith('every:')) {
-      const interval = Number.parseInt(job.kind.split(':')[1], 10);
-      if (Number.isFinite(interval) && interval > 0) {
-        // Re-arm from the scheduled time, not from "now", so a delayed tick
-        // does not drift the schedule further each cycle.
-        let next = job.run_at + interval;
-        while (next <= now) next += interval;
-        this.db
-          .prepare("UPDATE jobs SET status = 'pending', run_at = ?, fired_at = ?, last_error = NULL WHERE id = ?")
-          .run(next, now, job.id);
-        this.stats.rearmed++;
-        return;
-      }
-    }
     this.db
       .prepare("UPDATE jobs SET status = 'done', fired_at = ?, last_error = NULL WHERE id = ?")
       .run(now, job.id);
@@ -244,6 +351,8 @@ export class Scheduler {
            SUM(CASE WHEN status='pending'   THEN 1 ELSE 0 END) AS pending,
            SUM(CASE WHEN status='done'      THEN 1 ELSE 0 END) AS done,
            SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END) AS cancelled,
+           SUM(CASE WHEN status='missed'    THEN 1 ELSE 0 END) AS missed_count,
+           SUM(CASE WHEN status='skipped'   THEN 1 ELSE 0 END) AS skipped_count,
            COUNT(*) AS total
          FROM jobs`
       )
@@ -252,6 +361,8 @@ export class Scheduler {
       pending: row.pending || 0,
       done: row.done || 0,
       cancelled: row.cancelled || 0,
+      missedCount: row.missed_count || 0,
+      skippedCount: row.skipped_count || 0,
       total: row.total || 0,
       ...this.stats,
     };

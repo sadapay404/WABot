@@ -126,6 +126,36 @@ export function extractText(message) {
     if (inner[key]?.caption) return inner[key].caption;
   }
 
+  const reaction = inner.reactionMessage?.text;
+  if (reaction) return `Reaction: ${reaction}`;
+
+  const location = inner.locationMessage || inner.liveLocationMessage;
+  if (location) {
+    const parts = [];
+    if (location.name) parts.push(String(location.name));
+    if (location.address) parts.push(String(location.address));
+    if (Number.isFinite(location.degreesLatitude) && Number.isFinite(location.degreesLongitude)) {
+      parts.push(`${location.degreesLatitude}, ${location.degreesLongitude}`);
+    }
+    if (parts.length) return `Location: ${parts.join(' — ')}`;
+  }
+
+  const contact = inner.contactMessage;
+  if (contact?.displayName) return `Contact: ${contact.displayName}`;
+  const contacts = inner.contactsArrayMessage?.contacts;
+  if (Array.isArray(contacts) && contacts.length) {
+    return `Contacts: ${contacts.map((item) => item?.displayName || 'unnamed').join(', ')}`;
+  }
+
+  const poll = inner.pollCreationMessageV3 || inner.pollCreationMessage;
+  if (poll?.name) {
+    const options = (poll.options || []).map((item) => item?.optionName).filter(Boolean);
+    return `Poll: ${poll.name}${options.length ? ` (${options.join('; ')})` : ''}`;
+  }
+
+  const invite = inner.groupInviteMessage;
+  if (invite?.groupName) return `Group invite: ${invite.groupName}`;
+
   return '';
 }
 

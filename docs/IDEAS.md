@@ -26,6 +26,7 @@ Passive delete/edit/view-once capture is independent of `OWNER_JIDS`: it observe
 | **"Am I blocked?" probe** | S | low | ✅ | Needs **≥2 independent signals** before it says anything, and always says *"suspected"*. WhatsApp never reports a block; anything claiming otherwise is lying to you. |
 | **Last-seen log** | S | low | ✅ | Presence transitions recorded. Opt-in per contact. |
 | **Group-join/leave watch** | S | none | ✅ | `WAMessageStubType` carries this. |
+| **Read-only `.receive`** | M | medium | 🟡 | `.receive <phone> <count>` reports cached text/types and forwards media privately on request (up to five files, 16 MB each). `.receive unread` reports synced chat-level counts and labels cached text only as unverified previews; it does not attach media because exact unread message IDs are unavailable. No read-receipt API is called; blue ticks are not guaranteed unchanged. |
 
 ## Personal productivity
 
@@ -33,7 +34,8 @@ Passive delete/edit/view-once capture is independent of `OWNER_JIDS`: it observe
 |---|---|---|---|---|
 | **`.note` / `.todo`** | S | none | ✅ | Capture from any chat, list, complete. |
 | **`.remind` / `.schedule` guided flow** | M | none | ✅ | Deterministic local date parsing, saved-name/phone recipient resolution, Asia/Karachi timezone, persistent 24-hour drafts, and recipient/time/message preview with explicit confirmation. `.remind` sends to a per-request WhatsApp contact/number, never the self-chat or Telegram. |
-| **`.agenda`** | S | none | ✅ | Read-only `.agenda today\|week`; groups pending schedules by local date, shows overdue items first, and lists the next occurrence of each recurring schedule. |
+| **`.agenda` + missed recovery** | M | none | ✅ | `.agenda today\|week` is read-only. Stale sends enter a durable missed queue; `.agenda missed send|skip <id>` requires an owner choice and never auto-sends late. Recurring skips advance to the next future occurrence. |
+| **Edit a queued schedule** | M | low | ✅ | `.jobs edit <id> [recipient|text|time|all]` previews the revised job; `YES` applies it, `NO`/`CANCEL` preserves the original. |
 | **`.search`** | M | none | ✅ | FTS5 with `porter unicode61`, falls back to `LIKE` if the SQLite build lacks FTS5 or a MATCH expression is malformed. |
 | **`.forward`** | S | low | ✅ | Forwards a cached message, including one that was deleted. |
 | **Voice-note transcription** | M | none | 🟡 | Groq `whisper-large-v3-turbo` / OpenAI `whisper-1`. Gemini has no audio-transcription endpoint and says so rather than pretending. |
@@ -45,7 +47,7 @@ Passive delete/edit/view-once capture is independent of `OWNER_JIDS`: it observe
 | Idea | Effort | Risk | Status | Notes |
 |---|---|---|---|---|
 | **`.ai` with context** | M | none | 🟡 | groq / openai / gemini behind one interface. Per-chat AI memory is capped at `AI_MAX_HISTORY`. |
-| **Selected-chat `.ask`** | M | medium | 🟡 | `.ask chats` lists cached one-to-one conversations; explicitly selects chats and a message count, `all`, or local-date filters (`after`/`from` with optional `to`, exact-day `on`, or end-only `to`). Date endpoints are inclusive. Sends text only to the chosen AI provider and never replies to participants. Group selection is deferred. |
+| **Selected-chat `.ask`** | M | medium | 🟡 | `.ask chats` lists cached one-to-one conversations; explicitly selects chats by menu number or direct phone, and a message count, `all`, or local-date filters. Optional phone/email/phrase redaction is applied locally to the transcript and question before provider transmission. Never replies to participants; group selection is deferred. |
 | **`.summarize`** | M | none | 🟡 | Summarise the last N messages of the current chat. |
 | **`.vision`** | M | none | 🟡 | Describe/OCR an image. |
 | **Draft replies, never auto-send** | S | **medium** | 🟡 | `.draft` returns text marked *"Draft (not sent)"*. It will never message another person. |
@@ -57,7 +59,8 @@ Passive delete/edit/view-once capture is independent of `OWNER_JIDS`: it observe
 
 | Idea | Effort | Risk | Status | Notes |
 |---|---|---|---|---|
-| **Persistent scheduler** | M | none | ✅ | Survives restarts; fixed intervals skip missed runs, while calendar rules re-arm at the next local wall-clock occurrence. |
+| **Persistent scheduler + missed recovery** | M | none | ✅ | Survives restarts; stale runs never auto-send late. Owner chooses send-now or skip per missed occurrence. Fixed intervals and calendar rules advance without catch-up bursts. |
+| **Reconnect catch-up** | M | low | 🟡 | Reports outage window and schedules needing a decision in the private owner chat; cannot recover WhatsApp events the linked device never received. |
 | **Calendar recurrence rules** | M | none | ✅ | Biweekly weekday, monthly date/weekday, and annual rules; preview next three occurrences and require an explicit policy for missing dates. |
 | **Recurring templates** | S | low | ✅ | `every day 9am`, `every friday 5pm`, `every 30m`. |
 | **Keyword triggers** | M | **medium** | ✅ **off by default** | Per-chat 90s cooldown. Enabling it logs a warning and writes an audit entry — see the note below. |
@@ -102,8 +105,6 @@ not implemented commands.
 
 | Idea | Effort | Risk | Notes |
 |---|---|---|---|
-| **Recover missed sends** | M | medium | After an outage, `.agenda missed` lists schedules that passed while offline and asks per item whether to send now or skip. Never deliver late messages automatically. |
-| **Edit a queued schedule** | M | low | `.jobs edit <id>` opens a preview to change its date, recipient, or text, then requires `YES`; avoids cancel-and-recreate mistakes. |
 | **Delivery outcome per job** | M | low | Show queued, accepted, delivered, or read only when WhatsApp supplies that receipt; distinguish “sent by the bot” from “seen by the recipient.” |
 | **Recipient quiet window** | M | low | Optional per-recipient do-not-send hours, with the next permitted time shown in the schedule preview. |
 
@@ -113,14 +114,12 @@ not implemented commands.
 |---|---|---|---|
 | **Extract commitments** | M | medium | `.ask <chat> commitments` finds promises, tasks, and dates in the chosen transcript, then presents proposed `.todo`/`.schedule` drafts for approval; it never creates or sends them automatically. |
 | **Find unanswered questions** | M | medium | From selected chats, flag recent questions that appear directed at the owner and have no later reply, then offer reply drafts only. Show the source quote so the owner can check the match. |
-| **Per-request redaction** | M | low | Before an AI call, optionally mask phone numbers, email addresses, or owner-defined phrases in the outgoing transcript; leave the local cache unchanged and report what was masked. |
 
 ### Account controls
 
 | Idea | Effort | Risk | Notes |
 |---|---|---|---|
 | **Timed command pause** | S | low | `.pause 1h` temporarily refuses bot commands and resumes automatically; scheduled messages keep their existing policy and the status clearly shows the pause expiry. |
-| **Reconnect catch-up** | M | low | When the linked device reconnects, report the disconnect window and any pending schedules that need a decision; do not claim to recover events WhatsApp never delivered. |
 | **Confirm owner-list changes** | S | low | Require a second explicit confirmation before removing an owner or changing the alert destination, and record the result in the audit log. |
 
 ### Still explicitly not building

@@ -20,6 +20,7 @@
 import { normalizeJid, isGroupJid, describeChat } from './jid.js';
 import { captureAlertJid } from './alertRouting.js';
 import { getSetting, setSetting } from '../database/index.js';
+import { downloadWhatsAppMedia } from './mediaDownloader.js';
 
 /** WAProto.Message.ProtocolMessage.Type.REVOKE */
 const PROTOCOL_REVOKE = 0;
@@ -247,7 +248,7 @@ export class AntiDelete {
     try {
       const buffer = this.downloader
         ? await this.downloader(raw)
-        : await this.socket.downloadMediaMessage(raw);
+        : await downloadWhatsAppMedia(this.socket, raw, this.logger);
       if (!buffer?.length) return;
 
       const kind = deletion.record?.kind;
