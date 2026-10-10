@@ -88,9 +88,18 @@ export class Dispatcher {
     return `${normalizeJid(jid)}\u0000${String(text || '').normalize('NFKC').replace(/\r\n/g, '\n').trim()}`;
   }
 
+  /**
+   * Is this chat the account's own "You" chat? WhatsApp addresses it by phone
+   * number or by LID depending on the device, so both must match.
+   */
+  #isSelfChatJid(socket, jid) {
+    const target = normalizeJid(jid);
+    if (!target) return false;
+    return [socket?.user?.id, socket?.user?.lid].some((id) => normalizeJid(id) === target);
+  }
+
   #rememberSelfEcho(socket, jid, content) {
-    const selfJid = normalizeJid(socket?.user?.id);
-    if (!selfJid || normalizeJid(jid) !== selfJid) return;
+    if (!this.#isSelfChatJid(socket, jid)) return;
     const text = typeof content === 'string' ? content : content?.text ?? content?.caption ?? '';
     if (!String(text).trim()) return;
     const now = Date.now();
@@ -99,7 +108,7 @@ export class Dispatcher {
       if (live.length) this.selfEchoes.set(key, live);
       else this.selfEchoes.delete(key);
     }
-    const key = this.#echoKey(selfJid, text);
+    const key = this.#echoKey(jid, text);
     const expiries = this.selfEchoes.get(key) || [];
     expiries.push(now + SELF_ECHO_TTL_MS);
     this.selfEchoes.set(key, expiries);
@@ -109,9 +118,8 @@ export class Dispatcher {
   }
 
   #consumeSelfEcho(socket, msg) {
-    const selfJid = normalizeJid(socket?.user?.id);
-    if (!selfJid || normalizeJid(msg.jid) !== selfJid || !msg.text) return false;
-    const key = this.#echoKey(selfJid, msg.text);
+    if (!this.#isSelfChatJid(socket, msg.jid) || !msg.text) return false;
+    const key = this.#echoKey(msg.jid, msg.text);
     const expiries = (this.selfEchoes.get(key) || []).filter((expires) => expires > Date.now());
     if (!expiries.length) {
       this.selfEchoes.delete(key);
@@ -133,8 +141,7 @@ export class Dispatcher {
       this.trackSocket(socket);
       if (!msg.text) return; // media-only handling arrives in Phase 3
 
-      const selfJid = normalizeJid(socket?.user?.id);
-      const isSelfChat = Boolean(selfJid && normalizeJid(msg.jid) === selfJid);
+      const isSelfChat = this.#isSelfChatJid(socket, msg.jid);
       const isFromSelfChat = Boolean(msg.isBot && isSelfChat);
 
       // Our own queued messages (including prompts) can arrive as fromMe
