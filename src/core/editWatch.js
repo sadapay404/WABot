@@ -11,6 +11,7 @@
  */
 
 import { normalizeJid, isGroupJid, describeChat } from './jid.js';
+import { chatTag, dateTime12, senderLine } from '../lib/display.js';
 import { captureAlertJid } from './alertRouting.js';
 import { extractText } from './message.js';
 import { flag, setFlag } from '../database/index.js';
@@ -46,9 +47,6 @@ export function extractEdit(payload = {}) {
   return { stanzaId, newText };
 }
 
-function clockTime(ms) {
-  return new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-}
 
 export class EditWatch {
   constructor({ socket, db, cache, contacts, logger, config }) {
@@ -170,12 +168,9 @@ export class EditWatch {
 
 export function formatEdit(e) {
   const p = e.profile || {};
-  const who = [p.name, p.phoneE164 && p.phoneE164 !== p.name ? p.phoneE164 : null]
-    .filter(Boolean)
-    .join(' · ');
 
-  const lines = ['✏️ *Message edited*', '', `👤 ${who || 'unknown'}`];
-  const meta = [p.countryName, e.isGroup ? e.chatLabel : null, clockTime(e.at)].filter(Boolean);
+  const lines = ['✏️ *Message edited*', '', `👤 ${senderLine(p)}`];
+  const meta = [p.countryName, chatTag(e.chatJid, e.chatLabel), dateTime12(e.at)].filter(Boolean);
   if (meta.length) lines.push(`ℹ️ ${meta.join(' · ')}`);
   lines.push('');
 

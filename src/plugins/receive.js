@@ -1,12 +1,13 @@
 import { resolveRecipient } from '../core/scheduleWizard.js';
 import { jidToPhone, normalizeJid } from '../core/jid.js';
 import { describeMedia } from '../lib/media.js';
+import { chatTag, dateTime12, DEFAULT_TZ } from '../lib/display.js';
 
 const DEFAULT_COUNT = 5;
 const MAX_RECENT = 50;
 const MAX_UNREAD = 100;
 const MAX_UNREAD_CHATS = 50;
-const MAX_MEDIA_FORWARD = 5;
+const MAX_MEDIA_FORWARD = 20;
 const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
 const MAX_TEXT = 320;
 
@@ -47,15 +48,7 @@ function chatLabel(ctx, jid, alias = null) {
 }
 
 function timestampLabel(epoch, timeZone) {
-  try {
-    return new Intl.DateTimeFormat('en-GB', {
-      timeZone,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-    }).format(new Date(epoch));
-  } catch {
-    return new Date(epoch).toISOString().slice(0, 16).replace('T', ' ');
-  }
+  return dateTime12(epoch, timeZone || DEFAULT_TZ);
 }
 
 function messageType(record) {
@@ -72,8 +65,8 @@ function compact(value, max = MAX_TEXT) {
   return `${text.slice(0, max - 1)}…`;
 }
 
-function describeRecord(record, index, timeZone) {
-  const pieces = [`${index + 1}. ${timestampLabel(record.ts, timeZone)}`, messageType(record)];
+function describeRecord(record, index, timeZone, tag = null) {
+  const pieces = [`${index + 1}. ${timestampLabel(record.ts, timeZone)}`, ...(tag ? [tag] : []), messageType(record)];
   if (record.media_seconds != null && Number(record.media_seconds) > 0) {
     pieces.push(`${Math.floor(Number(record.media_seconds))} sec`);
   }
@@ -82,6 +75,7 @@ function describeRecord(record, index, timeZone) {
     pieces.push(size < 1024 * 1024 ? `${Math.ceil(size / 1024)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`);
   }
   const lines = [`${pieces.join(' · ')}`];
+  if (record.view_once) lines.push('   _Unavailable because ViewOnce_');
   if (record.text) lines.push(`   ${compact(record.text)}`);
   else if (!record.has_media) lines.push('   _No readable text in the local cache._');
   return lines;
@@ -116,7 +110,8 @@ function parseCount(value, fallback, maximum) {
 function usage() {
   return [
     '*Read-only message receiver*',
-    '`.receive 03001234567 5` — latest 5 cached inbound messages from a direct chat',
+    '`.receive` — latest 5 cached inbound messages from all chats (`.receive 10` for more)',
+    '`.receive 03001234567 5` — latest 5 cached inbound messages from a direct chat, with media',
     '`.recieve unread` — chats with a WhatsApp-synced unread count (cached previews are not individually verified unread)',
     'Unread mode never forwards media because WhatsApp does not identify unread message IDs. Add `--text-only` to any direct-chat lookup.',
     'Messages/media are sent only to this private owner control chat. The command does not call WhatsApp’s read-receipt API; blue-tick behavior is not guaranteed.',
@@ -141,6 +136,7 @@ async function retrieveAttachments(ctx, items, textOnly) {
   let attempted = 0;
   for (const item of items) {
     const record = item.record;
+    if (record.view_once) continue; // shown as 'Unavailable because ViewOnce'
     if (!record.has_media) continue;
     if (Number(record.media_bytes) > MAX_MEDIA_BYTES) {
       tooLarge++;
@@ -185,13 +181,13 @@ function formatResults({ title, items, timeZone, unread = false, unknown = 0, om
   lines.push('');
   for (const item of items) {
     if (item.chatHeader) {
-      lines.push(`*${item.chatLabel}* — WhatsApp reports ${item.unreadCount} unread message(s) in this chat; showing ${item.records.length} latest cached inbound preview(s), not individually marked unread.`);
+      lines.push(`*${item.chatTag || item.chatLabel}* — WhatsApp reports ${item.unreadCount} unread message(s) in this chat; showing ${item.records.length} latest cached inbound preview(s), not individually marked unread.`);
     }
     const records = item.records || [item.record];
     let fallbackIndex = 0;
     for (const record of records) {
       const index = item.recordIndexes?.get(record.id) ?? fallbackIndex;
-      lines.push(...describeRecord(record, index, timeZone));
+      lines.push(...describeRecord(record, index, timeZone, item.chatTag || null));
       fallbackIndex++;
       const note = item.mediaNotes?.get(record.id);
       if (note) lines.push(`   ${note}`);
@@ -219,7 +215,7 @@ export default {
   aliases: ['recieve'],
   category: 'privacy',
   description: 'Inspect cached inbound messages without intentionally marking chats read',
-  usage: '.receive <phone> [count] | .receive unread [max]',
+  usage: '.receive [count] | .receive <phone> [count] | .receive unread [max]',
   ownerOnly: true,
   privateOnly: true,
   async execute(ctx) {
@@ -258,6 +254,7 @@ export default {
         items.push({
           chatHeader: true,
           chatLabel: label,
+          chatTag: chatTag(state.chat_jid, label),
           unreadCount,
           records,
           recordIndexes: new Map(records.map((record, index) => [record.id, index])),
@@ -293,6 +290,32 @@ export default {
       return sendOwnerReport(ctx, report, retrieved.attachments);
     }
 
+    // `.receive` or `.receive 10`: the latest cached messages across all chats.
+    if (filtered.length === 0 || /^\d{1,2}$/.test(String(filtered[0]))) {
+      const count = parseCount(filtered[0], DEFAULT_COUNT, MAX_RECENT);
+      if (!count) return ctx.reply(usage());
+      const records = inbox.recent({ limit: count });
+      if (!records.length) return ctx.reply('No cached inbound messages yet.');
+      const items = records.map((record, index) => {
+        const label = chatLabel(ctx, record.chat_jid, record.chat_jid_alt);
+        return { record, chatLabel: label, chatTag: chatTag(record.chat_jid, label), index };
+      });
+      const retrieved = await retrieveAttachments(ctx, items, textOnly);
+      const mediaNotes = new Map(items.filter((item) => item.mediaNote).map((item) => [item.record.id, item.mediaNote]));
+      const report = formatResults({
+        title: `*Last ${records.length} cached inbound message(s) — all chats*`,
+        items: items.map((item, index) => ({
+          record: item.record,
+          chatTag: item.chatTag,
+          recordIndexes: new Map([[item.record.id, index]]),
+          mediaNotes,
+        })),
+        timeZone: ctx.config?.scheduler?.timezone || DEFAULT_TZ,
+        media: { ...retrieved, textOnly },
+      });
+      return sendOwnerReport(ctx, report, retrieved.attachments);
+    }
+
     const requested = resolveRecipient(filtered[0], ctx.bot?.contacts);
     if (requested.status !== 'resolved' ||
         !(requested.jid.endsWith('@s.whatsapp.net') || requested.jid.endsWith('@lid'))) {
@@ -320,7 +343,7 @@ export default {
       mediaNotes,
     }));
     const report = formatResults({
-      title: `*Last ${records.length} cached inbound message(s) — ${label}*`,
+      title: `*Last ${records.length} cached inbound message(s) — ${chatTag(chat.chat_jid, label)}*`,
       items: reportItems,
       timeZone,
       media: { ...retrieved, textOnly },
