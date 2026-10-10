@@ -168,8 +168,12 @@ export class WhatsAppConnection {
       getMessage: async (key) => this.cache?.getMessage?.(key),
     });
 
-    // Structural rate limiting — nothing can send around this.
-    new OutboundQueue(socket, this.config, this.logger).attach();
+    // Structural rate limiting — nothing can send around this. One queue for the
+    // whole process, re-attached to each new socket, so halt/resume and pacing
+    // survive reconnects.
+    if (!this.queue) this.queue = new OutboundQueue(socket, this.config, this.logger);
+    this.queue.socket = socket;
+    this.queue.attach();
 
     this.socket = socket;
     this.#wire(socket, DisconnectReason);

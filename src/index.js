@@ -75,6 +75,27 @@ const logger = createLogger(config.logLevel, 'nexus');
 const logs = new LogBuffer(600).attach();
 const startedAt = Date.now();
 
+// Forwards every call to the connection's current socket. A call made during
+// a reconnect gap fails the way a call on a dropped link does.
+function liveSocket(connection) {
+  return new Proxy(
+    {},
+    {
+      get(_, prop) {
+        const live = connection.socket;
+        if (!live) throw new Error('Connection Closed');
+        const value = live[prop];
+        return typeof value === 'function' ? value.bind(live) : value;
+      },
+      set(_, prop, value) {
+        const live = connection.socket;
+        if (live) live[prop] = value;
+        return true;
+      },
+    }
+  );
+}
+
 // ── Banner ───────────────────────────────────────────────────────────
 function banner() {
   const bar = '─'.repeat(62);
@@ -306,13 +327,21 @@ async function main() {
     };
     connection.on('open', (payload) => dispatchConnectionEvent('open', payload));
     connection.on('close', (payload) => dispatchConnectionEvent('close', payload));
-    socket = await connection.connect();
+    await connection.connect();
+    // Baileys replaces its socket on every reconnect. Services hold this
+    // forwarder, not the first socket, so sends always go to the live one.
+    socket = liveSocket(connection);
   }
 
-  // Structural rate limiting, applied to both transports so dry-run pacing
-  // matches production. attach() wraps the socket in place and returns it.
-  const queue = new OutboundQueue(socket, config, logger);
-  queue.attach();
+  // The kill switch (halt/resume) lives on this queue. The real connection
+  // owns one queue and re-attaches it to every new socket.
+  let queue;
+  if (config.isDryRun) {
+    queue = new OutboundQueue(socket, config, logger);
+    queue.attach();
+  } else {
+    queue = connection.queue;
+  }
 
   // Dispatcher.
   const dispatcher = new Dispatcher({
