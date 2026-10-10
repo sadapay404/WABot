@@ -103,7 +103,7 @@ an opt-in patch for this exact combination on Baileys `7.0.0-rc14`:
   `/data/data/com.termux/files/home/.nexus-wa/auth-smb`). This keeps the current
   linked session and its auth files untouched. The app refuses to apply this
   profile to an already-authenticated directory.
-- Run `npm install --omit=optional --no-audit --fund=false` once after updating;
+- Run `npm ci --omit=optional --no-audit --fund=false` once after updating;
   the postinstall step applies the pinned Baileys patch.
 - Pair the new companion from the Business phone. The old linked device is not
   removed. To roll back, stop the bot, restore the old `WA_SESSION_DIR` and set
@@ -341,11 +341,22 @@ capped at 60s) so a crash-loop cannot hammer WhatsApp's servers.
 ## Updating
 
 ```sh
-cd ~/nexus-wa && git pull --ff-only && npm install --omit=optional --no-audit --fund=false && nexus restart
+cd ~/nexus-wa && git pull --ff-only && npm ci --omit=optional --no-audit --fund=false && nexus restart
 ```
 
 Your database, session and notes live in `~/.nexus-wa`, outside the repo, so an
-update never touches them.
+update never touches them. `npm ci` uses the committed lockfile without rewriting
+it, which keeps future Git updates clean.
+
+If `git pull` reports a local `package-lock.json` change, preserve it in a stash
+before retrying; do not reset or discard it blindly:
+
+```sh
+cd ~/nexus-wa && git stash push -m "before Nexus-WA update" -- package-lock.json && git pull --ff-only && npm ci --omit=optional --no-audit --fund=false && nexus restart
+```
+
+The stash keeps the old lockfile change for review. Do not `stash pop` it over
+the updated lockfile unless you specifically need that local change.
 
 After this version is installed, the owner can also manage the Termux bot from
 WhatsApp's private controller chat or the linked account's “You” chat:
@@ -359,7 +370,7 @@ WhatsApp's private controller chat or the linked account's “You” chat:
 These controls require the standard `~/nexus-wa` install running under
 `nexus start`. Updates refuse a dirty or diverged/local-ahead Git branch rather
 than resetting or overwriting it. A successful update restarts only after
-`npm install` completes; the WhatsApp session, database, and notes remain in
+`npm ci` completes; the WhatsApp session, database, and notes remain in
 `~/.nexus-wa`. The existing `.env` and linked session are kept; the update does not re-pair WhatsApp.
 
 ---

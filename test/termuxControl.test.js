@@ -149,7 +149,7 @@ test('update fast-forwards, installs the documented dependencies, and avoids des
   );
   assert.deepEqual(
     calls.find((call) => call.command === 'npm')?.args,
-    ['install', '--omit=optional', '--no-audit', '--fund=false']
+    ['ci', '--omit=optional', '--no-audit', '--fund=false']
   );
   assert.equal(calls.some((call) => ['reset', 'checkout', 'clean'].includes(call.args[0])), false);
 });

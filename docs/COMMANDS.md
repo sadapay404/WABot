@@ -586,8 +586,9 @@ unprompted auto-replies**, which can be disruptive and carry account risk; use
 
 `.update check` fetches the configured GitHub upstream and reports whether the
 current branch has updates; it does not install them. `.update` fast-forwards
-the current branch and runs `npm install --omit=optional --no-audit --fund=false`,
-then restarts with `nexus restart` after installation succeeds.
+the current branch and runs `npm ci --omit=optional --no-audit --fund=false`,
+then restarts with `nexus restart` after installation succeeds. `npm ci` uses the
+committed lockfile without rewriting it.
 This works only in the standard Termux `~/nexus-wa` install while supervised by
 `nexus start`. It stops safely if the worktree has local changes, the branch is
 diverged/ahead of GitHub, or no upstream is configured; it never switches

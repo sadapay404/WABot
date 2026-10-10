@@ -171,7 +171,7 @@ export class TermuxControl {
     }
 
     try {
-      await this.run('npm', ['install', '--omit=optional', '--no-audit', '--fund=false'], {
+      await this.run('npm', ['ci', '--omit=optional', '--no-audit', '--fund=false'], {
         cwd: status.appDir,
         env: this.env,
         timeout: INSTALL_TIMEOUT_MS,
