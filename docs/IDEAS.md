@@ -45,7 +45,7 @@ Passive delete/edit/view-once capture is independent of `OWNER_JIDS`: it observe
 | Idea | Effort | Risk | Status | Notes |
 |---|---|---|---|---|
 | **`.ai` with context** | M | none | 🟡 | groq / openai / gemini behind one interface. Per-chat AI memory is capped at `AI_MAX_HISTORY`. |
-| **Selected-chat `.ask`** | M | medium | 🟡 | `.ask chats` lists cached one-to-one conversations; explicitly selects one or more, a message count or `all`, and a question. Sends text only to the chosen AI provider, drafts only, and does not persist transcript in AI memory. Group selection is deferred. |
+| **Selected-chat `.ask`** | M | medium | 🟡 | `.ask chats` lists cached one-to-one conversations; explicitly selects chats and a message count, `all`, or local-date filters (`after`/`from` with optional `to`, exact-day `on`, or end-only `to`). Date endpoints are inclusive. Sends text only to the chosen AI provider and never replies to participants. Group selection is deferred. |
 | **`.summarize`** | M | none | 🟡 | Summarise the last N messages of the current chat. |
 | **`.vision`** | M | none | 🟡 | Describe/OCR an image. |
 | **Draft replies, never auto-send** | S | **medium** | 🟡 | `.draft` returns text marked *"Draft (not sent)"*. It will never message another person. |
@@ -92,33 +92,36 @@ it on, keep it to one narrow chat.
 
 ---
 
-## New ideas (next round)
+## More ideas for the next round
 
-Practical follow-ons to the capture, remote-control, privacy, and selected-chat
-work. These are suggestions only; none is silently enabled.
+A different set of practical follow-ons, focused on scheduling, safe AI actions,
+and keeping the linked account manageable from WhatsApp. These are suggestions,
+not implemented commands.
 
-### Capture reliability and remote control
-
-| Idea | Effort | Risk | Notes |
-|---|---|---|---|
-| **`.capture status`** | S | none | One compact report: watcher switches, alert destination, last event per type, and whether each alert send succeeded—without exposing message contents. Helps distinguish “WhatsApp did not emit an event” from “the bot failed to deliver it.” |
-| **`.capture test`** | S | none | Send a labelled synthetic alert through the real routing/queue path, without creating or deleting a real WhatsApp message. Confirms that the main controller can receive bot alerts. |
-| **`.capture recent [n]`** | M | low | Show a redacted event ledger with time, event type, chat label, and media availability. Useful for checking whether an event arrived without storing extra message text. |
-| **Per-event alert destinations** | S | low | Route deletes, edits, and view-once alerts to different approved JIDs, while keeping one safe default. |
-| **Remote graceful restart** | M | medium | Owner-only `.restart`/`.stop` with explicit confirmation and a supervisor check; never execute arbitrary shell text from WhatsApp. |
-| **`.env test <provider>`** | M | low | Make a minimal provider request and report only pass/fail, latency, and provider name—never the key or prompt contents. |
-| **Safe configuration rollback** | M | low | `.env undo` reverts the last non-secret setting and reports a redacted diff. Secret values are never kept in rollback history. |
-
-### Private chat and AI controls
+### Scheduling and delivery
 
 | Idea | Effort | Risk | Notes |
 |---|---|---|---|
-| **`.ask preview`** | S | low | Before calling the provider, show selected chat labels, message counts, time range, and context size; require a one-time `YES` for that exact request. |
-| **Source-backed `.ask` answers** | M | medium | Ask the model to attach timestamps and short verbatim quotes to factual claims, then verify every quote against the selected local transcript. Easier to check than an unsupported summary. |
-| **`.ask after <date>`** | M | low | Select a date/time range as well as a count, so a question can focus on “last Tuesday” without sending unrelated newer history. |
-| **Temporary `.ask` follow-up session** | M | medium | Keep the same explicitly selected chats for a short expiry window; show a timer and `.ask end`, and never add a new chat automatically. |
-| **`.forget chat <n>`** | M | low | Delete the local one-to-one transcript cache for a chosen chat, separate from `.forget` which clears AI prompt memory. |
-| **Per-chat transcript retention** | M | low | Set a local text-cache expiry or exclusion for each direct chat, with a preview of what will be deleted; do not change media archives implicitly. |
+| **Recover missed sends** | M | medium | After an outage, `.agenda missed` lists schedules that passed while offline and asks per item whether to send now or skip. Never deliver late messages automatically. |
+| **Edit a queued schedule** | M | low | `.jobs edit <id>` opens a preview to change its date, recipient, or text, then requires `YES`; avoids cancel-and-recreate mistakes. |
+| **Delivery outcome per job** | M | low | Show queued, accepted, delivered, or read only when WhatsApp supplies that receipt; distinguish “sent by the bot” from “seen by the recipient.” |
+| **Recipient quiet window** | M | low | Optional per-recipient do-not-send hours, with the next permitted time shown in the schedule preview. |
+
+### Selected-chat assistance
+
+| Idea | Effort | Risk | Notes |
+|---|---|---|---|
+| **Extract commitments** | M | medium | `.ask <chat> commitments` finds promises, tasks, and dates in the chosen transcript, then presents proposed `.todo`/`.schedule` drafts for approval; it never creates or sends them automatically. |
+| **Find unanswered questions** | M | medium | From selected chats, flag recent questions that appear directed at the owner and have no later reply, then offer reply drafts only. Show the source quote so the owner can check the match. |
+| **Per-request redaction** | M | low | Before an AI call, optionally mask phone numbers, email addresses, or owner-defined phrases in the outgoing transcript; leave the local cache unchanged and report what was masked. |
+
+### Account controls
+
+| Idea | Effort | Risk | Notes |
+|---|---|---|---|
+| **Timed command pause** | S | low | `.pause 1h` temporarily refuses bot commands and resumes automatically; scheduled messages keep their existing policy and the status clearly shows the pause expiry. |
+| **Reconnect catch-up** | M | low | When the linked device reconnects, report the disconnect window and any pending schedules that need a decision; do not claim to recover events WhatsApp never delivered. |
+| **Confirm owner-list changes** | S | low | Require a second explicit confirmation before removing an owner or changing the alert destination, and record the result in the audit log. |
 
 ### Still explicitly not building
 

@@ -53,19 +53,30 @@ export class AskContext {
     return rows;
   }
 
-  messages(chatJid, { limit = 200, all = false } = {}) {
+  messages(chatJid, { limit = 200, all = false, startTs = null, endTs = null } = {}) {
     const jid = normalizeJid(chatJid);
     const safeLimit = all ? MAX_FETCH : Math.max(1, Math.min(Number(limit) || 1, MAX_FETCH));
+    const conditions = ['chat_jid = ?', "text <> ''"];
+    const params = [jid];
+    if (Number.isFinite(startTs)) {
+      conditions.push('ts >= ?');
+      params.push(startTs);
+    }
+    if (Number.isFinite(endTs)) {
+      conditions.push('ts < ?');
+      params.push(endTs);
+    }
+    const where = conditions.join(' AND ');
     const total = all
-      ? this.db.prepare('SELECT COUNT(*) AS n FROM conversation_cache WHERE chat_jid = ? AND text <> \'\'').get(jid).n
+      ? this.db.prepare(`SELECT COUNT(*) AS n FROM conversation_cache WHERE ${where}`).get(...params).n
       : null;
     const rows = this.db.prepare(
       `SELECT id, chat_jid, sender_jid, from_me, text, ts
          FROM conversation_cache
-        WHERE chat_jid = ? AND text <> ''
+        WHERE ${where}
         ORDER BY ts DESC
         LIMIT ?`
-    ).all(jid, safeLimit).reverse();
+    ).all(...params, safeLimit).reverse();
     return { rows, omitted: total === null ? 0 : Math.max(0, total - rows.length) };
   }
 

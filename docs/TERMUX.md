@@ -233,16 +233,24 @@ with:
 .ask 2 40 What should I reply?
 .ask 2 all Summarize our chat
 .ask 2,4 50 Compare what we discussed
+.ask 2 after 2026-10-01 What did we decide?
+.ask 2 after 2026-10-01 to 2026-10-07 Summarize that period
+.ask 2 on 2026-10-07 What did we discuss that day?
+.ask 2 to 2026-10-07 Summarize everything up to that date
 ```
 
-The count applies to each selected chat. `all` uses the full cached text subject
-to the configured context-size limit; media bytes are not included. History
-starts when this device receives messages, so it is not a guaranteed export of
-messages from before pairing or while the bot was offline. Each `.ask` request
-sends only the selected text to the configured AI provider for that request; it
-does not store the transcript in AI chat memory and never sends a reply to the
-other person. Group selection is intentionally deferred for a separate design
-discussion.
+The count applies to each selected chat. `all` or a date-filtered query uses
+up to the cached text within the configured context-size limit; media bytes are
+not included. Dates must be `YYYY-MM-DD` in `SCHEDULE_TIMEZONE` (normally
+`Asia/Karachi`). Date endpoints are inclusive: `after DATE` starts at local
+midnight on that date, `after DATE to DATE` selects the inclusive range,
+`on DATE` selects one calendar day, and `to DATE` includes cached messages through
+that local date. History starts when this device receives messages, so it is
+not a guaranteed export of messages from before pairing or while the bot was
+offline. Each `.ask` request sends only the selected text/date range to the
+configured AI provider for that request; it does not store the transcript in AI
+chat memory and never sends a reply to the other person. Group selection is
+intentionally deferred for a separate design discussion.
 
 ## Change approved settings from WhatsApp
 

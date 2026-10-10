@@ -20,6 +20,7 @@ import {
   formatDateTime,
   listCalendarOccurrences,
   localDayRange,
+  localDateRange,
   nextCalendarOccurrence,
   parseClock,
   parseWhen,
@@ -188,6 +189,15 @@ test('monthly and leap-day recurrences require an explicit missing-date rule', (
     recurrenceDatePolicy: 'last-day',
   });
   assert.equal(leapLastDay.runAt, Date.UTC(2026, 1, 28, 4));
+});
+
+test('explicit date bounds use local midnight and reject invalid calendar dates', () => {
+  assert.deepEqual(localDateRange('2026-01-02', ZONE), {
+    start: Date.UTC(2026, 0, 1, 19),
+    end: Date.UTC(2026, 0, 2, 19),
+  });
+  assert.equal(localDateRange('2026-02-29', ZONE), null);
+  assert.equal(localDateRange('not-a-date', ZONE), null);
 });
 
 test('calendar recurrence and agenda bounds preserve local wall-clock time', () => {

@@ -21,7 +21,7 @@ cp .env.example .env      # leave NEXUS_MODE=dry-run for now
 
 npm run preview           # interactive console, ZERO WhatsApp connection
 npm run dashboard         # headless + web dashboard on :3000
-npm test                  # 178 tests
+npm test                  # 180 tests
 ```
 
 In the preview console try:
@@ -135,12 +135,26 @@ its “You” chat.
 | Command | Access | What |
 |---|---|---|
 | `.ai <prompt>` | anyone | ask the model, with per-chat memory |
-| `.ask chats` / `.ask <n> <count|all> <question>` | owner | ask about selected cached one-to-one chats; explicit transcript is sent to the configured AI provider |
+| `.ask chats` / `.ask <n> <count|all|after|from|on|to> ... <question>` | owner | ask about selected cached one-to-one chats by count or local date range; explicit transcript is sent to the configured AI provider |
 | `.summarize [n]` | owner | summarise recent messages in this chat |
 | `.vision [instruction]` | owner | describe or OCR an attached image |
 | `.translate <lang> [text]` | anyone | translate the last message, or your own text |
 | `.draft [tone]` | owner | draft a reply **for your approval** — never auto-sends |
 | `.forget` | owner | clear this chat's AI memory |
+
+`.ask chats` creates a numbered list of private one-to-one conversations. Ask by
+count as above, or use dates in the configured schedule timezone (usually
+`Asia/Karachi`):
+
+```text
+.ask 2 after 2026-10-01 What did we decide?
+.ask 2 after 2026-10-01 to 2026-10-07 Summarize that period
+.ask 2 on 2026-10-07 What did we discuss that day?
+.ask 2 to 2026-10-07 Summarize everything up to that date
+```
+
+Date endpoints are inclusive. Dates use `YYYY-MM-DD`; the result is bounded by
+the same transcript/context limits as `.ask ... all`. Group selection is deferred.
 
 **Media**
 

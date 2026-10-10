@@ -921,6 +921,23 @@ export function localDayRange(now = Date.now(), timeZone = 'Asia/Karachi', dayCo
   }
 }
 
+/** Local-midnight bounds for a strict YYYY-MM-DD date in an IANA timezone. */
+export function localDateRange(dateString, timeZone = 'Asia/Karachi') {
+  const match = String(dateString || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const date = { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) };
+  if (date.year < 1000 || !validCalendarDate(date)) return null;
+  try {
+    const next = addCalendarDays(date, 1);
+    const start = localToEpoch({ ...date, hour: 0, minute: 0 }, timeZone);
+    const end = localToEpoch({ ...next, hour: 0, minute: 0 }, timeZone);
+    if (start === null || end === null || end <= start) return null;
+    return { start, end };
+  } catch {
+    return null;
+  }
+}
+
 /** Format a concrete epoch for a human-facing preview in the chosen timezone. */
 export function formatDateTime(epochMs, timeZone = 'Asia/Karachi') {
   try {
@@ -943,4 +960,4 @@ export function formatDateTime(epochMs, timeZone = 'Asia/Karachi') {
   }
 }
 
-export default { parseWhen, parseClock, formatDateTime };
+export default { parseWhen, parseClock, formatDateTime, localDayRange, localDateRange };
