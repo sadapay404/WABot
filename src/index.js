@@ -28,6 +28,9 @@ import { ContactStore } from './core/contactStore.js';
 import { MessageCache } from './core/messageCache.js';
 import { MessageInbox } from './core/messageInbox.js';
 import { AskContext } from './core/askContext.js';
+import { PendingPrompts } from './core/pendingPrompts.js';
+import { ChatContext } from './core/chatContext.js';
+import { StatusFeed } from './core/statusFeed.js';
 import { EnvEditor } from './core/envEditor.js';
 import { MediaStore } from './core/mediaStore.js';
 import { AntiDelete } from './core/antiDelete.js';
@@ -111,7 +114,7 @@ function banner() {
 function wireEvents(socket, app) {
   // The mock is a plain EventEmitter; Baileys emits through `socket.ev`.
   const on = socket.ev ? (e, f) => socket.ev.on(e, f) : (e, f) => socket.on(e, f);
-  const { dispatcher, cache, antiDelete, viewOnce, editWatch, registry, contacts, presenceLog, profileWatch, groupWatch, messageInbox, webhooks, logger: log } = app;
+  const { dispatcher, cache, chatContext, statusFeed, antiDelete, viewOnce, editWatch, registry, contacts, presenceLog, profileWatch, groupWatch, messageInbox, webhooks, logger: log } = app;
   const selfJid = () => (socket.user?.id ? normalizeJid(socket.user.id) : '');
 
   on('messages.upsert', async ({ messages = [], type = null } = {}) => {
@@ -125,6 +128,15 @@ function wireEvents(socket, app) {
         // (`append`) while still accepting a fresh command typed on the phone (`notify`).
         msg.upsertType = type || 'unknown';
         if (selfJid()) registry.countIn(selfJid());
+
+        // Recorded before any early return below: status feed and the chat
+        // transcript used by `.ai <n>`. A failure here must not stop dispatch.
+        try {
+          statusFeed?.record(raw, msg);
+          chatContext?.record(msg);
+        } catch (err) {
+          log?.warn?.({ err: err.message }, 'context capture failed');
+        }
 
         // A pending owner API key is consumed before any cache, watcher, or
         // command handler can persist the plaintext. The confirmation is sent
@@ -356,6 +368,9 @@ async function main() {
   const selfJid = normalizeJid(socket.user?.id || '');
   const termuxControl = new TermuxControl({ root: config.root, logger });
   const askContext = new AskContext({ db });
+  const chatContext = new ChatContext({ db });
+  const statusFeed = new StatusFeed({ db });
+  const prompts = new PendingPrompts();
   const messageInbox = new MessageInbox({
     db,
     cache,
@@ -403,7 +418,7 @@ async function main() {
     config, logger, db, startedAt,
     registry, contacts, cache, mediaStore, messageInbox, notes, audit, webhooks, triggers,
     presenceLog, profileWatch, groupWatch, editWatch, antiDelete, viewOnce,
-    scheduler, scheduleWizard, reconnectCatchup, ai, askContext, envEditor, backup, vault, termuxControl, plugins, dispatcher, queue, logs, connection,
+    scheduler, scheduleWizard, reconnectCatchup, ai, askContext, chatContext, statusFeed, prompts, envEditor, backup, vault, termuxControl, plugins, dispatcher, queue, logs, connection,
     selfJid,
     // Kill-switch: the only thing that can stop outbound instantly.
     safety: {

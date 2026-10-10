@@ -49,6 +49,31 @@ function normalizeMode(raw) {
   return m;
 }
 
+const AI_PROVIDER_NAMES = ['groq', 'gemini', 'openai'];
+
+/**
+ * Parse AI_PROVIDERS="groq:1,gemini:2,openai:3" (lower number = tried first).
+ * Unknown names and duplicates are dropped. Without AI_PROVIDERS, the legacy
+ * AI_PROVIDER becomes the first choice and the rest follow in the default order.
+ */
+export function parseAiProviders(list, legacy = '') {
+  let order;
+  const parts = String(list || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (parts.length) {
+    order = parts.map((part, i) => {
+      const [name, prio] = part.split(':');
+      return { provider: String(name || '').trim().toLowerCase(), priority: Number(prio) || i + 1 };
+    });
+  } else {
+    const first = String(legacy || '').trim().toLowerCase();
+    const names = [first, ...AI_PROVIDER_NAMES].filter((n, i, a) => AI_PROVIDER_NAMES.includes(n) && a.indexOf(n) === i);
+    order = names.map((provider, i) => ({ provider, priority: i + 1 }));
+  }
+  const valid = order.filter((e) => AI_PROVIDER_NAMES.includes(e.provider));
+  const unique = valid.filter((e, i) => valid.findIndex((x) => x.provider === e.provider) === i);
+  return unique.sort((a, b) => a.priority - b.priority);
+}
+
 export function buildConfig(overrides = {}) {
   const mode = normalizeMode(overrides.mode ?? process.env.NEXUS_MODE);
 
@@ -193,7 +218,10 @@ export function buildConfig(overrides = {}) {
 
     ai: {
       provider: (process.env.AI_PROVIDER || 'groq').toLowerCase(),
+      providers: parseAiProviders(process.env.AI_PROVIDERS, process.env.AI_PROVIDER),
       model: process.env.AI_MODEL || '',
+      senderCooldownSec: int(process.env.AI_SENDER_COOLDOWN_SEC, 15),
+      dailyLimit: int(process.env.AI_DAILY_LIMIT, 200),
       maxHistory: int(process.env.AI_MAX_HISTORY, 12),
       askMaxChars: Math.max(4_000, Math.min(int(process.env.AI_ASK_MAX_CHARS, 60_000), 100_000)),
       keys: {

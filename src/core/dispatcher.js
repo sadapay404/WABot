@@ -31,6 +31,25 @@ import { normalizeJid } from './jid.js';
 const SELF_ECHO_TTL_MS = 120_000;
 const SELF_ECHO_MAX_KEYS = 500;
 
+
+function sameJid(a, b) {
+  return Boolean(a && b) && normalizeJid(a) === normalizeJid(b);
+}
+
+/**
+ * First requirement whose argument is absent or fails validation. Plugins
+ * declare `requires: [{ index, name, prompt, validate }]`; validate returns the
+ * normalised value, or null when the answer is unusable.
+ */
+function firstMissingArg(plugin, args = []) {
+  if (!args.length || !Array.isArray(plugin.requires)) return null;
+  for (const req of plugin.requires) {
+    const current = args[req.index];
+    if (current === undefined || req.validate(String(current)) === null) return req;
+  }
+  return null;
+}
+
 export class Dispatcher {
   /**
    * @param {object} deps
@@ -140,6 +159,8 @@ export class Dispatcher {
     try {
       this.trackSocket(socket);
       if (!msg.text) return; // media-only handling arrives in Phase 3
+      // Status broadcasts are captured by statusFeed, never answered or read.
+      if (normalizeJid(msg.jid) === 'status@broadcast') return;
 
       const isSelfChat = this.#isSelfChatJid(socket, msg.jid);
       const isFromSelfChat = Boolean(msg.isBot && isSelfChat);
@@ -165,9 +186,30 @@ export class Dispatcher {
         Boolean(candidate?.ownerOnly);
       const wizard = this.bot?.scheduleWizard;
       const pendingDraft = isOwner && wizard?.hasPending?.(msg.sender, msg.jid);
+      // A question the bot is waiting on (missing argument, status number).
+      const prompt = this.bot?.prompts?.peek?.(msg.jid) || null;
+      const promptIsMine = Boolean(prompt) &&
+        (prompt.ownerOnly ? isOwner : sameJid(prompt.sender, msg.sender));
 
       if (isFromSelfChat && parsed.isCommand && !selfChatCommand) return;
-      if (isFromSelfChat && !selfChatCommand && !pendingDraft) return;
+      if (isFromSelfChat && !selfChatCommand && !pendingDraft && !promptIsMine) return;
+
+      if (promptIsMine && !candidate) {
+        if (this.config.isObserve && !(isOwner && this.config.safety.observeAllowReplyToOwner)) {
+          this.stats.rejected++;
+          return;
+        }
+        const entry = this.bot.prompts.take(msg.jid);
+        if (entry) {
+          this.stats.handled++;
+          await entry.onReply({
+            text: msg.text.trim(),
+            socket,
+            reply: (text, options) => this.#reply(socket, msg, text, options),
+          });
+          return;
+        }
+      }
 
       if (!parsed.isCommand) {
         if (!pendingDraft || !wizard?.handleReply) return;
@@ -225,11 +267,13 @@ export class Dispatcher {
         return;
       }
 
-      this.stats.handled++;
-      const ctx = this.#buildContext(socket, msg, parsed, isOwner, plugin);
+      // ── Missing or invalid arguments: ask for them, then carry on ──
+      const missing = firstMissingArg(plugin, parsed.args);
+      if (missing && this.bot?.prompts) {
+        return this.#askForArg(socket, msg, parsed, isOwner, plugin, missing);
+      }
 
-      this.logger.debug(`exec .${plugin.name} (owner=${isOwner})`);
-      await plugin.execute(ctx);
+      await this.#execute(socket, msg, parsed, isOwner, plugin);
     } catch (err) {
       this.stats.errors++;
       this.logger.error(`plugin error: ${err.stack || err.message}`);
@@ -239,6 +283,48 @@ export class Dispatcher {
         /* never let the error path itself throw */
       }
     }
+  }
+
+  async #execute(socket, msg, parsed, isOwner, plugin) {
+    this.stats.handled++;
+    const ctx = this.#buildContext(socket, msg, parsed, isOwner, plugin);
+    this.logger.debug(`exec .${plugin.name} (owner=${isOwner})`);
+    await plugin.execute(ctx);
+  }
+
+  /** Ask for one missing argument. The answer comes back through #collectArg. */
+  #askForArg(socket, msg, parsed, isOwner, plugin, missing, note = '') {
+    this.bot.prompts.set(msg.jid, {
+      kind: 'arg',
+      ownerOnly: Boolean(plugin.ownerOnly),
+      sender: msg.sender,
+      onReply: ({ text, reply }) =>
+        this.#collectArg(socket, msg, parsed, isOwner, plugin, missing, text, reply),
+    });
+    const body = note ? `${note}\n${missing.prompt}` : missing.prompt;
+    return this.#reply(socket, msg, body);
+  }
+
+  async #collectArg(socket, msg, parsed, isOwner, plugin, missing, text, reply) {
+    const value = missing.validate(String(text || '').trim());
+    if (value === null || value === undefined) {
+      return this.#askForArg(socket, msg, parsed, isOwner, plugin, missing, 'That is not valid.');
+    }
+    const args = [...parsed.args];
+    args[missing.index] = value;
+    // Normalise every argument that is already valid, so the plugin gets the
+    // same types whether the user typed it up front or was asked for it.
+    for (const req of plugin.requires || []) {
+      if (args[req.index] === undefined) continue;
+      const normalised = req.validate(String(args[req.index]));
+      if (normalised !== null) args[req.index] = normalised;
+    }
+
+    const next = firstMissingArg(plugin, args);
+    if (next) return this.#askForArg(socket, msg, { ...parsed, args }, isOwner, plugin, next);
+
+    const filled = { ...parsed, args, argsRaw: args.join(' ') };
+    return this.#execute(socket, msg, filled, isOwner, plugin);
   }
 
   #buildContext(socket, msg, parsed, isOwner, plugin) {

@@ -1,7 +1,7 @@
 /**
  * Nexus-WA — AI orchestrator.
  *
- * One interface over three providers, all called with plain fetch so there is
+ * One interface over three providers, tried in priority order (AI_PROVIDERS), all called with plain fetch so there is
  * no vendor SDK to keep updated:
  *
  *   groq    OpenAI-compatible /chat/completions   (fast, free tier)
@@ -22,6 +22,8 @@ const ENDPOINTS = {
   groq: 'https://api.groq.com/openai/v1/chat/completions',
   openai: 'https://api.openai.com/v1/chat/completions',
 };
+
+const IMAGE_PROVIDERS = ['gemini', 'groq', 'openai'];
 
 const DEFAULT_MODEL = {
   groq: 'llama-3.3-70b-versatile',
@@ -62,20 +64,33 @@ export class AiClient {
     this.stats = { calls: 0, errors: 0, charsIn: 0, charsOut: 0 };
   }
 
+  /**
+   * Providers that have a key, best priority first. Each link carries its own
+   * key and model; AI_MODEL only applies to the provider it was named for.
+   */
+  chain({ images = false } = {}) {
+    const ordered = (this.config.providers || []).filter((e) => this.config.keys?.[e.provider]);
+    const usable = images ? ordered.filter((e) => IMAGE_PROVIDERS.includes(e.provider)) : ordered;
+    return usable.map((e) => ({
+      provider: e.provider,
+      key: this.config.keys[e.provider],
+      model:
+        (e.provider === this.config.provider && this.config.model) || DEFAULT_MODEL[e.provider],
+    }));
+  }
+
+  /** Name of the highest-priority configured provider. */
   get provider() {
-    return this.config.provider || 'groq';
-  }
-
-  get key() {
-    return this.config.keys?.[this.provider] || '';
-  }
-
-  get model() {
-    return this.config.model || DEFAULT_MODEL[this.provider] || DEFAULT_MODEL.groq;
+    return this.chain()[0]?.provider || this.config.provider || 'groq';
   }
 
   configured() {
-    return Boolean(this.key);
+    return this.chain().length > 0;
+  }
+
+  /** Model of the highest-priority configured provider (for display). */
+  get model() {
+    return this.chain()[0]?.model || this.config.model || '';
   }
 
   /** Trim memory for one chat to the configured window. */
@@ -107,7 +122,11 @@ export class AiClient {
    * @returns {Promise<string>}
    */
   async complete({ prompt, system = null, chatKey = null, maxTokens = 800, temperature = 0.4, images = [] }) {
-    if (!this.configured()) throw new AiNotConfigured(this.provider);
+    const links = this.chain({ images: images.length > 0 });
+    if (!links.length && images.length && this.configured()) {
+      throw new AiError('no configured provider can read images (use gemini, groq or openai)');
+    }
+    if (!links.length) throw new AiNotConfigured(this.provider);
     if (!prompt?.trim()) throw new AiError('empty prompt');
 
     const messages = [];
@@ -115,10 +134,25 @@ export class AiClient {
     if (chatKey) messages.push(...this.history(chatKey));
     messages.push({ role: 'user', content: prompt });
 
-    const text =
-      this.provider === 'gemini'
-        ? await this.#gemini({ messages, maxTokens, temperature, images })
-        : await this.#openAiCompatible({ messages, maxTokens, temperature, images });
+    let text = null;
+    const failures = [];
+    for (const link of links) {
+      try {
+        text =
+          link.provider === 'gemini'
+            ? await this.#gemini(link, { messages, maxTokens, temperature, images })
+            : await this.#openAiCompatible(link, { messages, maxTokens, temperature, images });
+        if (failures.length) this.logger.warn({ failures }, 'ai answered after fallback');
+        break;
+      } catch (err) {
+        this.stats.errors++;
+        failures.push(`${link.provider}: ${err.message}`);
+        this.logger.warn({ provider: link.provider, err: err.message }, 'ai provider failed, trying next');
+      }
+    }
+    if (text === null) {
+      throw new AiError(`all providers failed (${failures.join('; ')})`);
+    }
 
     if (chatKey) {
       this.#remember(chatKey, { role: 'user', content: prompt });
@@ -131,9 +165,9 @@ export class AiClient {
     return text;
   }
 
-  async #openAiCompatible({ messages, maxTokens, temperature, images }) {
-    const url = ENDPOINTS[this.provider];
-    if (!url) throw new AiError(`unsupported provider "${this.provider}"`);
+  async #openAiCompatible(link, { messages, maxTokens, temperature, images }) {
+    const url = ENDPOINTS[link.provider];
+    if (!url) throw new AiError(`unsupported provider "${link.provider}"`);
 
     // Vision is only wired for the multimodal message shape.
     const payloadMessages = images.length
@@ -155,9 +189,9 @@ export class AiClient {
 
     const res = await this.fetch(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${this.key}` },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${link.key}` },
       body: JSON.stringify({
-        model: this.model,
+        model: link.model,
         messages: payloadMessages,
         max_tokens: maxTokens,
         temperature,
@@ -172,9 +206,9 @@ export class AiClient {
     });
   }
 
-  async #gemini({ messages, maxTokens, temperature, images }) {
+  async #gemini(link, { messages, maxTokens, temperature, images }) {
     const url =
-      `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:generateContent?key=${this.key}`;
+      `https://generativelanguage.googleapis.com/v1beta/models/${link.model}:generateContent?key=${link.key}`;
 
     const system = messages.find((m) => m.role === 'system')?.content || null;
     const contents = messages
@@ -219,27 +253,23 @@ export class AiClient {
    * @returns {Promise<string>}
    */
   async transcribeAudio({ base64, mime = 'audio/ogg' }) {
-    if (!this.configured()) throw new AiNotConfigured(this.provider);
+    // Transcription is only wired for OpenAI-compatible endpoints (groq, openai).
+    const link = this.chain().find((l) => ENDPOINTS[l.provider]);
+    if (!link) throw new AiNotConfigured(this.provider);
 
-    const base = ENDPOINTS[this.provider];
-    if (!base) {
-      throw new AiError(
-        `provider "${this.provider}" has no audio transcription endpoint in this client`
-      );
-    }
-
+    const base = ENDPOINTS[link.provider];
     const url = base.replace(/\/chat\/completions$/, '/audio/transcriptions');
     const ext = /ogg|opus/i.test(mime) ? 'ogg' : /mpeg|mp3/i.test(mime) ? 'mp3' : 'wav';
     const bytes = Buffer.from(base64, 'base64');
 
     const form = new FormData();
     form.append('file', new Blob([bytes], { type: mime }), `voice.${ext}`);
-    form.append('model', this.provider === 'groq' ? 'whisper-large-v3-turbo' : 'whisper-1');
+    form.append('model', link.provider === 'groq' ? 'whisper-large-v3-turbo' : 'whisper-1');
     form.append('response_format', 'json');
 
     const res = await this.fetch(url, {
       method: 'POST',
-      headers: { authorization: `Bearer ${this.key}` },
+      headers: { authorization: `Bearer ${link.key}` },
       body: form,
       signal: AbortSignal.timeout(120_000),
     });
@@ -252,6 +282,7 @@ export class AiClient {
       return out;
     });
   }
+
 
   async #handle(res, extract) {    const body = await res.text();
     if (!res.ok) {
