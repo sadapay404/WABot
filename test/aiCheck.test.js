@@ -98,7 +98,7 @@ function checkCommand() {
 test('.ai check is owner only; a stranger gets a plain refusal', async () => {
   const replies = [];
   await checkCommand().execute({
-    args: ['check'], isOwner: false, reply: async (t) => replies.push(t),
+    args: ['-check-'], isOwner: false, reply: async (t) => replies.push(t),
     bot: {}, config: {}, jid: 'x@s.whatsapp.net',
   });
   assert.match(replies[0], /Only the owner/);
@@ -114,7 +114,7 @@ test('.ai check replies for every provider, even when some fail', async () => {
   const ai = clientWith({ gemini: 'g-key', groq: 'q-key' }, fetchImpl);
   const replies = [];
   await checkCommand().execute({
-    args: ['check'], isOwner: true, reply: async (t) => replies.push(t),
+    args: ['-check-'], isOwner: true, reply: async (t) => replies.push(t),
     bot: { ai }, config: {}, jid: 'x@s.whatsapp.net',
   });
   const report = replies[0];
@@ -130,4 +130,17 @@ test('an empty reply is explained, not shown as raw JSON', () => {
   assert.match(msg, /answered with no text/);
   assert.ok(!msg.includes('{"id"'), 'raw JSON must not reach the chat');
   assert.match(explainProviderError('the model used its whole reply limit on hidden reasoning', null), /answered with no text/);
+});
+
+test('a prompt that starts with the word check goes to the AI, not the checker', async () => {
+  let seen = null;
+  const ai = { complete: async (req) => { seen = req; return 'Looks fine.'; } };
+  const replies = [];
+  await checkCommand().execute({
+    args: ['check', 'my', 'essay'], isOwner: true, reply: async (t) => replies.push(t),
+    bot: { ai, chatContext: null }, config: {}, jid: 'x@s.whatsapp.net',
+  });
+  assert.ok(seen, 'the AI must be asked');
+  assert.match(seen.prompt, /check my essay/);
+  assert.ok(!replies.some((t) => /AI check/.test(t)), 'must not run the provider checker');
 });

@@ -128,15 +128,19 @@ async function askAi(ctx) {
 }
 
 const CHECK_PROVIDERS = ['gemini', 'groq', 'openrouter'];
+const CHECK_TRIGGER = '-check-';
 
-/** `.ai check [all|gemini|groq|openrouter|openai]`. Owner only. */
+/**
+ * `.ai -check- [all|gemini|groq|openrouter|openai]`. Owner only.
+ * A plain word "check" is not the trigger: prompts may start with it.
+ */
 async function aiCheck(ctx, rest) {
-  if (!ctx.isOwner) return ctx.reply('Only the owner can run .ai check.');
+  if (!ctx.isOwner) return ctx.reply('Only the owner can run .ai -check-.');
   const ai = ctx.bot?.ai;
   if (!ai) return ctx.reply('The AI orchestrator is not active in this mode.');
   const target = String(rest[0] || 'all').toLowerCase();
   if (target !== 'all' && !PROVIDER_NAMES.includes(target)) {
-    return ctx.reply('usage: .ai check [all|gemini|groq|openrouter|openai]');
+    return ctx.reply('usage: .ai -check- [all|gemini|groq|openrouter|openai]');
   }
   const names = target === 'all' ? [...CHECK_PROVIDERS] : [target];
   if (target === 'all' && ai.config.keys?.openai) names.push('openai');
@@ -147,7 +151,7 @@ async function aiCheck(ctx, rest) {
       ? `✅ *${r.provider}* (${r.model}) works. Reply: "${r.reply}" (${r.ms} ms)`
       : `❌ *${r.provider}* (${r.model}) does not work.\nWhy: ${r.problem}${r.raw ? `\nProvider said: ${r.raw}` : ''}`
   );
-  return ctx.reply(`🔎 *AI check*\n\n${lines.join('\n\n')}\n\nFix any ❌ line, then send .ai check again.`);
+  return ctx.reply(`🔎 *AI check*\n\n${lines.join('\n\n')}\n\nFix any ❌ line, then send .ai -check- again.`);
 }
 
 export default {
@@ -160,14 +164,14 @@ export default {
       usage: '.ai <question>  or  .ai <n> <question>',
       ownerOnly: false,
       async execute(ctx) {
-        if (String(ctx.args?.[0] || '').toLowerCase() === 'check') {
+        if (String(ctx.args?.[0] || '').toLowerCase() === CHECK_TRIGGER) {
           return aiCheck(ctx, ctx.args.slice(1));
         }
         try {
           return await askAi(ctx);
         } catch (err) {
           // Never go silent. A reply that names the problem beats no reply.
-          return ctx.reply(`⚠️ .ai failed: ${err.message}\n\nSend .ai check to see which provider has the problem.`);
+          return ctx.reply(`⚠️ .ai failed: ${err.message}\n\nSend .ai -check- to see which provider has the problem.`);
         }
       },
     },

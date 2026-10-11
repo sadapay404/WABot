@@ -19,7 +19,7 @@ category in WhatsApp, use `.help` followed by `admin`, `ai`, `automation`, `medi
 |---|---|---|---|
 | `.agenda` | — | Owner | View pending sends or decide missed jobs |
 | `.ai` | `.gpt` | Anyone | Ask the configured AI; `.ai <n> <question>` adds the last n messages of the chat as context |
-| `.ai check` | — | Owner | Test each AI provider and explain any that does not work |
+| `.ai -check-` | — | Owner | Test each AI provider and explain any that does not work |
 | `.aiprovider` | `.aiorder` | Owner | Show or set AI provider priority (1 = tried first, the rest are fallbacks) |
 | `.antidelete` | `.ad`, `.deleted`, `.deletes` | Owner | Toggle deletion capture/alerts and review history |
 | `.archive` | `.media` | Owner | List locally archived media |
@@ -107,14 +107,17 @@ Do not use it for private content unless you are comfortable sending the prompt
 and context to your configured AI provider. Public use needs `NEXUS_MODE=live`;
 in observe mode the bot does not answer anyone but the owner.
 
-### `.ai check` — test each AI provider (owner)
+### `.ai -check-` — test each AI provider (owner)
 **Access:** Owner · **Category:** AI
 
 ```text
-.ai check
-.ai check gemini
-.ai check groq
-.ai check openrouter
+.ai -check-
+.ai -check- gemini
+.ai -check- groq
+.ai -check- openrouter
+
+A normal question that starts with the word check still goes to the AI, for example
+.ai check my essay for spelling mistakes
 ```
 
 Sends one small test message to each provider (or the one you name) and replies
