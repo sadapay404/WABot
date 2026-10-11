@@ -432,12 +432,29 @@ heartbeat_check() {
   ts=$(sed -n 's/^ts=//p' "$HEARTBEAT" 2>/dev/null)
   state=$(sed -n 's/^state=//p' "$HEARTBEAT" 2>/dev/null)
   since=$(sed -n 's/^state_since=//p' "$HEARTBEAT" 2>/dev/null)
+  local halted last_in
+  halted=$(sed -n 's/^queue_halted=//p' "$HEARTBEAT" 2>/dev/null)
+  last_in=$(sed -n 's/^last_inbound=//p' "$HEARTBEAT" 2>/dev/null)
   if [ -z "$ts" ] || [ $(( now - ts )) -gt 300 ]; then
     reason="heartbeat stale ($(( now - ${ts:-0} ))s)"
   elif [ "$state" != "open" ] && [ -n "$(linked_number)" ] && [ $(( now - ${since:-now} )) -gt 1200 ]; then
     reason="offline for $(( (now - since) / 60 )) min (state=$state)"
+  elif [ -n "$halted" ] && [ "$halted" != "no" ] && [ "$halted" != "kill-switch" ]; then
+    # The loop breaker stopped all replies. Only a restart clears it.
+    reason="replies halted by the bot ($halted); restarting clears it"
+  elif [ "$state" = "open" ] && [ -n "$last_in" ] && [ $(( now - last_in )) -gt 43200 ]; then
+    reason="connected but no incoming message for $(( (now - last_in) / 3600 )) h (session may be deaf)"
   fi
   [ -n "$reason" ] || return 0
+
+  # At most one automatic restart per 30 minutes, so a repeating fault cannot loop.
+  local last_auto
+  last_auto=$(cat "$DATA_DIR/last_auto_restart" 2>/dev/null || echo 0)
+  if [ $(( now - last_auto )) -lt 1800 ]; then
+    echo "$(date '+%F %T') watchdog: $reason — restart skipped, last automatic restart was less than 30 min ago" >>"$LOG"
+    return 0
+  fi
+  echo "$now" >"$DATA_DIR/last_auto_restart"
   bot=$(cat "$BOTPIDFILE" 2>/dev/null)
   echo "$(date '+%F %T') watchdog: restarting bot — $reason" >>"$LOG"
   if [ -n "$bot" ] && kill -0 "$bot" 2>/dev/null; then

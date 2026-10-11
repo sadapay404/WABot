@@ -141,6 +141,8 @@ export class WhatsAppConnection {
     this.state = 'idle';
     this.stateSince = Date.now();
     this.lastFrameAt = 0;
+    // Last incoming message. Starts at boot, so a quiet fresh start is not "deaf".
+    this.lastInboundAt = Date.now();
     // Bumped whenever an attempt is abandoned, so a late-finishing connect()
     // cannot create a second socket beside the one that replaced it.
     this.generation = 0;
@@ -355,6 +357,8 @@ export class WhatsAppConnection {
         `last_frame=${Math.floor(this.lastFrameAt / 1000)}`,
         `queue_halted=${this.queue?.halted ? this.queue.haltReason : 'no'}`,
         `queue_queued=${this.queue ? this.queue.depth().queued : 0}`,
+        `last_inbound=${Math.floor(this.lastInboundAt / 1000)}`,
+        `last_sent=${this.queue?.lastSentAt ? Math.floor(this.queue.lastSentAt / 1000) : 0}`,
         '',
       ].join('\n');
       const tmp = `${this.heartbeatFile}.tmp`;
@@ -437,7 +441,10 @@ export class WhatsAppConnection {
       }
     });
 
-    socket.ev.on('messages.upsert', (p) => this.#emit('messages.upsert', p));
+    socket.ev.on('messages.upsert', (p) => {
+      this.lastInboundAt = Date.now();
+      this.#emit('messages.upsert', p);
+    });
     socket.ev.on('messages.update', (p) => this.#emit('messages.update', p));
     socket.ev.on('contacts.update', (p) => this.#emit('contacts.update', p));
     socket.ev.on('chats.update', (p) => this.#emit('chats.update', p));

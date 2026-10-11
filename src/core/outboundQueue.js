@@ -137,6 +137,7 @@ export class OutboundQueue {
     this.beforeSendObservers = new Set();
     this.queue = [];
     this.active = 0;
+    this.lastSentAt = 0;
     this.stats = {
       sent: 0,
       throttledMs: 0,
@@ -392,12 +393,14 @@ export class OutboundQueue {
   }
 
   async #run(item) {
+    // Set on success only, so the heartbeat can show when replies last worked.
     try {
       const res = await withTimeout(this.#deliver(item), SEND_TIMEOUT_MS, 'send');
       if (item.jid) {
         this.windows.set(item.jid, [...(this.windows.get(item.jid) || []), Date.now()]);
       }
       this.stats.sent++;
+      this.lastSentAt = Date.now();
       if (!item.bypassSafetyMonitors) {
         const anomaly = this.#checkVolumeAnomaly();
         if (anomaly) await this.#alertVolumeAnomaly(anomaly);
