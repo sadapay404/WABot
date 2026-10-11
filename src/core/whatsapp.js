@@ -29,6 +29,9 @@ async function baileys() {
  *
  * @returns {'restart'|'relogin'|'backoff'|'ignore'}
  */
+/** Exit code meaning "do not restart me": the supervisor stops, a human must act. */
+export const EXIT_DO_NOT_RESTART = 3;
+
 export function classifyDisconnect(reason, DisconnectReason) {
   const D = DisconnectReason || {};
   // Guard first. Without it, `case D.loggedOut` degrades to `case undefined`
@@ -248,12 +251,17 @@ export class WhatsAppConnection {
               + 'Start this one again with: nexus start (only after the other device is stopped)'
           );
           this.#emit('replaced', { reason });
-          setTimeout(() => process.exit(0), 1500);
+          setTimeout(() => process.exit(EXIT_DO_NOT_RESTART), 1500);
           return;
         }
         if (action === 'relogin') {
-          this.logger.error('session is no longer valid — credentials must be re-linked');
+          // Nothing the bot can do without a human: exit so the supervisor stops
+          // instead of leaving a silent, disconnected process behind.
+          this.logger.error(
+            'session is no longer valid — re-link WhatsApp with: nexus pair. The bot will not restart by itself.'
+          );
           this.#emit('relogin', { reason });
+          setTimeout(() => process.exit(EXIT_DO_NOT_RESTART), 1500);
           return;
         }
         this.attempt++;

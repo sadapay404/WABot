@@ -120,6 +120,69 @@ your send-now/skip choice instead of being sent late automatically.
 
 ---
 
+## Staying running after an outage or reboot
+
+Three layers now work together. Each one starts the bot only if it should be
+running and is not, so they never fight:
+
+1. **Termux:Boot** runs `nexus ensure` after the phone starts. It waits for
+   WiFi, then starts anyway.
+2. **Android job watchdog** (Termux:API) runs `nexus ensure` every 15 minutes,
+   even after Android has killed Termux. It survives reboots. Turn it on with
+   `nexus watchdog on`. `nexus start` also turns it on.
+3. **MacroDroid watchdog** (optional, independent of Termux's own job) sends the
+   same check through Termux's RUN_COMMAND intent every 15 minutes.
+
+The bot itself keeps reconnecting when WiFi drops. It only stops for two reasons,
+and neither is restarted automatically: `nexus stop` (you stopped it), and exit
+code 3 (another device took the session, or WhatsApp unlinked it). Both are shown
+by `nexus doctor`. Run `nexus start` to bring it back.
+
+Check the whole setup any time with:
+
+    nexus doctor
+
+It lists the boot hook, the last boot, whether the bot is running, the last exit
+reason, when the watchdog last ran, and what is still missing.
+
+### Phone steps (one time, only you can do these)
+
+- Install **Termux:Boot** and **Termux:API** from F-Droid. Open Termux:Boot once.
+- Settings → Apps → Termux, Termux:Boot, Termux:API → Battery → **Unrestricted**.
+- Settings → Wi-Fi → Advanced → **Keep Wi-Fi on during sleep → Always**. This is
+  the one that matters for your WiFi drops: otherwise Android turns WiFi off when
+  the screen sleeps.
+- Keep the phone on a charger (ideally on a UPS or a power strip with a UPS).
+  A phone whose battery fully dies is off, and it only powers itself back on when
+  your phone model does that. No app can start a phone that is switched off.
+- Optional, for the MacroDroid watchdog: install **MacroDroid** and grant it
+  Termux's permission (see the steps below).
+
+### MacroDroid watchdog (optional second layer)
+
+This runs even if Termux is gone, because it starts Termux through its command
+interface. It needs `allow-external-apps=true` in `~/.termux/termux.properties`,
+which `nexus watchdog on` sets for you.
+
+1. Grant permission: Android Settings → Apps → MacroDroid → Permissions → More
+   permissions (or Additional permissions) → **Run commands in Termux
+   environment**. Allow it.
+2. In MacroDroid, create a new macro named **Nexus watchdog**.
+3. Trigger: a repeating timer, every **15 minutes**. (In MacroDroid this is a
+   time-based trigger that repeats; choose the option that repeats, not "once".)
+4. Action: **Send Intent**. Fill in:
+   - Action: `com.termux.RUN_COMMAND`
+   - Package: `com.termux`
+   - Class: `com.termux.app.RunCommandService`
+   - Extra, String: `com.termux.RUN_COMMAND_PATH` = `/data/data/com.termux/files/home/nexus-wa/deploy/termux/watchdog.sh`
+   - Extra, String: `com.termux.RUN_COMMAND_WORKDIR` = `/data/data/com.termux/files/home`
+   - Extra, Boolean: `com.termux.RUN_COMMAND_BACKGROUND` = true
+5. Save and turn it on. Wait 15 minutes, then run `nexus doctor` and check
+   that "watchdog last ran" is recent.
+
+Both layers call the same `nexus ensure`, and a lock stops them starting the bot
+twice.
+
 ## Keep Android from killing it
 
 This is the part that decides whether the whole thing works. Without it Android
@@ -324,6 +387,7 @@ nexus status     # running? linked? memory? battery?
 nexus logs       # follow the log (Ctrl-C stops watching, not the bot)
 nexus restart
 nexus update   # fetch the latest version from GitHub, install it, and restart
+nexus doctor   # why it may not be running after an outage or reboot
 nexus stop
 nexus pair       # reprint the pairing code
 nexus pair --new 923001234567   # switch the bot to another WhatsApp number

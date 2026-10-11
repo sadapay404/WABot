@@ -6,6 +6,9 @@
 #   nexus stop      stop it
 #   nexus restart   stop, then start
 #   nexus update    fetch the latest from GitHub, install it, restart
+#   nexus ensure    start the bot only if it should run and is not (used by boot + watchdog)
+#   nexus doctor    why the bot may not be running, and what to check
+#   nexus watchdog on|off|status   15-minute Android job that revives the bot
 #   nexus status    is it running, linked, how much memory
 #   nexus logs      follow the log (Ctrl-C to stop watching)
 #   nexus pair [number]   link a WhatsApp account and make it the owner
@@ -20,6 +23,11 @@ LOG="$LOG_DIR/nexus.log"
 PIDFILE="$DATA_DIR/nexus.pid"
 BOTPIDFILE="$DATA_DIR/nexus.bot.pid"
 NODE_FLAGS="--disable-warning=ExperimentalWarning"
+# Written by `nexus stop`, removed by `nexus start`. While it exists, nothing
+# (boot hook, watchdog, supervisor) starts the bot again.
+STOPFILE="$DATA_DIR/nexus.stopped"
+WATCHDOG_JOB=4242
+WATCHDOG_SCRIPT="$APP_DIR/deploy/termux/watchdog.sh"
 
 mkdir -p "$LOG_DIR"
 
@@ -45,6 +53,7 @@ running_pid() {
 
 start() {
   local pid
+  rm -f "$STOPFILE"
   if pid=$(running_pid); then
     echo "$(c '33' '•') already running (pid $pid)"
     return 0
@@ -60,20 +69,26 @@ start() {
   rotate_log
   cd "$APP_DIR" || exit 1
 
-  # Detached supervisor. It restarts the bot if it ever exits, with a pause
-  # that grows so a crash-loop cannot hammer WhatsApp's servers.
+  # Detached supervisor. It restarts the bot after ANY exit, except:
+  #   • `nexus stop` wrote STOPFILE (a deliberate stop), or
+  #   • the bot exits with code 3 (session taken over, or unlinked: needs a human).
+  # The pause grows 5s, 10s, … up to 60s, and resets after a run of 10+ minutes.
   #
   # PIDs are tracked in files, NOT found with pgrep/pkill. A pattern like
   # "nexus-wa/src/index.js" also matches this supervisor's own bash -c text
   # and any shell whose command line merely mentions the path — pkill on that
   # kills the wrong things. Recording the child PID is exact.
-  nohup bash -c '
-    APP_DIR="'"$APP_DIR"'"; PIDFILE="'"$PIDFILE"'"
+  local detach="nohup"
+  command -v setsid >/dev/null 2>&1 && detach="setsid nohup"
+  rm -f "$STOPFILE"
+  $detach bash -c '
+    APP_DIR="'"$APP_DIR"'"; PIDFILE="'"$PIDFILE"'"; STOPFILE="'"$STOPFILE"'"
     BOTPID="'"$BOTPIDFILE"'"; LOG="'"$LOG"'"
     echo $$ > "$PIDFILE"
     trap "rm -f \"$BOTPID\"" EXIT
     attempt=0
     while :; do
+      started=$(date +%s)
       printf "\n===== start %s (attempt %d) =====\n" "$(date "+%F %T")" "$attempt" >>"$LOG"
       node '"$NODE_FLAGS"' "$APP_DIR/src/index.js" --serve >>"$LOG" 2>&1 &
       node_pid=$!
@@ -82,7 +97,15 @@ start() {
       code=$?
       rm -f "$BOTPID"
       printf "===== exited %d at %s =====\n" "$code" "$(date "+%F %T")" >>"$LOG"
-      [ "$code" -eq 0 ] && break
+      [ -f "$STOPFILE" ] && break
+      if [ "$code" -eq 3 ]; then
+        # Sticky: the watchdog and boot hook must not keep reconnecting and
+        # fighting the other device. Only `nexus start` clears this.
+        echo "the bot stopped itself (exit 3: session taken over, or unlinked)" >"$STOPFILE"
+        printf "bot will not restart by itself (exit 3: session taken over or unlinked). See: nexus doctor\n" >>"$LOG"
+        break
+      fi
+      [ $(( $(date +%s) - started )) -ge 600 ] && attempt=0
       attempt=$((attempt+1))
       delay=$(( 5 * attempt )); [ "$delay" -gt 60 ] && delay=60
       sleep "$delay"
@@ -94,6 +117,7 @@ start() {
     echo "$(c '32' '✓') started (pid $pid)"
     echo "  watch it:   nexus logs"
     echo "  pairing:    nexus pair"
+    schedule_watchdog >/dev/null 2>&1 || true
   else
     echo "$(c '31' '✗') failed to start — see: nexus logs"
     exit 1
@@ -102,6 +126,8 @@ start() {
 
 stop() {
   local pid
+  # Record the intent first, so nothing restarts the bot while it shuts down.
+  : >"$STOPFILE"
   if ! pid=$(running_pid); then
     echo "$(c '33' '•') not running"
     rm -f "$PIDFILE"
@@ -129,6 +155,10 @@ stop() {
 
 status() {
   local pid
+  if [ -f "$STOPFILE" ] && ! running_pid >/dev/null; then
+    echo "$(c '33' '•') $(stop_reason). Start it with: nexus start"
+    return 0
+  fi
   if pid=$(running_pid); then
     echo "$(c '32' '✓') running (pid $pid)"
     local bot rss
@@ -379,6 +409,150 @@ install_command() {
   fi
 }
 
+# Why the bot is stopped, from the stop file (empty file = a manual `nexus stop`).
+stop_reason() {
+  local why
+  why=$(head -1 "$STOPFILE" 2>/dev/null)
+  if [ -n "$why" ]; then printf '%s' "$why"; else printf 'stopped on purpose (nexus stop)'; fi
+}
+
+# nexus ensure — start the bot only if it should be running and is not.
+# The boot hook and the watchdog both call this. A deliberate `nexus stop` wins.
+ensure() {
+  if [ -f "$STOPFILE" ]; then
+    echo "stopped — $(stop_reason). Start it with: nexus start"
+    return 0
+  fi
+  # One check at a time (boot and the watchdog can fire together). A lock left
+  # behind by a killed process is cleared after five minutes.
+  local lock="$DATA_DIR/ensure.lock" rc=0
+  if [ -d "$lock" ] && [ -n "$(find "$lock" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
+    rmdir "$lock" 2>/dev/null
+  fi
+  mkdir "$lock" 2>/dev/null || { echo "another check is already running"; return 0; }
+  if running_pid >/dev/null; then
+    echo "running"
+  else
+    echo "$(date '+%F %T') ensure: not running, starting" >>"$LOG"
+    # In a subshell: start() may exit on failure, and the lock must still be released.
+    (start) || rc=$?
+  fi
+  rmdir "$lock" 2>/dev/null
+  return "$rc"
+}
+
+# Make the watchdog script executable and (re)schedule it with Android's job
+# scheduler. Same job id each time, so this replaces the old job, never duplicates.
+# Android's minimum period is 15 minutes. The job survives reboots.
+schedule_watchdog() {
+  command -v termux-job-scheduler >/dev/null 2>&1 || return 1
+  [ -f "$WATCHDOG_SCRIPT" ] || return 1
+  chmod 755 "$WATCHDOG_SCRIPT" 2>/dev/null
+  allow_external_apps
+  timeout 20 termux-job-scheduler \
+    --script "$WATCHDOG_SCRIPT" \
+    --job-id "$WATCHDOG_JOB" \
+    --period-ms 900000 \
+    --persisted true \
+    --network any \
+    --battery-not-low false \
+    --storage-not-low false \
+    --charging false
+}
+
+# Lets MacroDroid (or any app granted Termux's RUN_COMMAND permission) start the
+# watchdog even when Termux itself is gone. Termux refuses such calls by default.
+allow_external_apps() {
+  local f="$HOME/.termux/termux.properties"
+  mkdir -p "$HOME/.termux"
+  grep -qE '^[[:space:]]*allow-external-apps[[:space:]]*=[[:space:]]*true' "$f" 2>/dev/null && return 0
+  [ -f "$f" ] && sed -i -E '/^[[:space:]]*#?[[:space:]]*allow-external-apps[[:space:]]*=/d' "$f"
+  printf 'allow-external-apps=true\n' >>"$f"
+  command -v termux-reload-settings >/dev/null 2>&1 && termux-reload-settings >/dev/null 2>&1
+  return 0
+}
+
+# nexus watchdog on|off|status
+watchdog() {
+  case "${1:-status}" in
+    on)
+      if schedule_watchdog; then
+        echo "$(c '32' '✓') watchdog on: every 15 minutes it checks the bot and starts it if it is down"
+        echo "  (survives reboots; allow-external-apps=true is set in ~/.termux/termux.properties)"
+      else
+        echo "$(c '31' '✗') could not schedule the watchdog. Install the Termux:API app, then run: nexus watchdog on"
+        echo "  (check it with: nexus doctor)"
+        return 1
+      fi ;;
+    off)
+      timeout 20 termux-job-scheduler --cancel --job-id "$WATCHDOG_JOB" >/dev/null 2>&1
+      echo "$(c '33' '·') watchdog off. The bot will no longer be restarted automatically if it stops." ;;
+    status)
+      if [ -f "$DATA_DIR/watchdog.last" ]; then
+        echo "  watchdog last ran: $(cat "$DATA_DIR/watchdog.last")"
+      else
+        echo "  watchdog has not run yet"
+      fi ;;
+    *) echo "usage: nexus watchdog on|off|status"; return 1 ;;
+  esac
+}
+
+# nexus doctor — the checks that matter after an outage or a reboot.
+doctor() {
+  local ok bad warn last bootlog
+  ok="$(c '32' '✓')"; bad="$(c '31' '✗')"; warn="$(c '33' '!')"
+  echo "nexus doctor"
+
+  if [ -f "$HOME/.termux/boot/nexus-wa.sh" ]; then
+    echo "$ok boot hook installed (~/.termux/boot/nexus-wa.sh)"
+  else
+    echo "$bad boot hook missing. Restart after a power cut will not start the bot. Fix: install -m 755 ~/nexus-wa/deploy/termux/boot-start.sh ~/.termux/boot/nexus-wa.sh"
+  fi
+  bootlog="$LOG_DIR/boot.log"
+  if [ -f "$bootlog" ]; then
+    echo "$ok boot hook last ran: $(grep -a 'boot script ran at' "$bootlog" | tail -1 | sed 's/boot script ran at //')"
+  else
+    echo "$warn boot hook has never run. Install the Termux:Boot app from F-Droid, open it once, and allow autostart."
+  fi
+
+  if running_pid >/dev/null; then
+    echo "$ok bot is running now (pid $(running_pid))"
+  else
+    echo "$bad bot is not running now"
+  fi
+  [ -f "$STOPFILE" ] && echo "$warn $(stop_reason). Nothing restarts it until: nexus start"
+
+  last=$(grep -a '^===== exited' "$LOG" 2>/dev/null | tail -1)
+  [ -n "$last" ] && echo "· last bot exit: $last"
+  grep -aq 'will not restart by itself' "$LOG" 2>/dev/null \
+    && echo "$bad the bot stopped itself (session taken over or unlinked). Read: nexus logs. Then: nexus start, or nexus pair if it was unlinked"
+
+  if [ -f "$DATA_DIR/watchdog.last" ]; then
+    echo "$ok watchdog last ran: $(cat "$DATA_DIR/watchdog.last")"
+  else
+    echo "$warn watchdog has not run yet. Install the Termux:API app, then: nexus watchdog on"
+  fi
+  if command -v termux-job-scheduler >/dev/null 2>&1; then
+    echo "$ok Termux:API job scheduler present"
+  else
+    echo "$bad Termux:API missing: install the Termux:API app and: pkg install termux-api"
+  fi
+
+  if grep -qE '^[[:space:]]*allow-external-apps[[:space:]]*=[[:space:]]*true' "$HOME/.termux/termux.properties" 2>/dev/null; then
+    echo "$ok allow-external-apps=true (MacroDroid can start the watchdog)"
+  else
+    echo "$warn allow-external-apps not set. It is set by: nexus watchdog on"
+  fi
+
+  echo ""
+  echo "Phone settings only you can change (Android hides these from Termux):"
+  echo "  · Settings → Apps → Termux, Termux:Boot, Termux:API → Battery → Unrestricted"
+  echo "  · Settings → Wi-Fi → Advanced → Keep Wi-Fi on during sleep → Always"
+  echo "  · Termux notification → keep it; run 'termux-wake-lock' once (nexus start does this)"
+  echo "  · Run 'bash ~/nexus-wa/deploy/termux/harden.sh' after every reboot if you use Shizuku"
+}
+
+
 # nexus update
 # Fetches the latest code from the branch's GitHub upstream, installs dependencies,
 # refreshes the nexus command, and restarts the bot if it was running.
@@ -440,6 +614,9 @@ case "${1:-}" in
   stop)    stop ;;
   restart) stop; sleep 1; start ;;
   update)  update_app ;;
+  ensure)  ensure ;;
+  doctor)  doctor ;;
+  watchdog) watchdog "${2:-status}" ;;
   status)  status ;;
   logs)    logs ;;
   pair)
@@ -456,6 +633,8 @@ nexus — control Nexus-WA on this phone
   nexus stop      stop
   nexus restart   restart
   nexus update    get the latest version from GitHub, install it, restart
+  nexus doctor    why it may not be running after an outage or reboot
+  nexus watchdog on|off|status   check every 15 min and start the bot if down
   nexus status    running? linked? memory? battery?
   nexus logs      follow the log
   nexus pair [number]   link a WhatsApp account (asks for the number)
