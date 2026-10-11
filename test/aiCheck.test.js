@@ -124,3 +124,10 @@ test('.ai check replies for every provider, even when some fail', async () => {
   assert.match(report, /✅ \*groq\*/);
   assert.match(report, /❌ \*openrouter\*[\s\S]*OPENROUTER_API_KEY/);
 });
+
+test('an empty reply is explained, not shown as raw JSON', () => {
+  const msg = explainProviderError('provider returned no content: {"id":"gen-1"}', null);
+  assert.match(msg, /answered with no text/);
+  assert.ok(!msg.includes('{"id"'), 'raw JSON must not reach the chat');
+  assert.match(explainProviderError('the model used its whole reply limit on hidden reasoning', null), /answered with no text/);
+});

@@ -60,6 +60,9 @@ export function explainProviderError(message = '', status = null) {
   if ((status && status >= 500) || /overloaded|temporarily unavailable|internal error/i.test(m)) {
     return 'the provider is having trouble on their side. Try again in a few minutes.';
   }
+  if (/returned no content|used its whole reply limit/i.test(m)) {
+    return 'the model answered with no text. Reasoning models can use the whole reply limit before writing anything, and the free router sometimes picks a model that returns nothing. Try again; the fallback will use the next provider.';
+  }
   if (/timed out|timeout|aborted/i.test(m)) {
     return 'the provider did not answer in time. Check the phone\'s internet connection, then try again.';
   }
@@ -122,7 +125,7 @@ export class AiClient {
    * about that provider alone. Never throws: the result says what went wrong.
    * @returns {Promise<{provider:string, model:string, ok:boolean, reply?:string, problem?:string, raw?:string, ms:number}>}
    */
-  async check(provider, { timeoutMs = 25_000 } = {}) {
+  async check(provider, { timeoutMs = 60_000 } = {}) {
     const key = this.config.keys?.[provider];
     const model = (provider === this.config.provider && this.config.model) || DEFAULT_MODEL[provider] || '';
     const started = Date.now();
@@ -138,7 +141,9 @@ export class AiClient {
     const link = { provider, key, model };
     const args = {
       messages: [{ role: 'user', content: 'Reply with the single word: OK' }],
-      maxTokens: 16,
+      // Reasoning models spend tokens on hidden thinking first, so a tiny
+      // budget comes back empty. This is enough for them to finish.
+      maxTokens: 400,
       temperature: 0,
       images: [],
     };
@@ -282,7 +287,14 @@ export class AiClient {
 
     return this.#handle(res, (json) => {
       const out = json?.choices?.[0]?.message?.content;
-      if (!out) throw new AiError(`provider returned no content: ${JSON.stringify(json).slice(0, 300)}`);
+      if (!out) {
+        if (json?.choices?.[0]?.finish_reason === 'length') {
+          throw new AiError(
+            'the model used its whole reply limit on hidden reasoning and wrote no answer. Try again, or pick a model that does not reason by default.'
+          );
+        }
+        throw new AiError(`provider returned no content: ${JSON.stringify(json).slice(0, 300)}`);
+      }
       return out;
     });
   }

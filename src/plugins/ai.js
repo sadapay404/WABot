@@ -122,7 +122,7 @@ async function askAi(ctx) {
     : parsed.question;
 
   await run(ctx, async (ai) => {
-    const answer = await ai.complete({ prompt, system: SYSTEM_BASE, maxTokens: 700 });
+    const answer = await ai.complete({ prompt, system: SYSTEM_BASE, maxTokens: 1500 });
     return `🤖 *AI's Answer*\n\n${answer}`;
   });
 }
@@ -141,15 +141,12 @@ async function aiCheck(ctx, rest) {
   const names = target === 'all' ? [...CHECK_PROVIDERS] : [target];
   if (target === 'all' && ai.config.keys?.openai) names.push('openai');
 
-  const lines = [];
-  for (const name of names) {
-    const r = await ai.check(name);
-    lines.push(
-      r.ok
-        ? `✅ *${r.provider}* (${r.model}) works. Reply: "${r.reply}" (${r.ms} ms)`
-        : `❌ *${r.provider}* (${r.model}) does not work.\nWhy: ${r.problem}${r.raw ? `\nProvider said: ${r.raw}` : ''}`
-    );
-  }
+  const results = await Promise.all(names.map((name) => ai.check(name)));
+  const lines = results.map((r) =>
+    r.ok
+      ? `✅ *${r.provider}* (${r.model}) works. Reply: "${r.reply}" (${r.ms} ms)`
+      : `❌ *${r.provider}* (${r.model}) does not work.\nWhy: ${r.problem}${r.raw ? `\nProvider said: ${r.raw}` : ''}`
+  );
   return ctx.reply(`🔎 *AI check*\n\n${lines.join('\n\n')}\n\nFix any ❌ line, then send .ai check again.`);
 }
 
