@@ -1,5 +1,20 @@
 import { normalizeJid } from './jid.js';
 
+/**
+ * A send that never settles (a half-open socket can do this) would hold the
+ * only send slot forever, and every reply after it would wait behind it.
+ * Bounding each send frees the slot.
+ */
+export const SEND_TIMEOUT_MS = 60_000;
+
+export function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+  });
+  return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
+}
+
 const DEFAULT_LOOP_THRESHOLD = 5;
 const MAX_LOOP_THRESHOLD = 25;
 const DEFAULT_LOOP_WINDOW_MS = 60_000;
@@ -298,7 +313,7 @@ export class OutboundQueue {
           `use ".panic" if this was unexpected.`,
       };
       this.#notifyBeforeSend(ownerJid, content);
-      await this.rawSendMessage(ownerJid, content);
+      await withTimeout(this.rawSendMessage(ownerJid, content), SEND_TIMEOUT_MS, 'volume alert');
     } catch (error) {
       this.logger.error(`outbound volume owner alert failed: ${error.message}`);
     }
@@ -324,13 +339,13 @@ export class OutboundQueue {
     this.allowOnce();
     const seconds = Math.ceil(this.loopWindowMs / 1_000);
     try {
-      await this.socket.sendMessage(ownerJid, {
+      await withTimeout(this.socket.sendMessage(ownerJid, {
         text:
           `🛑 Outbound loop breaker engaged.\n\n` +
           `Blocked similar message ${count} to ${destination} within ${seconds}s. ` +
           `Further sends are halted. Fix the source, then run ".panic resume" or restart Nexus-WA.\n` +
           `Message text is not included in this alert.`,
-      });
+      }), SEND_TIMEOUT_MS, 'loop-breaker alert');
     } catch (error) {
       this.logger.error(`loop breaker owner alert failed: ${error.message}`);
     }
@@ -378,9 +393,7 @@ export class OutboundQueue {
 
   async #run(item) {
     try {
-      if (this.typing && item.jid) await this.#simulateTyping(item.jid);
-      this.#notifyBeforeSend(item.jid, item.content);
-      const res = await item.task();
+      const res = await withTimeout(this.#deliver(item), SEND_TIMEOUT_MS, 'send');
       if (item.jid) {
         this.windows.set(item.jid, [...(this.windows.get(item.jid) || []), Date.now()]);
       }
@@ -394,6 +407,12 @@ export class OutboundQueue {
       this.logger.error(`send failed: ${err.message}`);
       item.reject(err);
     }
+  }
+
+  async #deliver(item) {
+    if (this.typing && item.jid) await this.#simulateTyping(item.jid);
+    this.#notifyBeforeSend(item.jid, item.content);
+    return item.task();
   }
 
   /** Human-ish pause: a short beat plus time proportional to length. */

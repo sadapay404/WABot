@@ -353,6 +353,8 @@ export class WhatsAppConnection {
         `state=${this.state}`,
         `state_since=${Math.floor(this.stateSince / 1000)}`,
         `last_frame=${Math.floor(this.lastFrameAt / 1000)}`,
+        `queue_halted=${this.queue?.halted ? this.queue.haltReason : 'no'}`,
+        `queue_queued=${this.queue ? this.queue.depth().queued : 0}`,
         '',
       ].join('\n');
       const tmp = `${this.heartbeatFile}.tmp`;

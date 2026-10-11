@@ -559,6 +559,10 @@ doctor() {
     else
       echo "$warn bot heartbeat is stale — the watchdog will restart the bot on its next check"
     fi
+    hb_halted=$(sed -n 's/^queue_halted=//p' "$HEARTBEAT" 2>/dev/null)
+    if [ -n "$hb_halted" ] && [ "$hb_halted" != "no" ]; then
+      echo "$warn replies are halted by the bot's safety stop ($hb_halted). Restart clears it: nexus restart"
+    fi
   fi
 
   last=$(grep -a '^===== exited' "$LOG" 2>/dev/null | tail -1)
