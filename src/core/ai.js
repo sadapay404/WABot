@@ -6,6 +6,7 @@
  *
  *   groq    OpenAI-compatible /chat/completions   (fast, free tier)
  *   openai  OpenAI-compatible /chat/completions
+ *   openrouter OpenAI-compatible; model openrouter/free picks a free model
  *   gemini  Google generateContent
  *
  * If no API key is configured the provider throws `AiNotConfigured`, and the
@@ -21,14 +22,17 @@
 const ENDPOINTS = {
   groq: 'https://api.groq.com/openai/v1/chat/completions',
   openai: 'https://api.openai.com/v1/chat/completions',
+  openrouter: 'https://openrouter.ai/api/v1/chat/completions',
 };
 
-const IMAGE_PROVIDERS = ['gemini', 'groq', 'openai'];
+const IMAGE_PROVIDERS = ['gemini', 'groq', 'openrouter', 'openai'];
 
 const DEFAULT_MODEL = {
   groq: 'llama-3.3-70b-versatile',
   openai: 'gpt-4o-mini',
   gemini: 'gemini-2.0-flash',
+  // Fixed on purpose: the free router picks a free model per request.
+  openrouter: 'openrouter/free',
 };
 
 export class AiNotConfigured extends Error {
@@ -124,7 +128,7 @@ export class AiClient {
   async complete({ prompt, system = null, chatKey = null, maxTokens = 800, temperature = 0.4, images = [] }) {
     const links = this.chain({ images: images.length > 0 });
     if (!links.length && images.length && this.configured()) {
-      throw new AiError('no configured provider can read images (use gemini, groq or openai)');
+      throw new AiError('no configured provider can read images (use gemini, groq, openrouter or openai)');
     }
     if (!links.length) throw new AiNotConfigured(this.provider);
     if (!prompt?.trim()) throw new AiError('empty prompt');
@@ -254,7 +258,7 @@ export class AiClient {
    */
   async transcribeAudio({ base64, mime = 'audio/ogg' }) {
     // Transcription is only wired for OpenAI-compatible endpoints (groq, openai).
-    const link = this.chain().find((l) => ENDPOINTS[l.provider]);
+    const link = this.chain().find((l) => l.provider === 'groq' || l.provider === 'openai');
     if (!link) throw new AiNotConfigured(this.provider);
 
     const base = ENDPOINTS[link.provider];

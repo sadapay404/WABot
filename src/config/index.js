@@ -49,10 +49,12 @@ function normalizeMode(raw) {
   return m;
 }
 
-const AI_PROVIDER_NAMES = ['groq', 'gemini', 'openai'];
+const AI_PROVIDER_NAMES = ['groq', 'gemini', 'openrouter', 'openai'];
+/** Order used when AI_PROVIDERS is not set. */
+const AI_DEFAULT_ORDER = ['gemini', 'groq', 'openrouter', 'openai'];
 
 /**
- * Parse AI_PROVIDERS="groq:1,gemini:2,openai:3" (lower number = tried first).
+ * Parse AI_PROVIDERS="gemini:1,groq:2,openrouter:3" (lower number = tried first).
  * Unknown names and duplicates are dropped. Without AI_PROVIDERS, the legacy
  * AI_PROVIDER becomes the first choice and the rest follow in the default order.
  */
@@ -66,7 +68,7 @@ export function parseAiProviders(list, legacy = '') {
     });
   } else {
     const first = String(legacy || '').trim().toLowerCase();
-    const names = [first, ...AI_PROVIDER_NAMES].filter((n, i, a) => AI_PROVIDER_NAMES.includes(n) && a.indexOf(n) === i);
+    const names = [first, ...AI_DEFAULT_ORDER].filter((n, i, a) => AI_PROVIDER_NAMES.includes(n) && a.indexOf(n) === i);
     order = names.map((provider, i) => ({ provider, priority: i + 1 }));
   }
   const valid = order.filter((e) => AI_PROVIDER_NAMES.includes(e.provider));
@@ -227,6 +229,7 @@ export function buildConfig(overrides = {}) {
       keys: {
         groq: process.env.GROQ_API_KEY || '',
         gemini: process.env.GEMINI_API_KEY || '',
+        openrouter: process.env.OPENROUTER_API_KEY || '',
         openai: process.env.OPENAI_API_KEY || '',
       },
     },

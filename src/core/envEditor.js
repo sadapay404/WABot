@@ -5,7 +5,7 @@ import { parseCommand } from './message.js';
 import { isUserJid, normalizeJid, phoneToJid } from './jid.js';
 import { captureAlertJid } from './alertRouting.js';
 
-const SECRET_KEYS = new Set(['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY']);
+const SECRET_KEYS = new Set(['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY']);
 const EDITABLE_KEYS = new Set([
   ...SECRET_KEYS,
   'AI_PROVIDER',
@@ -202,7 +202,7 @@ export class EnvEditor {
 
   status() {
     const ai = this.config.ai || {};
-    const keys = ['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY']
+    const keys = ['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY']
       .map((name) => `${name}: ${ai.keys?.[name.toLowerCase().replace('_api_key', '')] ? 'set (hidden)' : 'not set'}`);
     const alert = captureAlertJid(this.config, this.selfJid) || 'linked account self-chat';
     return [
@@ -221,7 +221,7 @@ export class EnvEditor {
     if (/[\0\r\n]/.test(text)) throw new Error('values must fit on one line');
     if (key === 'AI_PROVIDER') {
       const provider = text.toLowerCase();
-      if (!['groq', 'openai', 'gemini'].includes(provider)) throw new Error('provider must be groq, openai, or gemini');
+      if (!['groq', 'openai', 'gemini', 'openrouter'].includes(provider)) throw new Error('provider must be groq, gemini, openrouter, or openai');
       return provider;
     }
     if (key === 'AI_MODEL') {
@@ -247,7 +247,7 @@ export class EnvEditor {
   }
 
   #applyValue(key, value) {
-    if (key === 'GROQ_API_KEY' || key === 'OPENAI_API_KEY' || key === 'GEMINI_API_KEY') {
+    if (['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY'].includes(key)) {
       const provider = key.replace('_API_KEY', '').toLowerCase();
       this.config.ai.keys[provider] = value;
       process.env[key] = value;

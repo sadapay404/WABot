@@ -12,7 +12,7 @@ function ownerLabel(jid) {
   return phone ? `+${phone}` : jid;
 }
 
-const API_KEYS = new Set(['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY']);
+const API_KEYS = new Set(['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY']);
 
 export default {
   name: 'env',

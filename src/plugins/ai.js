@@ -32,7 +32,7 @@ async function run(ctx, build) {
 }
 
 
-const PROVIDER_NAMES = ['groq', 'gemini', 'openai'];
+const PROVIDER_NAMES = ['groq', 'gemini', 'openrouter', 'openai'];
 const MAX_CONTEXT = 50;
 const DAY_CAP_FALLBACK = 200;
 const COOLDOWN_FALLBACK_SEC = 15;
@@ -94,7 +94,7 @@ function renderProviders(ctx) {
   const cfg = ctx.config?.ai || {};
   const keys = cfg.keys || {};
   const sorted = [...(cfg.providers || [])].sort((a, b) => a.priority - b.priority);
-  if (!sorted.length) return 'No AI providers configured. Set AI_PROVIDERS in .env, e.g. groq:1,gemini:2.';
+  if (!sorted.length) return 'No AI providers configured. Set AI_PROVIDERS in .env, e.g. gemini:1,groq:2,openrouter:3.';
   const lines = sorted.map((e, i) =>
     `${i + 1}. ${e.provider} (priority ${e.priority}) ${keys[e.provider] ? '✓ key set' : '✗ no key, add ' + e.provider.toUpperCase() + '_API_KEY to .env'}`
   );
@@ -139,13 +139,13 @@ export default {
       name: 'aiprovider',
       aliases: ['aiorder'],
       description: 'Show or set AI provider priority (1 = tried first, the rest are fallbacks)',
-      usage: '.aiprovider  or  .aiprovider <groq|gemini|openai> <priority>',
+      usage: '.aiprovider  or  .aiprovider <groq|gemini|openrouter|openai> <priority>',
       ownerOnly: true,
       requires: [
         {
           index: 0,
           name: 'provider',
-          prompt: 'Which provider? Reply with groq, gemini or openai.',
+          prompt: 'Which provider? Reply with groq, gemini, openrouter or openai.',
           validate: (v) => (PROVIDER_NAMES.includes(String(v).trim().toLowerCase()) ? String(v).trim().toLowerCase() : null),
         },
         {
@@ -163,7 +163,7 @@ export default {
           const provider = String(ctx.args[0]).toLowerCase();
           const priority = Number(ctx.args[1]);
           if (!PROVIDER_NAMES.includes(provider) || !(priority >= 1)) {
-            return ctx.reply('usage: .aiprovider <groq|gemini|openai> <priority>');
+            return ctx.reply('usage: .aiprovider <groq|gemini|openrouter|openai> <priority>');
           }
           const next = (cfg.providers || []).filter((e) => e.provider !== provider);
           next.push({ provider, priority });

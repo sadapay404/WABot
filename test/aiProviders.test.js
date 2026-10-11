@@ -34,9 +34,51 @@ test('AI_PROVIDERS is sorted by priority, unknown and duplicate names dropped', 
   ]);
 });
 
-test('without AI_PROVIDERS the legacy AI_PROVIDER leads, the rest follow', () => {
-  assert.deepEqual(parseAiProviders('', 'openai').map((e) => e.provider), ['openai', 'groq', 'gemini']);
-  assert.deepEqual(parseAiProviders('', '').map((e) => e.provider), ['groq', 'gemini', 'openai']);
+test('without AI_PROVIDERS the default order is gemini, groq, openrouter, openai', () => {
+  assert.deepEqual(parseAiProviders('').map((e) => e.provider), ['gemini', 'groq', 'openrouter', 'openai']);
+  assert.deepEqual(parseAiProviders('', 'openai').map((e) => e.provider), ['openai', 'gemini', 'groq', 'openrouter']);
+});
+
+test('openrouter uses the fixed free router model and its endpoint', async () => {
+  const seen = [];
+  const ai = clientWith({
+    providers: parseAiProviders('gemini:1,groq:2,openrouter:3'),
+    keys: { gemini: '', groq: '', openrouter: 'or-key' },
+    fetchImpl: async (url, init) => {
+      seen.push({ url, body: JSON.parse(init.body), auth: init.headers.authorization });
+      return openAiReply('routed');
+    },
+  });
+  assert.equal(await ai.complete({ prompt: 'hi' }), 'routed');
+  assert.equal(seen[0].url, 'https://openrouter.ai/api/v1/chat/completions');
+  assert.equal(seen[0].body.model, 'openrouter/free');
+  assert.equal(seen[0].auth, 'Bearer or-key');
+});
+
+test('gemini failing falls through groq to openrouter in priority order', async () => {
+  const calls = [];
+  const ai = clientWith({
+    providers: parseAiProviders('gemini:1,groq:2,openrouter:3'),
+    keys: { gemini: 'x', groq: 'g', openrouter: 'or' },
+    fetchImpl: async (url) => {
+      calls.push(url);
+      if (url.includes('generativelanguage')) return failure(429);
+      if (url.includes('groq.com')) return failure(500);
+      return openAiReply('third try');
+    },
+  });
+  assert.equal(await ai.complete({ prompt: 'hi' }), 'third try');
+  assert.equal(calls.length, 3);
+  assert.match(calls[2], /openrouter\.ai/);
+});
+
+test('audio transcription never goes to openrouter', async () => {
+  const ai = clientWith({
+    providers: parseAiProviders('openrouter:1'),
+    keys: { openrouter: 'or' },
+    fetchImpl: async () => openAiReply('x'),
+  });
+  await assert.rejects(ai.transcribeAudio({ base64: 'AAAA' }), AiNotConfigured);
 });
 
 test('complete() falls back to the next provider when the first fails', async () => {
