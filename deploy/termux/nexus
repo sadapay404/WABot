@@ -652,7 +652,8 @@ update_app() {
   fi
 }
 
-case "${1:-}" in
+# Lower-case the command so "Restart" from a Tasker/MacroDroid argument works too.
+case "$(printf %s "${1:-}" | tr A-Z a-z)" in
   start)   start ;;
   stop)    stop ;;
   restart) stop; sleep 1; start ;;
