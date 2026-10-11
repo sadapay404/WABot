@@ -26,6 +26,9 @@ NODE_FLAGS="--disable-warning=ExperimentalWarning"
 # Written by `nexus stop`, removed by `nexus start`. While it exists, nothing
 # (boot hook, watchdog, supervisor) starts the bot again.
 STOPFILE="$DATA_DIR/nexus.stopped"
+# Written by the bot every 30s while it runs. ensure reads it to catch a bot
+# that is alive but wedged (it would otherwise keep its PID forever).
+HEARTBEAT="$DATA_DIR/heartbeat"
 WATCHDOG_JOB=4242
 WATCHDOG_SCRIPT="$APP_DIR/deploy/termux/watchdog.sh"
 
@@ -80,7 +83,7 @@ start() {
   # kills the wrong things. Recording the child PID is exact.
   local detach="nohup"
   command -v setsid >/dev/null 2>&1 && detach="setsid nohup"
-  rm -f "$STOPFILE"
+  rm -f "$STOPFILE" "$HEARTBEAT"
   $detach bash -c '
     APP_DIR="'"$APP_DIR"'"; PIDFILE="'"$PIDFILE"'"; STOPFILE="'"$STOPFILE"'"
     BOTPID="'"$BOTPIDFILE"'"; LOG="'"$LOG"'"
@@ -90,7 +93,7 @@ start() {
     while :; do
       started=$(date +%s)
       printf "\n===== start %s (attempt %d) =====\n" "$(date "+%F %T")" "$attempt" >>"$LOG"
-      node '"$NODE_FLAGS"' "$APP_DIR/src/index.js" --serve >>"$LOG" 2>&1 &
+      NEXUS_HEARTBEAT_FILE="'"$HEARTBEAT"'" node '"$NODE_FLAGS"' "$APP_DIR/src/index.js" --serve >>"$LOG" 2>&1 &
       node_pid=$!
       echo "$node_pid" > "$BOTPID"
       wait "$node_pid"
@@ -418,6 +421,33 @@ stop_reason() {
 
 # nexus ensure — start the bot only if it should be running and is not.
 # The boot hook and the watchdog both call this. A deliberate `nexus stop` wins.
+# A bot can stay alive while doing nothing useful: its event loop is stuck, or
+# its socket never recovered after a network drop. The bot writes a heartbeat
+# every 30s. If that is more than 5 minutes old, or a linked bot has been
+# offline for 20 minutes, kill it and let the supervisor start it again.
+heartbeat_check() {
+  local now ts state since bot reason=""
+  [ -f "$HEARTBEAT" ] || return 0
+  now=$(date +%s)
+  ts=$(sed -n 's/^ts=//p' "$HEARTBEAT" 2>/dev/null)
+  state=$(sed -n 's/^state=//p' "$HEARTBEAT" 2>/dev/null)
+  since=$(sed -n 's/^state_since=//p' "$HEARTBEAT" 2>/dev/null)
+  if [ -z "$ts" ] || [ $(( now - ts )) -gt 300 ]; then
+    reason="heartbeat stale ($(( now - ${ts:-0} ))s)"
+  elif [ "$state" != "open" ] && [ -n "$(linked_number)" ] && [ $(( now - ${since:-now} )) -gt 1200 ]; then
+    reason="offline for $(( (now - since) / 60 )) min (state=$state)"
+  fi
+  [ -n "$reason" ] || return 0
+  bot=$(cat "$BOTPIDFILE" 2>/dev/null)
+  echo "$(date '+%F %T') watchdog: restarting bot — $reason" >>"$LOG"
+  if [ -n "$bot" ] && kill -0 "$bot" 2>/dev/null; then
+    kill -TERM "$bot" 2>/dev/null
+    sleep 5
+    kill -0 "$bot" 2>/dev/null && kill -KILL "$bot" 2>/dev/null
+  fi
+  rm -f "$HEARTBEAT"
+}
+
 ensure() {
   if [ -f "$STOPFILE" ]; then
     echo "stopped — $(stop_reason). Start it with: nexus start"
@@ -431,6 +461,7 @@ ensure() {
   fi
   mkdir "$lock" 2>/dev/null || { echo "another check is already running"; return 0; }
   if running_pid >/dev/null; then
+    heartbeat_check
     echo "running"
   else
     echo "$(date '+%F %T') ensure: not running, starting" >>"$LOG"
@@ -521,6 +552,14 @@ doctor() {
     echo "$bad bot is not running now"
   fi
   [ -f "$STOPFILE" ] && echo "$warn $(stop_reason). Nothing restarts it until: nexus start"
+  if [ -f "$HEARTBEAT" ]; then
+    hb_ts=$(sed -n 's/^ts=//p' "$HEARTBEAT" 2>/dev/null); hb_state=$(sed -n 's/^state=//p' "$HEARTBEAT" 2>/dev/null)
+    if [ -n "$hb_ts" ] && [ $(( $(date +%s) - hb_ts )) -le 300 ]; then
+      echo "$ok bot heartbeat fresh (link: ${hb_state:-unknown})"
+    else
+      echo "$warn bot heartbeat is stale — the watchdog will restart the bot on its next check"
+    fi
+  fi
 
   last=$(grep -a '^===== exited' "$LOG" 2>/dev/null | tail -1)
   [ -n "$last" ] && echo "· last bot exit: $last"

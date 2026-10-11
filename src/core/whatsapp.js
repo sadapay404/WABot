@@ -32,6 +32,34 @@ async function baileys() {
 /** Exit code meaning "do not restart me": the supervisor stops, a human must act. */
 export const EXIT_DO_NOT_RESTART = 3;
 
+/**
+ * Liveness limits. Baileys pings the server about every 30s and the server
+ * answers, so inbound frames keep arriving on a healthy link. These limits only
+ * trip when the link is dead, which is what a Wi-Fi drop usually leaves behind:
+ * a socket that never reports `close`.
+ */
+export const VERSION_TIMEOUT_MS = 10_000;
+export const CONNECT_STALL_MS = 120_000;
+export const SILENCE_MS = 180_000;
+export const HEALTH_TICK_MS = 30_000;
+
+/**
+ * Decide whether the connection needs a nudge. Pure, so it can be tested.
+ * @returns {null|{action:'reconnect'|'schedule', reason:string}}
+ */
+export function livenessAction({ state, now, lastFrameAt, stateSince, awaitingLink = false, reconnectPending = false }) {
+  if (state === 'open' && now - lastFrameAt > SILENCE_MS) {
+    return { action: 'reconnect', reason: `no traffic from WhatsApp for ${Math.round((now - lastFrameAt) / 1000)}s` };
+  }
+  if (state === 'connecting' && !awaitingLink && now - stateSince > CONNECT_STALL_MS) {
+    return { action: 'reconnect', reason: `connection attempt stalled for ${Math.round((now - stateSince) / 1000)}s` };
+  }
+  if (state === 'closed' && !reconnectPending) {
+    return { action: 'schedule', reason: 'no reconnect was pending' };
+  }
+  return null;
+}
+
 export function classifyDisconnect(reason, DisconnectReason) {
   const D = DisconnectReason || {};
   // Guard first. Without it, `case D.loggedOut` degrades to `case undefined`
@@ -109,6 +137,28 @@ export class WhatsAppConnection {
     this.attempt = 0;
     this.stopped = false;
     this.listeners = new Map();
+    // 'idle' | 'connecting' | 'open' | 'closed'
+    this.state = 'idle';
+    this.stateSince = Date.now();
+    this.lastFrameAt = 0;
+    // Bumped whenever an attempt is abandoned, so a late-finishing connect()
+    // cannot create a second socket beside the one that replaced it.
+    this.generation = 0;
+    this.reconnectTimer = null;
+    this.healthTimer = null;
+    // True after a non-retryable failure. The health tick must not revive it.
+    this.halted = false;
+    // True while a fresh link is waiting for the user to scan or enter a code.
+    // That can take minutes, so the connect-stall check must not fire then.
+    this.awaitingLink = false;
+    // Optional. The health tick writes a small key=value file here so the
+    // Termux watchdog can notice a bot whose event loop has wedged.
+    this.heartbeatFile = process.env.NEXUS_HEARTBEAT_FILE || null;
+  }
+
+  #setState(state) {
+    this.state = state;
+    this.stateSince = Date.now();
   }
 
   on(event, fn) {
@@ -128,6 +178,9 @@ export class WhatsAppConnection {
   }
 
   async connect() {
+    const generation = ++this.generation;
+    this.#setState('connecting');
+    this.#startHealthTick();
     const B = await baileys();
     const { useMultiFileAuthState, makeWASocket, DisconnectReason, Browsers } = B;
 
@@ -137,13 +190,16 @@ export class WhatsAppConnection {
 
     const companionProfile = this.config.wa.companionProfile || 'web';
     if (companionProfile === 'smb_android' && state.creds?.me) {
-      throw new Error(
+      const err = new Error(
         'WA_COMPANION_PROFILE=smb_android only applies during a fresh link. ' +
           'Use a new WA_SESSION_DIR for the Business companion; the existing auth directory was not changed.'
       );
+      err.fatal = true; // a config error: retrying every minute would not help
+      throw err;
     }
 
     const version = await this.#version(B);
+    if (generation !== this.generation) return null; // superseded while awaiting
     const browser = connectionBrowser({ Browsers }, this.config);
 
     const socket = makeWASocket({
@@ -183,6 +239,12 @@ export class WhatsAppConnection {
     this.queue.attach();
 
     this.socket = socket;
+    this.lastFrameAt = Date.now();
+    // Baileys emits 'frame' for every decoded inbound frame. This is the real
+    // "is the link alive" signal.
+    socket.ws?.on?.('frame', () => {
+      this.lastFrameAt = Date.now();
+    });
     this.#wire(socket, DisconnectReason);
     this.logger.info(
       `connecting… (account platform: ${state.creds?.platform || 'not recorded'}; ` +
@@ -194,13 +256,110 @@ export class WhatsAppConnection {
   }
 
   async #version(B) {
+    // fetchLatestBaileysVersion has no timeout of its own. On a dead network it
+    // can hang indefinitely, and connect() would never create a socket.
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('timed out')), VERSION_TIMEOUT_MS);
+      timer.unref?.();
+    });
     try {
-      const { version, isLatest } = await B.fetchLatestBaileysVersion();
+      const { version, isLatest } = await Promise.race([B.fetchLatestBaileysVersion(), timeout]);
       this.logger.info(`wa web version ${version.join('.')} (latest=${isLatest})`);
       return version;
     } catch (err) {
       this.logger.warn(`could not fetch latest version (${err.message}); using library default`);
       return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * The only place that schedules a reconnect. A single timer means two drops
+   * can never create two sockets, and a failed connect() schedules another try
+   * instead of leaving the bot silently offline.
+   */
+  #scheduleReconnect(reason, { immediate = false } = {}) {
+    if (this.stopped) return;
+    if (this.reconnectTimer) return;
+    this.attempt++;
+    const delay = immediate ? 0 : backoffDelay(this.attempt);
+    this.logger.info(
+      `reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.attempt})${reason ? ` — ${reason}` : ''}`
+    );
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.stopped) return;
+      this.connect().catch((err) => {
+        this.logger.error(`reconnect failed: ${err.message}`);
+        this.#setState('closed');
+        if (err.fatal) this.halted = true;
+        else this.#scheduleReconnect('connect failed');
+      });
+    }, delay);
+    this.reconnectTimer.unref?.();
+  }
+
+  /**
+   * Abandon the current socket (or a hung connect attempt) and reconnect now.
+   * Used by the health tick. The old socket's close event is ignored as stale.
+   */
+  forceReconnect(reason) {
+    if (this.stopped) return;
+    this.logger.warn(`forcing reconnect: ${reason}`);
+    this.generation++; // abandon any connect() still awaiting
+    const socket = this.socket;
+    this.#setState('closed');
+    if (socket) {
+      try {
+        socket.end(new Error(reason));
+      } catch {
+        /* already gone */
+      }
+    }
+    this.#scheduleReconnect(reason, { immediate: true });
+  }
+
+  #startHealthTick() {
+    if (this.healthTimer || this.stopped) return;
+    this.healthTimer = setInterval(() => this.#healthTick(), HEALTH_TICK_MS);
+    this.healthTimer.unref?.();
+  }
+
+  #healthTick() {
+    if (this.stopped) return;
+    const now = Date.now();
+    this.#writeHeartbeat(now);
+    if (this.halted) return;
+    const verdict = livenessAction({
+      state: this.state,
+      now,
+      lastFrameAt: this.lastFrameAt,
+      stateSince: this.stateSince,
+      awaitingLink: this.awaitingLink,
+      reconnectPending: Boolean(this.reconnectTimer),
+    });
+    if (!verdict) return;
+    if (verdict.action === 'reconnect') this.forceReconnect(verdict.reason);
+    else this.#scheduleReconnect(verdict.reason);
+  }
+
+  #writeHeartbeat(now) {
+    if (!this.heartbeatFile) return;
+    try {
+      const body = [
+        `ts=${Math.floor(now / 1000)}`,
+        `state=${this.state}`,
+        `state_since=${Math.floor(this.stateSince / 1000)}`,
+        `last_frame=${Math.floor(this.lastFrameAt / 1000)}`,
+        '',
+      ].join('\n');
+      const tmp = `${this.heartbeatFile}.tmp`;
+      fs.writeFileSync(tmp, body);
+      fs.renameSync(tmp, this.heartbeatFile);
+    } catch (err) {
+      this.logger.warn(`heartbeat write failed: ${err.message}`);
     }
   }
 
@@ -209,6 +368,9 @@ export class WhatsAppConnection {
     let pairingRequested = false;
 
     socket.ev.on('connection.update', async (update) => {
+      // A socket we already replaced (forced reconnect) can still emit events.
+      // Acting on them would start a second connection beside the live one.
+      if (socket !== this.socket) return;
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
@@ -218,6 +380,7 @@ export class WhatsAppConnection {
         // A fresh account never reaches connection='open' until it has been
         // linked. Ask for the pairing code as soon as Baileys emits its first
         // QR (the websocket is ready to accept the link-code request then).
+        this.awaitingLink = true;
         if (shouldRequestPairingCode({
           qr,
           pairingNumber: this.config.wa.pairingNumber,
@@ -231,6 +394,9 @@ export class WhatsAppConnection {
 
       if (connection === 'open') {
         this.attempt = 0;
+        this.#setState('open');
+        this.awaitingLink = false;
+        this.lastFrameAt = Date.now();
         const me = normalizeJid(socket.user?.id || '');
         this.logger.info(`connected as ${me}`);
         this.#emit('open', { jid: me, pushName: socket.user?.name || null });
@@ -241,6 +407,7 @@ export class WhatsAppConnection {
         const reason = lastDisconnect?.error?.output?.statusCode;
         const action = classifyDisconnect(reason, DisconnectReason);
         this.logger.warn(`connection closed (code=${reason ?? 'none'}) → ${action}`);
+        this.#setState('closed');
         this.#emit('close', { reason, action });
 
         if (this.stopped) return;
@@ -264,12 +431,7 @@ export class WhatsAppConnection {
           setTimeout(() => process.exit(EXIT_DO_NOT_RESTART), 1500);
           return;
         }
-        this.attempt++;
-        const delay = backoffDelay(this.attempt);
-        this.logger.info(`reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.attempt})`);
-        setTimeout(() => {
-          if (!this.stopped) this.connect().catch((e) => this.logger.error(e.message));
-        }, delay);
+        this.#scheduleReconnect();
       }
     });
 
@@ -304,6 +466,10 @@ export class WhatsAppConnection {
 
   async stop() {
     this.stopped = true;
+    clearTimeout(this.reconnectTimer);
+    clearInterval(this.healthTimer);
+    this.reconnectTimer = null;
+    this.healthTimer = null;
     try {
       await this.socket?.end?.();
     } catch {

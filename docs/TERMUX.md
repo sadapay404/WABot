@@ -138,6 +138,20 @@ and neither is restarted automatically: `nexus stop` (you stopped it), and exit
 code 3 (another device took the session, or WhatsApp unlinked it). Both are shown
 by `nexus doctor`. Run `nexus start` to bring it back.
 
+A WiFi drop can also leave the connection half-open: Termux keeps running, but
+WhatsApp never answers, and nothing exits. The bot now handles that itself:
+
+- If no data arrives from WhatsApp for 3 minutes, it drops the connection and
+  reconnects. A connection attempt that hangs for 2 minutes is retried the same way.
+- Every 30 seconds it writes a heartbeat file (~/.nexus-wa/heartbeat). Every
+  15 minutes the watchdog checks it. If the heartbeat is more than 5 minutes old,
+  or a linked bot has been offline for 20 minutes, the watchdog restarts the bot.
+  Each restart is written to the log as "watchdog: restarting bot — ...".
+
+You do not need to do anything for this. If it still happens, send the output of
+`tail -50 ~/.nexus-wa/logs/nexus.log` and `nexus doctor`. Remove any pairing code or
+token before you send them.
+
 Check the whole setup any time with:
 
     nexus doctor
