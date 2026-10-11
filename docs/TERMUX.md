@@ -130,8 +130,9 @@ running and is not, so they never fight:
 2. **Android job watchdog** (Termux:API) runs `nexus ensure` every 15 minutes,
    even after Android has killed Termux. It survives reboots. Turn it on with
    `nexus watchdog on`. `nexus start` also turns it on.
-3. **MacroDroid watchdog** (optional, independent of Termux's own job) sends the
-   same check through Termux's RUN_COMMAND intent every 15 minutes.
+3. **MacroDroid macros** (see "MacroDroid macros" below) run the same check every
+   15 minutes, after each reboot, and on Wi-Fi reconnect. They use the Termux:Tasker
+   plugin.
 
 The bot itself keeps reconnecting when WiFi drops. It only stops for two reasons,
 and neither is restarted automatically: `nexus stop` (you stopped it), and exit
@@ -172,30 +173,54 @@ reason, when the watchdog last ran, and what is still missing.
 - Optional, for the MacroDroid watchdog: install **MacroDroid** and grant it
   Termux's permission (see the steps below).
 
-### MacroDroid watchdog (optional second layer)
+### MacroDroid macros (the restart-proof layer)
 
-This runs even if Termux is gone, because it starts Termux through its command
-interface. It needs `allow-external-apps=true` in `~/.termux/termux.properties`,
-which `nexus watchdog on` sets for you.
+This is the setup that worked on the phone. It uses the Termux:Tasker plugin, so
+it needs the **Termux:Tasker** app from F-Droid and the Termux setup from Step 0
+below. Make three macros in MacroDroid. Each one runs the same `nexus` command
+with a different argument.
 
-1. Grant permission: Android Settings → Apps → MacroDroid → Permissions → More
-   permissions (or Additional permissions) → **Run commands in Termux
-   environment**. Allow it.
-2. In MacroDroid, create a new macro named **Nexus watchdog**.
-3. Trigger: a repeating timer, every **15 minutes**. (In MacroDroid this is a
-   time-based trigger that repeats; choose the option that repeats, not "once".)
-4. Action: **Send Intent**. Fill in:
-   - Action: `com.termux.RUN_COMMAND`
-   - Package: `com.termux`
-   - Class: `com.termux.app.RunCommandService`
-   - Extra, String: `com.termux.RUN_COMMAND_PATH` = `/data/data/com.termux/files/home/nexus-wa/deploy/termux/watchdog.sh`
-   - Extra, String: `com.termux.RUN_COMMAND_WORKDIR` = `/data/data/com.termux/files/home`
-   - Extra, Boolean: `com.termux.RUN_COMMAND_BACKGROUND` = true
-5. Save and turn it on. Wait 15 minutes, then run `nexus doctor` and check
-   that "watchdog last ran" is recent.
+**Step 0, once, in Termux:** run `nexus update`, then this line (it is safe to
+run again):
 
-Both layers call the same `nexus ensure`, and a lock stops them starting the bot
-twice.
+    mkdir -p ~/.termux/tasker && ln -sf ~/nexus-wa/deploy/termux/nexus ~/.termux/tasker/nexus && chmod +x ~/nexus-wa/deploy/termux/nexus && grep -q '^allow-external-apps *= *true' ~/.termux/termux.properties 2>/dev/null || echo 'allow-external-apps = true' >> ~/.termux/termux.properties; termux-reload-settings
+
+**Macro 1: Nexus safety check (every 15 minutes)**
+
+1. Trigger: **Time → Repeat** every **15 minutes**. Choose the repeating option, not "once".
+2. Action: **Plugin → Tasker / Locale plugin → Termux:Tasker**. Choose **nexus**.
+3. Argument: `ensure`
+4. Save and turn it on.
+
+`ensure` does nothing if the bot is running and healthy. If the bot is stopped
+(not on purpose), it starts it. If the bot is wedged, it restarts it.
+
+**Macro 2: Nexus after reboot**
+
+1. Trigger: **Device Boot**.
+2. Action: **Wait / Delay**, 90 seconds. This lets Wi-Fi come up first.
+3. Action: **Plugin → Tasker / Locale plugin → Termux:Tasker**. Choose **nexus**.
+4. Argument: `ensure`
+5. Save and turn it on.
+
+Termux:Boot also starts the bot after a reboot. This macro is a second copy, in
+case Termux:Boot was not allowed to run.
+
+**Macro 3: Nexus Wi-Fi reconnect (the one that worked)**
+
+Keep it as it is: Wi-Fi connected, 20-second wait, Termux:Tasker → nexus →
+`restart`. Leave the argument as `restart` for now. After you have confirmed the
+bot recovers on its own (see below), you can change this argument to `ensure`.
+
+**Checking it works**
+
+Wait 15 minutes after you set up Macro 1, then run `nexus doctor`. The line
+"last safety check (any trigger)" should show a time from the last 15 minutes.
+If it is old or missing, the macro is not firing: check that it is turned on and
+that Termux:Tasker is installed.
+
+Every trigger calls the same `nexus ensure`, and a lock stops two of them from
+starting the bot twice.
 
 ## Keep Android from killing it
 

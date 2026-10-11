@@ -449,6 +449,10 @@ heartbeat_check() {
 }
 
 ensure() {
+  # Every trigger (boot, job scheduler, MacroDroid) lands here, so this file
+  # shows whether the safety net is actually firing. Doctor prints it.
+  mkdir -p "$DATA_DIR"
+  date '+%F %T' >"$DATA_DIR/ensure.last"
   if [ -f "$STOPFILE" ]; then
     echo "stopped — $(stop_reason). Start it with: nexus start"
     return 0
@@ -570,6 +574,11 @@ doctor() {
   grep -aq 'will not restart by itself' "$LOG" 2>/dev/null \
     && echo "$bad the bot stopped itself (session taken over or unlinked). Read: nexus logs. Then: nexus start, or nexus pair if it was unlinked"
 
+  if [ -f "$DATA_DIR/ensure.last" ]; then
+    echo "$ok last safety check (any trigger): $(cat "$DATA_DIR/ensure.last")"
+  else
+    echo "$warn no safety check has run yet. Set up the MacroDroid timer (docs/TERMUX.md)"
+  fi
   if [ -f "$DATA_DIR/watchdog.last" ]; then
     echo "$ok watchdog last ran: $(cat "$DATA_DIR/watchdog.last")"
   else
