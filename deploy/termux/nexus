@@ -5,6 +5,7 @@
 #   nexus start     start in the background (restarts itself if it crashes)
 #   nexus stop      stop it
 #   nexus restart   stop, then start
+#   nexus update    fetch the latest from GitHub, install it, restart
 #   nexus status    is it running, linked, how much memory
 #   nexus logs      follow the log (Ctrl-C to stop watching)
 #   nexus pair [number]   link a WhatsApp account and make it the owner
@@ -363,10 +364,82 @@ Mode is $(grep -E '^NEXUS_MODE=' "$APP_DIR/.env" | tail -1 | cut -d= -f2-) (set 
 EOF
 }
 
+# Put the current deploy/termux/nexus in place of the installed command.
+# Written to a temp file and renamed, so the running script is never overwritten.
+install_command() {
+  local prefix target tmp
+  prefix="${PREFIX:-/data/data/com.termux/files/usr}"
+  target="$prefix/bin/nexus"
+  tmp="$prefix/bin/.nexus.new.$$"
+  if cp "$APP_DIR/deploy/termux/nexus" "$tmp" 2>/dev/null && chmod 755 "$tmp" && mv -f "$tmp" "$target"; then
+    echo "  $(c '32' '✓') nexus command refreshed"
+  else
+    rm -f "$tmp"
+    echo "  $(c '33' '!') could not refresh the nexus command. Run once: cp ~/nexus-wa/deploy/termux/nexus \$PREFIX/bin/nexus"
+  fi
+}
+
+# nexus update
+# Fetches the latest code from the branch's GitHub upstream, installs dependencies,
+# refreshes the nexus command, and restarts the bot if it was running.
+# Changes nothing if the checkout has local edits or local commits.
+update_app() {
+  [ -d "$APP_DIR/.git" ] || { echo "$(c '31' '✗') $APP_DIR is not a git checkout — reinstall with setup.sh"; exit 1; }
+  cd "$APP_DIR" || exit 1
+
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    echo "$(c '31' '✗') $APP_DIR has local changes. Nothing was changed."
+    echo "  review them with: cd ~/nexus-wa && git status"
+    exit 1
+  fi
+
+  local upstream
+  upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) \
+    || { echo "$(c '31' '✗') this branch has no GitHub upstream configured"; exit 1; }
+
+  echo "$(c '33' '·') checking GitHub ($upstream)"
+  git fetch --prune --quiet || { echo "$(c '31' '✗') could not reach GitHub — check the phone's connection"; exit 1; }
+
+  local counts ahead behind current latest
+  counts=$(git rev-list --left-right --count 'HEAD...@{u}') \
+    || { echo "$(c '31' '✗') could not compare with GitHub"; exit 1; }
+  read -r ahead behind <<<"$counts"
+  current=$(git rev-parse --short HEAD)
+  latest=$(git rev-parse --short '@{u}')
+
+  if [ "$ahead" -gt 0 ]; then
+    echo "$(c '31' '✗') this branch has commits that are not on GitHub. Update stopped; nothing was changed."
+    exit 1
+  fi
+  if [ "$behind" -eq 0 ]; then
+    echo "$(c '32' '✓') already on the latest version ($current). Nothing to do."
+    exit 0
+  fi
+
+  echo "$(c '33' '·') updating $current → $latest ($behind new commit(s))"
+  git pull --ff-only --quiet || { echo "$(c '31' '✗') fast-forward failed. Nothing was reset."; exit 1; }
+
+  echo "$(c '33' '·') installing dependencies (this can take a few minutes)"
+  npm ci --omit=optional --no-audit --fund=false --loglevel=error \
+    || { echo "$(c '31' '✗') dependency install failed. The bot was NOT restarted."; exit 1; }
+
+  install_command
+  echo "$(c '32' '✓') updated to $(git rev-parse --short HEAD)"
+
+  if running_pid >/dev/null; then
+    echo "$(c '33' '·') restarting the bot"
+    stop >/dev/null 2>&1
+    start
+  else
+    echo "  the bot was not running. Start it with: nexus start"
+  fi
+}
+
 case "${1:-}" in
   start)   start ;;
   stop)    stop ;;
   restart) stop; sleep 1; start ;;
+  update)  update_app ;;
   status)  status ;;
   logs)    logs ;;
   pair)
@@ -382,6 +455,7 @@ nexus — control Nexus-WA on this phone
   nexus start     start in the background
   nexus stop      stop
   nexus restart   restart
+  nexus update    get the latest version from GitHub, install it, restart
   nexus status    running? linked? memory? battery?
   nexus logs      follow the log
   nexus pair [number]   link a WhatsApp account (asks for the number)

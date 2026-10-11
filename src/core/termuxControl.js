@@ -181,6 +181,8 @@ export class TermuxControl {
       return { ok: false, reason: 'Code updated, but dependency installation failed. The bot was not restarted.' };
     }
 
+    this.refreshNexusCommand(status);
+
     try {
       const current = (await this.run('git', ['rev-parse', '--short', 'HEAD'], {
         cwd: status.appDir,
@@ -190,6 +192,30 @@ export class TermuxControl {
       return { ...status, current: shortHash(current), updated: true };
     } catch {
       return { ...status, updated: true };
+    }
+  }
+
+  /**
+   * The installed `nexus` command is a copy of deploy/termux/nexus, so a pull
+   * alone leaves it old. Swap it in atomically (temp file + rename) so the
+   * running supervisor script is never overwritten. Failure is logged, not fatal.
+   */
+  refreshNexusCommand(status) {
+    const source = path.join(status.appDir, 'deploy', 'termux', 'nexus');
+    const tmp = `${status.nexusPath}.new-${this.pid}`;
+    try {
+      fs.copyFileSync(source, tmp);
+      fs.chmodSync(tmp, 0o755);
+      fs.renameSync(tmp, status.nexusPath);
+      return true;
+    } catch (error) {
+      try {
+        fs.rmSync(tmp, { force: true });
+      } catch {
+        /* nothing to clean up */
+      }
+      this.logger.warn(`could not refresh the nexus command: ${error.message}`);
+      return false;
     }
   }
 

@@ -323,6 +323,7 @@ from that chat on your phone.
 nexus status     # running? linked? memory? battery?
 nexus logs       # follow the log (Ctrl-C stops watching, not the bot)
 nexus restart
+nexus update   # fetch the latest version from GitHub, install it, and restart
 nexus stop
 nexus pair       # reprint the pairing code
 nexus pair --new 923001234567   # switch the bot to another WhatsApp number
