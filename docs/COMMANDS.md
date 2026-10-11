@@ -19,6 +19,7 @@ category in WhatsApp, use `.help` followed by `admin`, `ai`, `automation`, `medi
 |---|---|---|---|
 | `.agenda` | — | Owner | View pending sends or decide missed jobs |
 | `.ai` | `.gpt` | Anyone | Ask the configured AI; `.ai <n> <question>` adds the last n messages of the chat as context |
+| `.ai check` | — | Owner | Test each AI provider and explain any that does not work |
 | `.aiprovider` | `.aiorder` | Owner | Show or set AI provider priority (1 = tried first, the rest are fallbacks) |
 | `.antidelete` | `.ad`, `.deleted`, `.deletes` | Owner | Toggle deletion capture/alerts and review history |
 | `.archive` | `.media` | Owner | List locally archived media |
@@ -105,6 +106,21 @@ day in total (default 200, resets at midnight UTC). The owner skips the cooldown
 Do not use it for private content unless you are comfortable sending the prompt
 and context to your configured AI provider. Public use needs `NEXUS_MODE=live`;
 in observe mode the bot does not answer anyone but the owner.
+
+### `.ai check` — test each AI provider (owner)
+**Access:** Owner · **Category:** AI
+
+```text
+.ai check
+.ai check gemini
+.ai check groq
+.ai check openrouter
+```
+
+Sends one small test message to each provider (or the one you name) and replies
+with a line for each: ✅ it works, or ❌ with the reason in plain words and the
+provider's own error text. The key is never shown. Use it after changing a key or
+a model, or when `.ai` answers from a fallback.
 
 ### `.aiprovider` — AI provider order
 **Alias:** `.aiorder` · **Access:** Owner · **Category:** AI

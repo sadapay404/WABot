@@ -27,13 +27,47 @@ const ENDPOINTS = {
 
 const IMAGE_PROVIDERS = ['gemini', 'groq', 'openrouter', 'openai'];
 
+// Checked against each provider's docs. Groq retired llama-3.3-70b-versatile on
+// free and developer tiers (Aug 2026); Google shut down gemini-2.0-flash (Jun 2026).
+// If one of these is retired, `.ai check` says so; change it here or set AI_MODEL.
 const DEFAULT_MODEL = {
-  groq: 'llama-3.3-70b-versatile',
+  groq: 'openai/gpt-oss-120b',
   openai: 'gpt-4o-mini',
-  gemini: 'gemini-2.0-flash',
+  gemini: 'gemini-3.8-flash',
   // Fixed on purpose: the free router picks a free model per request.
   openrouter: 'openrouter/free',
 };
+
+/**
+ * Turn a raw provider failure into a plain reason. Pure, so it can be tested.
+ * @param {string} message  the provider's own error text
+ * @param {number|null} status  HTTP status, when there was one
+ */
+export function explainProviderError(message = '', status = null) {
+  const m = String(message);
+  if (status === 401 || /api key not valid|invalid api key|invalid_api_key|api_key_invalid|unauthori[sz]ed/i.test(m)) {
+    return 'the key was rejected. It is wrong, was revoked, or was pasted incompletely. Make a new key in the provider console and set it again.';
+  }
+  if (status === 403 || /permission denied|forbidden|access denied/i.test(m)) {
+    return 'the key works, but this account is not allowed to use this model or region. Check the provider console.';
+  }
+  if (status === 404 || (/model/i.test(m) && /not found|does not exist|no longer available|decommissioned|shut ?down|retired/i.test(m))) {
+    return 'the model name is retired or not available to this account, so the bot needs a newer model name.';
+  }
+  if (status === 429 || /quota|rate limit|resource_exhausted|too many requests/i.test(m)) {
+    return 'the free quota or rate limit is used up. Wait a while, or check the usage page of the provider.';
+  }
+  if ((status && status >= 500) || /overloaded|temporarily unavailable|internal error/i.test(m)) {
+    return 'the provider is having trouble on their side. Try again in a few minutes.';
+  }
+  if (/timed out|timeout|aborted/i.test(m)) {
+    return 'the provider did not answer in time. Check the phone\'s internet connection, then try again.';
+  }
+  if (/fetch failed|enotfound|econnrefused|eai_again|network/i.test(m)) {
+    return 'the phone could not reach the provider. Check the internet connection and DNS.';
+  }
+  return `unexpected provider error: ${m.slice(0, 120)}`;
+}
 
 export class AiNotConfigured extends Error {
   constructor(provider) {
@@ -81,6 +115,49 @@ export class AiClient {
       model:
         (e.provider === this.config.provider && this.config.model) || DEFAULT_MODEL[e.provider],
     }));
+  }
+
+  /**
+   * Make one small call to one provider, with no fallback, so the result is
+   * about that provider alone. Never throws: the result says what went wrong.
+   * @returns {Promise<{provider:string, model:string, ok:boolean, reply?:string, problem?:string, raw?:string, ms:number}>}
+   */
+  async check(provider, { timeoutMs = 25_000 } = {}) {
+    const key = this.config.keys?.[provider];
+    const model = (provider === this.config.provider && this.config.model) || DEFAULT_MODEL[provider] || '';
+    const started = Date.now();
+    if (!key) {
+      return {
+        provider, model, ok: false, ms: 0,
+        problem: `no API key in .env. Add ${provider.toUpperCase()}_API_KEY to .env and restart.`,
+      };
+    }
+    if (provider !== 'gemini' && !ENDPOINTS[provider]) {
+      return { provider, model, ok: false, ms: 0, problem: 'this provider cannot be checked.' };
+    }
+    const link = { provider, key, model };
+    const args = {
+      messages: [{ role: 'user', content: 'Reply with the single word: OK' }],
+      maxTokens: 16,
+      temperature: 0,
+      images: [],
+    };
+    try {
+      const call = provider === 'gemini' ? this.#gemini(link, args) : this.#openAiCompatible(link, args);
+      const text = await Promise.race([
+        call,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timed out')), timeoutMs).unref?.()),
+      ]);
+      return { provider, model, ok: true, reply: String(text).trim().slice(0, 60), ms: Date.now() - started };
+    } catch (err) {
+      // The key must never reach the chat, even if a provider echoes it back.
+      const raw = String(err.message || err).split(key).join('[key]').slice(0, 200);
+      return {
+        provider, model, ok: false, ms: Date.now() - started,
+        problem: explainProviderError(raw, err.status ?? null),
+        raw,
+      };
+    }
   }
 
   /** Name of the highest-priority configured provider. */
