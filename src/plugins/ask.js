@@ -301,7 +301,7 @@ function formatContactChoices(query, matches) {
   return [
     `*${title} for “${query}”*`,
     ...rows.map((item, index) => `${index + 1}. ${item.label}${item.phone ? ` (+${item.phone})` : ''}`),
-    'Reply with a number from this list, or send the full saved name/phone number.',
+    'Reply with a number from this list to continue your .ask request.',
   ].join('\n');
 }
 
