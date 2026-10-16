@@ -55,6 +55,35 @@ test('remote API-key entry writes atomically, redacts the value, and updates AI 
   }
 });
 
+test('Cloudflare image account and token can be configured without showing either value', async () => {
+  const { dir, config, editor, file } = fixture();
+  const originalToken = process.env.CLOUDFLARE_API_TOKEN;
+  const originalAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
+  try {
+    editor.setValue('CLOUDFLARE_ACCOUNT_ID', 'a1b2c3d4e5f6');
+    assert.equal(config.imageGen.accountId, 'a1b2c3d4e5f6');
+    editor.startSecret({ ownerJid: OWNER, chatJid: OWNER, key: 'CLOUDFLARE_API_TOKEN' });
+    await editor.consumePending({
+      msg: { sender: OWNER, jid: OWNER, text: 'cf-private-token', upsertType: 'notify', isGroup: false },
+      socket: { async sendMessage() {} },
+      isOwner: true,
+    });
+    assert.equal(config.imageGen.apiToken, 'cf-private-token');
+    assert.match(editor.status(), /Cloudflare image account: set \(hidden\)/);
+    assert.match(editor.status(), /Image generation: ready/);
+    assert.doesNotMatch(editor.status(), /a1b2c3d4e5f6|cf-private-token/);
+    assert.match(fs.readFileSync(file, 'utf8'), /CLOUDFLARE_API_TOKEN=/);
+    editor.unsetValue('CLOUDFLARE_API_TOKEN');
+    assert.equal(config.imageGen.apiToken, '');
+  } finally {
+    if (originalToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = originalToken;
+    if (originalAccount === undefined) delete process.env.CLOUDFLARE_ACCOUNT_ID;
+    else process.env.CLOUDFLARE_ACCOUNT_ID = originalAccount;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a linked self-chat prompt echo is not mistaken for the API key', async () => {
   const { dir, editor, file } = fixture();
   try {

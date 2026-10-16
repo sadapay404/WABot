@@ -521,7 +521,7 @@ That does a real push-then-pull and tells you which setting is wrong if it fails
 safe double-stop. The previous supervisor smoke test booted with
 `ready · 34 command(s) · 5 session(s)`. The current no-connection dry-run
 registry, including `.agenda`, selected-chat `.ask`, `.env`, and Termux controls,
-reports 40 commands across 17 plugin files.
+reports 55 commands across 22 plugin files.
 
 **Not verified:** Termux itself. This sandbox is Linux, not Android, so
 `pkg install`, `termux-wake-lock`, `Termux:Boot` autostart, and Android's

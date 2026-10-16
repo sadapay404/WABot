@@ -197,15 +197,17 @@ export class Dispatcher {
       const firstArg = String(parsed.args?.[0] || '').toLowerCase();
       // Outgoing messages normally remain inert: that is the loop-prevention
       // boundary. The narrow built-in exception is a newly sent `.ai`/`.gpt`
-      // question (including deliberate `.ai <n>` context) or `.calc` from the
-      // linked account. Owner-only AI administration remains controller-only.
+      // question (including deliberate `.ai <n>` context), `.calc`, or one
+      // explicit `.imagine` prompt from the linked account. Owner-only AI
+      // administration remains controller-only.
       const selfIssuedAi = Boolean(
         msg.isBot &&
         !isSelfChat &&
         this.config.isLive &&
         parsed.args.length &&
         ((candidate?.name === 'ai' && !['-check-', '-blist-', '-wlist-'].includes(firstArg)) ||
-          candidate?.name === 'calc')
+          candidate?.name === 'calc' ||
+          candidate?.name === 'imagine')
       );
       if (msg.isBot && !isSelfChat) {
         if (!selfIssuedAi) return;

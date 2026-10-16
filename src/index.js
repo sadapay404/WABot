@@ -49,6 +49,7 @@ import { SessionBackup } from './core/backup.js';
 import { RemoteVault } from './core/remoteVault.js';
 import { NoteStore } from './core/notes.js';
 import { AiClient } from './core/ai.js';
+import { ImageGenerationClient } from './core/imageGeneration.js';
 import { OutboundQueue } from './core/outboundQueue.js';
 import { LogBuffer } from './core/logBuffer.js';
 import { HostControl } from './core/hostControl.js';
@@ -302,6 +303,7 @@ async function main() {
   const triggers = new Triggers({ db, logger });
   const presenceLog = new PresenceLog({ db, logger });
   const ai = new AiClient({ config, logger });
+  const imageGenerator = new ImageGenerationClient({ config, logger });
 
   // Plugins.
   const plugins = new PluginLoader({ dir: path.join(config.root, 'src', 'plugins'), logger });
@@ -418,7 +420,7 @@ async function main() {
     config, logger, db, startedAt,
     registry, contacts, cache, mediaStore, messageInbox, notes, audit, webhooks, triggers,
     presenceLog, profileWatch, groupWatch, editWatch, antiDelete, viewOnce,
-    scheduler, scheduleWizard, reconnectCatchup, ai, askContext, chatContext, statusFeed, prompts, envEditor, backup, vault, hostControl, plugins, dispatcher, queue, logs, connection,
+    scheduler, scheduleWizard, reconnectCatchup, ai, imageGenerator, askContext, chatContext, statusFeed, prompts, envEditor, backup, vault, hostControl, plugins, dispatcher, queue, logs, connection,
     selfJid,
     // Kill-switch: the only thing that can stop outbound instantly.
     safety: {
@@ -673,6 +675,7 @@ function allStats(app, dispatcher) {
     media: app.mediaStore?.stats(),
     notes: app.notes?.summary(),
     ai: { provider: app.ai?.provider, configured: app.ai?.configured(), ...app.ai?.stats },
+    imageGeneration: { configured: app.imageGenerator?.configured(), ...app.imageGenerator?.stats },
   };
 }
 

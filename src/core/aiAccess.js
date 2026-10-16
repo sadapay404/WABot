@@ -12,6 +12,18 @@ export const PUBLIC_AI_POLICY = Object.freeze({
   perSenderDailyLimit: 10,
 });
 
+/**
+ * Workers AI image requests consume a finite free daily allocation. Keep their
+ * limits much tighter than text AI, source-controlled, and shared with the
+ * same persistent AI blocklist. They intentionally need no panel variables.
+ */
+export const IMAGE_GENERATION_POLICY = Object.freeze({
+  senderCooldownSec: 45,
+  dailyLimit: 30,
+  perSenderDailyLimit: 3,
+  ownerDailyLimit: 20,
+});
+
 /** Mild replies for a deliberately blocked AI request. */
 export const BLOCKED_AI_REPLIES = Object.freeze([
   '🤖 Nice try. The AI is taking a coffee break from this number.',
@@ -34,7 +46,17 @@ function quotaState(config) {
   const day = new Date().toISOString().slice(0, 10);
   let state = quotaStates.get(key);
   if (!state || state.day !== day) {
-    state = { day, owner: 0, public: 0, publicBySender: new Map(), lastAskAt: new Map() };
+    state = {
+      day,
+      owner: 0,
+      public: 0,
+      publicBySender: new Map(),
+      lastAskAt: new Map(),
+      imageOwner: 0,
+      imagePublic: 0,
+      imagePublicBySender: new Map(),
+      lastImageAt: new Map(),
+    };
     quotaStates.set(key, state);
   }
   return state;
@@ -141,8 +163,64 @@ export async function authorizeAiRequest(ctx, { publicRequest = true } = {}) {
   return quota;
 }
 
+/**
+ * Authorise a Cloudflare image request. It uses the same live-mode/public and
+ * blocklist rules as `.ai`, then a smaller source-controlled image allowance.
+ * `charge:false` performs the access/blocklist check without burning a request
+ * when the controller has not configured Cloudflare yet.
+ */
+export async function authorizeImageGeneration(ctx, { charge = true } = {}) {
+  if (!publicAiAllowed(ctx)) return { allowed: false };
+  if (!ctx?.isOwner && isAiBlocked(ctx?.db, [ctx?.sender, ctx?.msg?.senderAlt])) {
+    const reply = BLOCKED_AI_REPLIES[Math.floor(Math.random() * BLOCKED_AI_REPLIES.length)];
+    await ctx.reply(reply);
+    return { allowed: false, blocked: true };
+  }
+  if (!charge) return { allowed: true };
+
+  const state = quotaState(ctx?.config);
+  const sender = String(ctx?.sender || ctx?.jid || '');
+  const now = Date.now();
+  if (ctx?.isOwner || ctx?.isSelfIssued) {
+    if (state.imageOwner >= IMAGE_GENERATION_POLICY.ownerDailyLimit) {
+      return {
+        allowed: false,
+        notice: `🎨 Owner image daily limit reached (${IMAGE_GENERATION_POLICY.ownerDailyLimit}). It resets at midnight UTC.`,
+      };
+    }
+  } else {
+    const cooldownMs = IMAGE_GENERATION_POLICY.senderCooldownSec * 1_000;
+    const usedBySender = state.imagePublicBySender.get(sender) || 0;
+    if (
+      (state.lastImageAt.get(sender) || 0) + cooldownMs > now ||
+      state.imagePublic >= IMAGE_GENERATION_POLICY.dailyLimit ||
+      usedBySender >= IMAGE_GENERATION_POLICY.perSenderDailyLimit
+    ) {
+      return { allowed: false };
+    }
+  }
+
+  // Keep image generation inside the ordinary provider-backed AI allowance as
+  // well, so it cannot become a route around the controller's daily AI cap.
+  const general = takeAiQuota(ctx);
+  if (!general.allowed) {
+    if (general.notice) await ctx.reply(general.notice);
+    return general;
+  }
+
+  if (ctx?.isOwner || ctx?.isSelfIssued) {
+    state.imageOwner += 1;
+  } else {
+    state.lastImageAt.set(sender, now);
+    state.imagePublic += 1;
+    state.imagePublicBySender.set(sender, (state.imagePublicBySender.get(sender) || 0) + 1);
+  }
+  return { allowed: true };
+}
+
 export default {
   PUBLIC_AI_POLICY,
+  IMAGE_GENERATION_POLICY,
   BLOCKED_AI_REPLIES,
   aiUserJid,
   isAiBlocked,
@@ -153,4 +231,5 @@ export default {
   publicAiAllowed,
   takeAiQuota,
   authorizeAiRequest,
+  authorizeImageGeneration,
 };

@@ -12,7 +12,13 @@ function ownerLabel(jid) {
   return phone ? `+${phone}` : jid;
 }
 
-const API_KEYS = new Set(['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY']);
+const API_KEYS = new Set([
+  'GROQ_API_KEY',
+  'OPENAI_API_KEY',
+  'GEMINI_API_KEY',
+  'OPENROUTER_API_KEY',
+  'CLOUDFLARE_API_TOKEN',
+]);
 
 export default {
   name: 'env',
@@ -61,7 +67,7 @@ export default {
       const value = ctx.args.slice(2).join(' ').trim();
       if (API_KEYS.has(rawKey)) {
         if (value) {
-          return ctx.reply('For safety, do not put an API key in the command. Use `.env set GROQ_API_KEY` and send the key as your next private message instead.');
+          return ctx.reply(`For safety, do not put an API key in the command. Use \`.env set ${rawKey}\` and send the key as your next private message instead.`);
         }
         const prompt = [
           `*Enter ${rawKey}*`,
@@ -80,7 +86,7 @@ export default {
         }
       }
       if (!value) {
-        return ctx.reply('Usage: `.env set AI_PROVIDER groq` | `.env set AI_MODEL <model-id>` | `.env set AI_MAX_HISTORY 12` | `.env set CAPTURE_ALERT_JID <number>`');
+        return ctx.reply('Usage: `.env set AI_PROVIDER groq` | `.env set AI_MODEL <model-id>` | `.env set AI_MAX_HISTORY 12` | `.env set CLOUDFLARE_ACCOUNT_ID <id>` | `.env set CAPTURE_ALERT_JID <number>`');
       }
       try {
         const key = editor.setValue(rawKey, value);
@@ -104,7 +110,9 @@ export default {
       '`.env status` — show approved settings; secrets remain hidden.',
       '`.env set AI_PROVIDER groq|openai|gemini`',
       '`.env set GROQ_API_KEY` — then send the key as the next private message.',
-      'Public `.ai`, quoted `.ai`, and the linked-account `.ai <n>` behavior are built into live mode; no public-AI environment variables are needed.',
+      '`.env set CLOUDFLARE_ACCOUNT_ID <id>` — enable the account half of `.imagine`.',
+      '`.env set CLOUDFLARE_API_TOKEN` — then send the Workers AI token as the next private message.',
+      'Public `.ai`, quoted `.ai`, linked-account `.ai <n>`, and `.imagine` behavior are source-controlled in live mode; their limits are not panel variables.',
       '`.env unset GROQ_API_KEY` — remove a saved key.',
       '`.env owner add <number>` — authorize the linked account or another controller.',
       'Only approved AI and owner settings can be changed; arbitrary environment variables are blocked.',

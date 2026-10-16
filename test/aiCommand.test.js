@@ -37,9 +37,19 @@ async function setup() {
       return input.images?.length ? 'I see the quoted image.' : 'Hi there';
     },
   };
+  const imageGenerator = {
+    configured: () => true,
+    async generate() {
+      return {
+        bytes: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+        mimetype: 'image/jpeg',
+        ext: 'jpg',
+      };
+    },
+  };
   const chatContext = new ChatContext({ db });
   const dispatcher = new Dispatcher({ plugins, config, logger: quiet, db });
-  dispatcher.bot = { ai, chatContext, contacts: null, selfJid: MAIN };
+  dispatcher.bot = { ai, imageGenerator, chatContext, contacts: null, selfJid: MAIN };
   dispatcher.trackSocket(socket);
 
   const send = async (text, {
@@ -115,6 +125,13 @@ test('linked main account can issue simple and cached-history .ai in all groups 
   await send('.ai new history replay', { jid: GROUP, fromMe: true, id: 'history-append', upsertType: 'append' });
   assert.equal(calls.length, callsBeforeReplay);
   assert.equal(socket.outbox.length, repliesBeforeReplay);
+});
+
+test('linked main account can issue one .imagine prompt in a group', async () => {
+  const { socket, send } = await setup();
+  await send('.imagine a paper lantern floating over a quiet lake', { jid: GROUP, fromMe: true, id: 'self-imagine' });
+  assert.equal(socket.outbox.at(-1).kind, 'image');
+  assert.match(socket.outbox.at(-1).caption, /paper lantern/);
 });
 
 test('linked main account can use .calc in another chat without opening normal outgoing commands', async () => {

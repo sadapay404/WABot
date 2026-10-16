@@ -1,6 +1,6 @@
 # Command reference
 
-A sorted, practical reference for the 54 WhatsApp commands currently loaded by
+A sorted, practical reference for the 55 WhatsApp commands currently loaded by
 Nexus-WA. Examples assume the default `.` prefix (`NEXUS_PREFIX` can change it).
 Replace names, numbers, IDs, and messages with your own. **Commands that schedule
 or send messages can cause real WhatsApp sends in live mode; test with a safe
@@ -44,6 +44,7 @@ category in WhatsApp, use `.help` followed by `admin`, `ai`, `automation`, `medi
 | `.edits` | `.edited` | Owner | Review edited messages |
 | `.env` | — | Owner | Change approved AI settings/owners privately |
 | `.forget` | `.reset` | Owner | Clear this chat’s in-memory AI history |
+| `.imagine` | `.image`, `.img`, `.draw` | Anyone in live mode | Generate a fresh image from an explicit text prompt |
 | `.forward` | `.fwd` | Owner | Show a cached message in the current chat |
 | `.groups` | `.grouplog` | Owner | Review recent group membership changes |
 | `.health` | `.info`, `.runtime` | Owner | Runtime health: mode, uptime, sessions, queue, anti-delete |
@@ -142,8 +143,8 @@ message IDs are deduplicated. The linked main account cannot run `.ai -check-`,
 
 Use these only from the private spare-controller chat. A blocked participant
 gets one random mild sarcastic preset instead of a provider-backed AI result.
-The block applies to `.ai`, `.gpt`, quoted-message AI, and the provider-backed
-part of `.calc`; strictly local arithmetic in `.calc` still works. The list is
+The block applies to `.ai`, `.gpt`, quoted-message AI, `.imagine`/`.image`, and
+the provider-backed part of `.calc`; strictly local arithmetic in `.calc` still works. The list is
 stored in the local database, not `.env`.
 
 ### `.ai -check-` — test each AI provider (owner)
@@ -379,11 +380,15 @@ text marked “Draft (not sent)”; copy/edit/send it yourself.
 .env set AI_MODEL <provider-model-id>
 .env set AI_MAX_HISTORY 12
 .env set AI_ASK_MAX_CHARS 60000
+.env set CLOUDFLARE_ACCOUNT_ID <account-id>
+.env set CLOUDFLARE_API_TOKEN
 .env set CAPTURE_ALERT_JID 15551234567
 .env set GROQ_API_KEY
 .env set OPENAI_API_KEY
 .env set GEMINI_API_KEY
 .env unset OPENAI_API_KEY
+.env unset CLOUDFLARE_API_TOKEN
+.env unset CLOUDFLARE_ACCOUNT_ID
 .env unset AI_PROVIDER
 .env unset AI_MODEL
 .env unset CAPTURE_ALERT_JID
@@ -393,19 +398,20 @@ text marked “Draft (not sent)”; copy/edit/send it yourself.
 ```
 
 Only approved settings can be changed. `AI_MAX_HISTORY` accepts 2–40 and
-`AI_ASK_MAX_CHARS` accepts 4,000–100,000. Public AI, quoted-message AI, and
-linked-main `.ai <n>` are source-controlled live-mode behavior; their fixed
-public safeguards do not need `.env` entries and cannot be remotely changed.
-`CAPTURE_ALERT_JID` must be a WhatsApp user number/JID, not a group. Unsetting
-`AI_PROVIDER` resets it to `groq`; unsetting other non-secret settings
-clears/resets that setting. The last configured owner cannot be removed.
+`AI_ASK_MAX_CHARS` accepts 4,000–100,000. Public AI, quoted-message AI,
+linked-main `.ai <n>`, and `.imagine` safeguards are source-controlled live-mode
+behavior; their limits are not panel variables. `CAPTURE_ALERT_JID` must be a
+WhatsApp user number/JID, not a group. `CLOUDFLARE_ACCOUNT_ID` is the required
+account identifier for image generation. Unsetting `AI_PROVIDER` resets it to
+`groq`; unsetting other non-secret settings clears/resets that setting. The last
+configured owner cannot be removed.
 
-**API keys are entered separately; never put a key in the command.** For
-example, send `.env set GROQ_API_KEY`, then send the actual key alone as your
-next plain-text message in the same private chat, within two minutes. The bot
-does not echo/cache/log it; WhatsApp still retains your sent message, so delete
-it locally afterward if you do not want it in chat history. Send `.env cancel`
-to abort the pending entry.
+**API tokens are entered separately; never put one in the command.** For
+example, send `.env set GROQ_API_KEY` or `.env set CLOUDFLARE_API_TOKEN`, then
+send the actual value alone as your next plain-text message in the same private
+chat, within two minutes. The bot does not echo/cache/log it; WhatsApp still
+retains your sent message, so delete it locally afterward if you do not want it
+in chat history. Send `.env cancel` to abort the pending entry.
 
 ### `.forget` — clear this chat’s AI memory
 **Alias:** `.reset` · **Access:** Owner · **Category:** AI
@@ -416,6 +422,30 @@ to abort the pending entry.
 
 Clears the current chat’s in-memory `.ai` history. It does not erase the local
 message cache or previous messages in WhatsApp.
+
+### `.imagine` — generate a fresh image from text
+**Aliases:** `.image`, `.img`, `.draw` · **Access:** Anyone in `NEXUS_MODE=live` · **Category:** AI
+
+```text
+.imagine a tiny astronaut watering flowers on the moon
+.image a cinematic rainy street in Peshawar at night
+```
+
+Creates one new image from the explicit prompt using Cloudflare Workers AI's
+fixed FLUX.1 Schnell model, then sends that image directly to the current chat.
+It sends **only the prompt** to Cloudflare; generated image bytes are not put in
+the local media archive. It requires both `CLOUDFLARE_ACCOUNT_ID` and
+`CLOUDFLARE_API_TOKEN`, which the controller sets privately with `.env`.
+
+Cloudflare's Free plan provides a daily allocation; there is no paid-provider
+fallback. To keep a public group from spending that allocation, the command has
+a fixed 45-second public cooldown, 3 images per public sender/day, 30 public
+images/day, and 20 controller/linked-main images/day (UTC). The normal public
+AI allowance also applies. The persistent AI blocklist covers this command, so
+a blocked number receives the same mild block response as for `.ai`.
+
+The linked main account can deliberately send a normal `.imagine <prompt>` in a
+direct chat or group; replayed/history deliveries are ignored and deduplicated.
 
 ### `.forward` — show a cached message by ID
 **Alias:** `.fwd` · **Access:** Owner · **Category:** Productivity
@@ -776,11 +806,15 @@ preserved when they are on persistent storage.
 .env set AI_MODEL <provider-model-id>
 .env set AI_MAX_HISTORY 12
 .env set AI_ASK_MAX_CHARS 60000
+.env set CLOUDFLARE_ACCOUNT_ID <account-id>
+.env set CLOUDFLARE_API_TOKEN
 .env set CAPTURE_ALERT_JID 15551234567
 .env set GROQ_API_KEY
 .env set OPENAI_API_KEY
 .env set GEMINI_API_KEY
 .env unset OPENAI_API_KEY
+.env unset CLOUDFLARE_API_TOKEN
+.env unset CLOUDFLARE_ACCOUNT_ID
 .env unset AI_PROVIDER
 .env unset AI_MODEL
 .env unset CAPTURE_ALERT_JID
@@ -790,19 +824,20 @@ preserved when they are on persistent storage.
 ```
 
 Only approved settings can be changed. `AI_MAX_HISTORY` accepts 2–40 and
-`AI_ASK_MAX_CHARS` accepts 4,000–100,000. Public AI, quoted-message AI, and
-linked-main `.ai <n>` are source-controlled live-mode behavior; their fixed
-public safeguards do not need `.env` entries and cannot be remotely changed.
-`CAPTURE_ALERT_JID` must be a WhatsApp user number/JID, not a group. Unsetting
-`AI_PROVIDER` resets it to `groq`; unsetting other non-secret settings
-clears/resets that setting. The last configured owner cannot be removed.
+`AI_ASK_MAX_CHARS` accepts 4,000–100,000. Public AI, quoted-message AI,
+linked-main `.ai <n>`, and `.imagine` safeguards are source-controlled live-mode
+behavior; their limits are not panel variables. `CAPTURE_ALERT_JID` must be a
+WhatsApp user number/JID, not a group. `CLOUDFLARE_ACCOUNT_ID` is the required
+account identifier for image generation. Unsetting `AI_PROVIDER` resets it to
+`groq`; unsetting other non-secret settings clears/resets that setting. The last
+configured owner cannot be removed.
 
-**API keys are entered separately; never put a key in the command.** For
-example, send `.env set GROQ_API_KEY`, then send the actual key alone as your
-next plain-text message in the same private chat, within two minutes. The bot
-does not echo/cache/log it; WhatsApp still retains your sent message, so delete
-it locally afterward if you do not want it in chat history. Send `.env cancel`
-to abort the pending entry.
+**API tokens are entered separately; never put one in the command.** For
+example, send `.env set GROQ_API_KEY` or `.env set CLOUDFLARE_API_TOKEN`, then
+send the actual value alone as your next plain-text message in the same private
+chat, within two minutes. The bot does not echo/cache/log it; WhatsApp still
+retains your sent message, so delete it locally afterward if you do not want it
+in chat history. Send `.env cancel` to abort the pending entry.
 
 ### `.forget` — clear this chat’s AI memory
 **Alias:** `.reset` · **Access:** Owner · **Category:** AI
@@ -813,6 +848,30 @@ to abort the pending entry.
 
 Clears the current chat’s in-memory `.ai` history. It does not erase the local
 message cache or previous messages in WhatsApp.
+
+### `.imagine` — generate a fresh image from text
+**Aliases:** `.image`, `.img`, `.draw` · **Access:** Anyone in `NEXUS_MODE=live` · **Category:** AI
+
+```text
+.imagine a tiny astronaut watering flowers on the moon
+.image a cinematic rainy street in Peshawar at night
+```
+
+Creates one new image from the explicit prompt using Cloudflare Workers AI's
+fixed FLUX.1 Schnell model, then sends that image directly to the current chat.
+It sends **only the prompt** to Cloudflare; generated image bytes are not put in
+the local media archive. It requires both `CLOUDFLARE_ACCOUNT_ID` and
+`CLOUDFLARE_API_TOKEN`, which the controller sets privately with `.env`.
+
+Cloudflare's Free plan provides a daily allocation; there is no paid-provider
+fallback. To keep a public group from spending that allocation, the command has
+a fixed 45-second public cooldown, 3 images per public sender/day, 30 public
+images/day, and 20 controller/linked-main images/day (UTC). The normal public
+AI allowance also applies. The persistent AI blocklist covers this command, so
+a blocked number receives the same mild block response as for `.ai`.
+
+The linked main account can deliberately send a normal `.imagine <prompt>` in a
+direct chat or group; replayed/history deliveries are ignored and deduplicated.
 
 ### `.forward` — show a cached message by ID
 **Alias:** `.fwd` · **Access:** Owner · **Category:** Productivity

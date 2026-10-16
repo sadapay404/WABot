@@ -1,6 +1,6 @@
 # Nexus-WA command quick reference
 
-This is the compact reference for the **54-command** Nexus-WA build. Commands use the `.` prefix shown below. In observe mode, replies are limited to the configured owner; commands that could send a message remain subject to the outbound safety controls.
+This is the compact reference for the **55-command** Nexus-WA build. Commands use the `.` prefix shown below. In observe mode, replies are limited to the configured owner; commands that could send a message remain subject to the outbound safety controls.
 
 **Access:** **Owner** means the sender must be a phone-number JID in `OWNER_JIDS`. **Anyone** means the command is not owner-only. Public `.ai` replies are built into live mode; fixed safeguards are described below.
 
@@ -36,6 +36,7 @@ This is the compact reference for the **54-command** Nexus-WA build. Commands us
 | `.edits` | `.edited` | Owner | Review edited messages |
 | `.env` | — | Owner | Change approved AI settings/owners privately |
 | `.forget` | `.reset` | Owner | Clear this chat’s in-memory AI history |
+| `.imagine` | `.image`, `.img`, `.draw` | Anyone in live mode | Generate a fresh image from a text prompt (Cloudflare Workers AI) |
 | `.forward` | `.fwd` | Owner | Show a cached message in the current chat |
 | `.groups` | `.grouplog` | Owner | Review recent group membership changes |
 | `.health` | `.info`, `.runtime` | Owner | Runtime health: mode, uptime, sessions, queue, anti-delete |
@@ -73,6 +74,7 @@ This is the compact reference for the **54-command** Nexus-WA build. Commands us
 - `.md`, `.where`, `.file`, `.docxray`, `.videoxray`, `.audioxray`, `.qr`, `.fingerprint`, `.timeline`, and `.clean` process only the replied file locally—no AI/upload is involved. GPS or camera details appear only if the shared file still contains them.
 - **`.status`** lists statuses. Use **`.health`** for bot/runtime health.
 - In live mode, public `.ai` works in DMs/groups without `PUBLIC_AI_*` or `SELF_AI_COMMANDS` settings. It sends only the question, or exactly one quoted text/caption/image when invoked as a reply; public users cannot request cached history.
+- Use `.imagine <prompt>` (aliases `.image`, `.img`, `.draw`) to make one fresh image. It requires the controller to set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` privately; it sends only the prompt to Cloudflare Workers AI and does not archive the generated image locally. Public use is limited to 3 images/sender/day and 30 images/day; the AI blocklist also applies.
 - The linked main account may use `.ai <question>` and `.ai <n> <question>` in any direct chat/group. Normal outgoing text remains ignored; replayed commands are deduplicated. The spare controller can use `.ai -blist- <number>` / `.ai -wlist- <number>` privately to manage the persistent AI blocklist.
 - `.calc <equation>` evaluates safe arithmetic locally. Algebra, word equations, and `.calc <equation> --process` use the configured AI; its label is `Equation Solved--Calc`.
 - On Kerit, set `ALLOW_LIVE_WITHOUT_TELEGRAM=true` only with the spare controller number in `OWNER_JIDS`. Set `NEXUS_HOST=kerit` only for a Git checkout; after `.update`, use the panel **Restart** button.

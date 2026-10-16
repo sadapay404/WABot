@@ -21,7 +21,7 @@ cp .env.example .env      # leave NEXUS_MODE=dry-run for now
 
 npm run preview           # interactive console, ZERO WhatsApp connection
 npm run dashboard         # headless + web dashboard on :3000
-npm test                  # 203 tests
+npm test                  # 294 tests
 ```
 
 In the preview console try:
@@ -84,7 +84,7 @@ will ask you for a card even though every guide says it will not.
 
 ### Commands
 
-40 commands across 17 plugin files. `.help` prints the live list; everything
+55 commands across 22 plugin files. `.help` prints the live list; everything
 below is generated from it. See the full [sorted command reference](docs/COMMANDS.md)
 for every subcommand, alias, option, and example. **owner** means it is refused
 unless the sender is in `OWNER_JIDS`.
@@ -141,11 +141,12 @@ guaranteed without live account testing.
 | `.receive <phone> [count]` / `.recieve unread [max]` | owner | inspect cached messages privately; unread status is chat-level only and no explicit read-receipt API is called |
 | `.digest [hours]` | owner | what happened while you were away |
 
-**AI** — needs `GROQ_API_KEY`, `GEMINI_API_KEY` or `OPENAI_API_KEY`
+**AI** — chat/vision needs a configured text-provider key; image generation uses Cloudflare Workers AI
 
 | Command | Access | What |
 |---|---|---|
 | `.ai <prompt>` | anyone | ask the model, with per-chat memory |
+| `.imagine <prompt>` | anyone in live mode | create one new image through Cloudflare Workers AI; requires `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` |
 | `.ask chats` / `.ask <number|phone> <count|date filter> ... <question>` | owner | ask only about explicitly selected cached direct chats; phone/email/phrase redaction is available before provider transmission |
 | `.summarize [n]` | owner | summarise recent messages in this chat |
 | `.vision [instruction]` | owner | describe or OCR an attached image |

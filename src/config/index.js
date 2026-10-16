@@ -238,6 +238,14 @@ export function buildConfig(overrides = {}) {
         openai: process.env.OPENAI_API_KEY || '',
       },
     },
+
+    // Image output uses Cloudflare Workers AI rather than the text/vision
+    // provider chain above. Both values are required; no paid fallback or
+    // surprise provider is used when they are absent.
+    imageGen: {
+      accountId: String(process.env.CLOUDFLARE_ACCOUNT_ID || '').trim(),
+      apiToken: process.env.CLOUDFLARE_API_TOKEN || '',
+    },
   };
 
   return cfg;
