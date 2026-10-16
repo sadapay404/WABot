@@ -37,30 +37,66 @@ const MAX_CONTEXT = 50;
 const DAY_CAP_FALLBACK = 200;
 const COOLDOWN_FALLBACK_SEC = 15;
 
-/** Per-sender cooldown and a daily cap, both in memory. Owner is exempt from cooldown. */
-const lastAskAt = new Map();
-let dailyCount = { day: '', used: 0 };
+/**
+ * Public AI is intentionally a separate opt-in from live mode. Quotas are kept
+ * in memory: a restart clears them, but they still prevent one group member
+ * from turning the linked personal account into a high-volume responder.
+ */
+const quotaStates = new WeakMap();
+const fallbackQuotaConfig = {};
 
-/** @returns {string|null} reason to refuse, or null after recording the use */
-function takeQuota(ctx) {
+function quotaState(config) {
+  const key = config && typeof config === 'object' ? config : fallbackQuotaConfig;
   const day = new Date().toISOString().slice(0, 10);
-  if (dailyCount.day !== day) dailyCount = { day, used: 0 };
+  let state = quotaStates.get(key);
+  if (!state || state.day !== day) {
+    state = { day, owner: 0, public: 0, publicBySender: new Map(), lastAskAt: new Map() };
+    quotaStates.set(key, state);
+  }
+  return state;
+}
 
-  const cap = ctx.config?.ai?.dailyLimit ?? DAY_CAP_FALLBACK;
-  if (dailyCount.used >= cap) {
-    return `🤖 Daily AI limit reached (${cap} questions). It resets at midnight UTC.`;
+/** True only when the explicit public AI policy permits this non-owner request. */
+function publicAiAllowed(ctx) {
+  if (ctx.isOwner) return true;
+  const ai = ctx.config?.ai || {};
+  if (ctx.isSelfIssued) {
+    return Boolean(ctx.config?.isLive && ai.selfCommands && (!ctx.isGroup || ai.publicGroups));
+  }
+  return Boolean(ctx.config?.isLive && ai.publicEnabled && (!ctx.isGroup || ai.publicGroups));
+}
+
+/**
+ * @returns {{allowed:boolean, notice?:string}}. Public throttle/cap rejections
+ * are silent so a malicious command flood cannot make the account send more.
+ */
+function takeQuota(ctx) {
+  const state = quotaState(ctx.config);
+  const ai = ctx.config?.ai || {};
+
+  if (ctx.isOwner || ctx.isSelfIssued) {
+    const cap = ai.dailyLimit ?? DAY_CAP_FALLBACK;
+    if (state.owner >= cap) {
+      return { allowed: false, notice: `🤖 Owner AI daily limit reached (${cap}). It resets at midnight UTC.` };
+    }
+    state.owner += 1;
+    return { allowed: true };
   }
 
-  if (!ctx.isOwner) {
-    const cooldownMs = (ctx.config?.ai?.senderCooldownSec ?? COOLDOWN_FALLBACK_SEC) * 1_000;
-    const sender = String(ctx.sender || ctx.jid);
-    const waitMs = (lastAskAt.get(sender) || 0) + cooldownMs - Date.now();
-    if (waitMs > 0) return `🤖 Please wait ${Math.ceil(waitMs / 1_000)}s before asking again.`;
-    lastAskAt.set(sender, Date.now());
-  }
+  const sender = String(ctx.sender || ctx.jid);
+  const now = Date.now();
+  const cooldownMs = (ai.publicSenderCooldownSec ?? COOLDOWN_FALLBACK_SEC) * 1_000;
+  if ((state.lastAskAt.get(sender) || 0) + cooldownMs > now) return { allowed: false };
 
-  dailyCount.used += 1;
-  return null;
+  const globalCap = ai.publicDailyLimit ?? 100;
+  const senderCap = ai.publicPerSenderDailyLimit ?? 10;
+  const senderUsed = state.publicBySender.get(sender) || 0;
+  if (state.public >= globalCap || senderUsed >= senderCap) return { allowed: false };
+
+  state.lastAskAt.set(sender, now);
+  state.public += 1;
+  state.publicBySender.set(sender, senderUsed + 1);
+  return { allowed: true };
 }
 
 /** `.ai 5 what did he say` -> { count: 5, question }. A bare number is a usage error. */
@@ -103,14 +139,26 @@ function renderProviders(ctx) {
 
 /** The question path: `.ai <question>` or `.ai <n> <question>`. */
 async function askAi(ctx) {
+  if (!publicAiAllowed(ctx)) return; // fail closed and do not advertise a public bot
+
   const parsed = parseAiArgs(ctx.args || []);
   if (parsed.error) return ctx.reply(parsed.error);
   if (!parsed.question) {
     return ctx.reply(`usage: .ai <question>\nor: .ai <n> <question> (uses the last n messages of this chat, 1–${MAX_CONTEXT})`);
   }
 
-  const limited = takeQuota(ctx);
-  if (limited) return ctx.reply(limited);
+  // A public request must never upload unrelated chat history to an AI provider.
+  // The owner may explicitly request local context; everyone else gets only
+  // their text after `.ai`.
+  if (!ctx.isOwner && parsed.count) {
+    return ctx.reply('For privacy, public AI accepts only `.ai <question>` without chat-history context.');
+  }
+
+  const quota = takeQuota(ctx);
+  if (!quota.allowed) {
+    if (quota.notice) return ctx.reply(quota.notice);
+    return;
+  }
 
   let rows = [];
   if (parsed.count) {
@@ -255,7 +303,7 @@ export default {
     },
     {
       name: 'vision',
-      aliases: ['describe', 'ocr'],
+      aliases: ['describe', 'ocr', 'visual'],
       description: 'Describe or read text from an attached image (put the command in its caption)',
       usage: '.vision [instruction] (image caption)',
       ownerOnly: true,

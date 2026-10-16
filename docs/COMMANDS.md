@@ -18,7 +18,7 @@ category in WhatsApp, use `.help` followed by `admin`, `ai`, `automation`, `medi
 | Command | Aliases | Access | Purpose |
 |---|---|---|---|
 | `.agenda` | — | Owner | View pending sends or decide missed jobs |
-| `.ai` | `.gpt` | Anyone | Ask the configured AI; `.ai <n> <question>` adds the last n messages of the chat as context |
+| `.ai` | `.gpt` | Anyone (explicit public opt-in) | Ask the configured AI; public users can use `.ai <question>`, while the owner can use `.ai <n> <question>` for selected chat context |
 | `.ai -check-` | — | Owner | Test each AI provider and explain any that does not work |
 | `.aiprovider` | `.aiorder` | Owner | Show or set AI provider priority (1 = tried first, the rest are fallbacks) |
 | `.antidelete` | `.ad`, `.deleted`, `.deletes` | Owner | Toggle deletion capture/alerts and review history |
@@ -88,24 +88,34 @@ future occurrence. All displayed times use `SCHEDULE_TIMEZONE` (default
 `Asia/Karachi`).
 
 ### `.ai` — ask the configured AI
-**Alias:** `.gpt` · **Access:** Anyone · **Category:** AI
+**Alias:** `.gpt` · **Access:** Owner, or anyone after explicit public opt-in · **Category:** AI
 
 ```text
 .ai Explain this in three short bullet points.
-.ai 5 what did he decide about Friday?
+.ai 5 what did he decide about Friday?       # owner only
 ```
 
-Works in any chat, for anyone, and the reply is labelled “AI's Answer”. A number
-after `.ai` (1–50) includes that many recent messages of the current chat from
-both sides as context. The bot keeps only text, in a short rolling window per
-chat, and skips its own answers and status posts.
+The owner can use `.ai` in any chat and may add a number (1–50) to include that
+many recent messages from the current chat. That context is sent to the
+configured AI provider, so use it only for chat content you are allowed to
+share.
 
-Non-owners share the bot's AI quota: one question per sender every
-`AI_SENDER_COOLDOWN_SEC` seconds (default 15), and `AI_DAILY_LIMIT` questions per
-day in total (default 200, resets at midnight UTC). The owner skips the cooldown.
-Do not use it for private content unless you are comfortable sending the prompt
-and context to your configured AI provider. Public use needs `NEXUS_MODE=live`;
-in observe mode the bot does not answer anyone but the owner.
+For anyone else to receive a reply, all of these must be true: the bot runs in
+`NEXUS_MODE=live`, `PUBLIC_AI_ENABLED=true`, and—for a group—
+`PUBLIC_AI_GROUPS=true`. Public users can use only `.ai <question>`: no cached
+chat messages or AI conversation memory are sent on their behalf. Public usage
+is silently limited by `PUBLIC_AI_SENDER_COOLDOWN_SEC` (default 20 seconds),
+`PUBLIC_AI_PER_SENDER_DAILY_LIMIT` (default 10), and
+`PUBLIC_AI_DAILY_LIMIT` (default 100, midnight UTC reset). Silent throttling
+prevents a command flood from creating reply spam. Keep `OWNER_JIDS` limited to
+your private controller number and remember that every permitted prompt goes to
+your selected AI provider.
+
+Normally the linked main account's own outgoing messages are ignored to prevent
+command loops. Set `SELF_AI_COMMANDS=true` to opt into one exception: the linked
+main account may send a simple `.ai <question>` in a direct chat or an enabled
+group and receive the answer there. This form deliberately rejects `.ai <n>`
+history context and `.ai -check-`, and ignores replayed outgoing messages.
 
 ### `.ai -check-` — test each AI provider (owner)
 **Access:** Owner · **Category:** AI
@@ -286,6 +296,12 @@ text marked “Draft (not sent)”; copy/edit/send it yourself.
 .env set AI_MODEL <provider-model-id>
 .env set AI_MAX_HISTORY 12
 .env set AI_ASK_MAX_CHARS 60000
+.env set PUBLIC_AI_ENABLED true
+.env set PUBLIC_AI_GROUPS true
+.env set SELF_AI_COMMANDS true
+.env set PUBLIC_AI_SENDER_COOLDOWN_SEC 20
+.env set PUBLIC_AI_DAILY_LIMIT 100
+.env set PUBLIC_AI_PER_SENDER_DAILY_LIMIT 10
 .env set CAPTURE_ALERT_JID 15551234567
 .env set GROQ_API_KEY
 .env set OPENAI_API_KEY
@@ -299,11 +315,15 @@ text marked “Draft (not sent)”; copy/edit/send it yourself.
 .env owner remove 15551234567
 ```
 
-Only approved settings can be changed. `AI_MAX_HISTORY` accepts 2–40;
-`AI_ASK_MAX_CHARS` accepts 4,000–100,000. `CAPTURE_ALERT_JID` must be a
-WhatsApp user number/JID, not a group. Unsetting `AI_PROVIDER` resets it to
-`groq`; unsetting other non-secret settings clears/resets that setting. The
-last configured owner cannot be removed.
+Only approved settings can be changed. `AI_MAX_HISTORY` accepts 2–40 and
+`AI_ASK_MAX_CHARS` accepts 4,000–100,000. Public AI controls take effect now:
+use `PUBLIC_AI_ENABLED=true` for direct messages and additionally
+`PUBLIC_AI_GROUPS=true` for groups. `SELF_AI_COMMANDS=true` lets the linked
+main account use simple `.ai <question>` in another chat, without context. Its cooldown is 5–300 seconds and its
+daily limits are 1–10,000 global / 1–1,000 per sender. `CAPTURE_ALERT_JID`
+must be a WhatsApp user number/JID, not a group. Unsetting `AI_PROVIDER`
+resets it to `groq`; unsetting other non-secret settings clears/resets that
+setting. The last configured owner cannot be removed.
 
 **API keys are entered separately; never put a key in the command.** For
 example, send `.env set GROQ_API_KEY`, then send the actual key alone as your
@@ -676,6 +696,12 @@ repository and are preserved.
 .env set AI_MODEL <provider-model-id>
 .env set AI_MAX_HISTORY 12
 .env set AI_ASK_MAX_CHARS 60000
+.env set PUBLIC_AI_ENABLED true
+.env set PUBLIC_AI_GROUPS true
+.env set SELF_AI_COMMANDS true
+.env set PUBLIC_AI_SENDER_COOLDOWN_SEC 20
+.env set PUBLIC_AI_DAILY_LIMIT 100
+.env set PUBLIC_AI_PER_SENDER_DAILY_LIMIT 10
 .env set CAPTURE_ALERT_JID 15551234567
 .env set GROQ_API_KEY
 .env set OPENAI_API_KEY
@@ -689,11 +715,15 @@ repository and are preserved.
 .env owner remove 15551234567
 ```
 
-Only approved settings can be changed. `AI_MAX_HISTORY` accepts 2–40;
-`AI_ASK_MAX_CHARS` accepts 4,000–100,000. `CAPTURE_ALERT_JID` must be a
-WhatsApp user number/JID, not a group. Unsetting `AI_PROVIDER` resets it to
-`groq`; unsetting other non-secret settings clears/resets that setting. The
-last configured owner cannot be removed.
+Only approved settings can be changed. `AI_MAX_HISTORY` accepts 2–40 and
+`AI_ASK_MAX_CHARS` accepts 4,000–100,000. Public AI controls take effect now:
+use `PUBLIC_AI_ENABLED=true` for direct messages and additionally
+`PUBLIC_AI_GROUPS=true` for groups. `SELF_AI_COMMANDS=true` lets the linked
+main account use simple `.ai <question>` in another chat, without context. Its cooldown is 5–300 seconds and its
+daily limits are 1–10,000 global / 1–1,000 per sender. `CAPTURE_ALERT_JID`
+must be a WhatsApp user number/JID, not a group. Unsetting `AI_PROVIDER`
+resets it to `groq`; unsetting other non-secret settings clears/resets that
+setting. The last configured owner cannot be removed.
 
 **API keys are entered separately; never put a key in the command.** For
 example, send `.env set GROQ_API_KEY`, then send the actual key alone as your

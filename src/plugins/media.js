@@ -57,7 +57,7 @@ export default {
           // WhatsApp stickers: 512x512, transparent-capable WebP, ≤100 KB.
           await run('ffmpeg', [
             '-y', '-i', input,
-            '-vf', "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=none",
+            '-vf', "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black@0",
             '-c:v', 'libwebp', '-lossless', '0', '-compression_level', '6',
             '-q:v', '70', '-an', '-vsync', '0',
             output,

@@ -30,6 +30,7 @@ import { normalizeJid } from './jid.js';
 
 const SELF_ECHO_TTL_MS = 120_000;
 const SELF_ECHO_MAX_KEYS = 500;
+const SELF_AI_COMMAND_TTL_MS = 120_000;
 
 
 function sameJid(a, b) {
@@ -74,6 +75,11 @@ export class Dispatcher {
     /** name -> last invocation ms */
     this.lastRun = new Map();
     this.selfEchoes = new Map();
+    // A phone-sent command can be delivered more than once while WhatsApp
+    // catches up. Only an explicitly enabled self `.ai` may cross the normal
+    // fromMe gate, and a message id is claimed once to prevent duplicate AI
+    // calls/replies on an upsert replay.
+    this.selfAiCommands = new Map();
     this.observedQueues = new WeakSet();
     this.stats = { handled: 0, rejected: 0, errors: 0 };
   }
@@ -150,6 +156,22 @@ export class Dispatcher {
     return true;
   }
 
+  /** Claim one deliberately phone-sent AI command; false means a replay. */
+  #claimSelfAiCommand(messageId) {
+    const id = String(messageId || '');
+    if (!id) return true; // Baileys normally supplies one; do not reject a valid live message if it does not.
+    const now = Date.now();
+    for (const [key, expiresAt] of this.selfAiCommands) {
+      if (expiresAt <= now) this.selfAiCommands.delete(key);
+    }
+    if (this.selfAiCommands.has(id)) return false;
+    this.selfAiCommands.set(id, now + SELF_AI_COMMAND_TTL_MS);
+    while (this.selfAiCommands.size > SELF_ECHO_MAX_KEYS) {
+      this.selfAiCommands.delete(this.selfAiCommands.keys().next().value);
+    }
+    return true;
+  }
+
   /**
    * Handle one normalised message. In the account's own “You” chat, explicitly
    * owner-only commands are allowed only from configured owners; plain-text
@@ -169,14 +191,35 @@ export class Dispatcher {
       // upserts in the “You” chat. Drop the exact outbound echo before looking
       // for a command or a pending free-text answer.
       if (isFromSelfChat && this.#consumeSelfEcho(socket, msg)) return;
-      if (msg.isBot && !isSelfChat) return; // ignore every outgoing message to other chats
+
+      const parsed = parseCommand(msg, this.config.prefix);
+      const candidate = parsed.isCommand ? this.plugins.resolve(parsed.command) : null;
+      const firstArg = String(parsed.args?.[0] || '').toLowerCase();
+      // Outgoing messages normally remain inert: that is the loop-prevention
+      // boundary. The sole opt-in exception is a newly sent, simple `.ai`
+      // question from the linked account, never a history export or checker.
+      const selfIssuedAi = Boolean(
+        msg.isBot &&
+        !isSelfChat &&
+        candidate?.name === 'ai' &&
+        this.config.isLive &&
+        this.config.ai?.selfCommands &&
+        (!msg.isGroup || this.config.ai?.publicGroups) &&
+        parsed.args.length &&
+        firstArg !== '-check-' &&
+        !/^\d{1,3}$/.test(firstArg)
+      );
+      if (msg.isBot && !isSelfChat) {
+        if (!selfIssuedAi) return;
+        // Only accept the immediate live upsert, never a history replay.
+        if (msg.upsertType && msg.upsertType !== 'notify') return;
+        if (!this.#claimSelfAiCommand(msg.id)) return;
+      }
       // Baileys marks history replays and emitted local-send echoes as append.
       // Never execute these as phone-entered self-chat commands.
       if (isFromSelfChat && msg.upsertType && msg.upsertType !== 'notify') return;
 
-      const parsed = parseCommand(msg, this.config.prefix);
       const isOwner = this.isOwner(msg.sender);
-      const candidate = parsed.isCommand ? this.plugins.resolve(parsed.command) : null;
       // Any explicitly owner-only command may be used in the owner's own
       // “You” chat. Echo tracking and the notify-vs-append guard above still
       // prevent our replies/history from replaying as commands.
@@ -273,7 +316,7 @@ export class Dispatcher {
         return this.#askForArg(socket, msg, parsed, isOwner, plugin, missing);
       }
 
-      await this.#execute(socket, msg, parsed, isOwner, plugin);
+      await this.#execute(socket, msg, parsed, isOwner, plugin, selfIssuedAi);
     } catch (err) {
       this.stats.errors++;
       this.logger.error(`plugin error: ${err.stack || err.message}`);
@@ -285,9 +328,9 @@ export class Dispatcher {
     }
   }
 
-  async #execute(socket, msg, parsed, isOwner, plugin) {
+  async #execute(socket, msg, parsed, isOwner, plugin, isSelfIssued = false) {
     this.stats.handled++;
-    const ctx = this.#buildContext(socket, msg, parsed, isOwner, plugin);
+    const ctx = this.#buildContext(socket, msg, parsed, isOwner, plugin, isSelfIssued);
     this.logger.debug(`exec .${plugin.name} (owner=${isOwner})`);
     await plugin.execute(ctx);
   }
@@ -327,7 +370,7 @@ export class Dispatcher {
     return this.#execute(socket, msg, filled, isOwner, plugin);
   }
 
-  #buildContext(socket, msg, parsed, isOwner, plugin) {
+  #buildContext(socket, msg, parsed, isOwner, plugin, isSelfIssued = false) {
     const self = this;
     return {
       socket,
@@ -337,6 +380,9 @@ export class Dispatcher {
       text: parsed.argsRaw,
       command: parsed.command,
       isOwner,
+      // True only for the narrowly allowed live `.ai` command sent from the
+      // linked main account to another chat.
+      isSelfIssued,
       isGroup: msg.isGroup,
       sender: msg.sender,
       jid: msg.jid,

@@ -183,6 +183,28 @@ test('scheduled restart invokes nexus restart, not a direct Node kill', (t) => {
   assert.equal(control.spawned.options.detached, true);
 });
 
+test('Kerit commands require a panel restart instead of stopping the container', async () => {
+  const calls = [];
+  const control = {
+    availability() { return { ok: true, platform: 'kerit' }; },
+    async update() { calls.push('update'); return { ok: true, updated: true, restartRequired: true, platform: 'kerit', current: 'new1234' }; },
+    async check() { return { ok: true, platform: 'kerit', branch: 'main', current: 'old1234', remote: 'new1234', ahead: 0, behind: 1 }; },
+    scheduleRestart() { calls.push('restart'); return { ok: true }; },
+  };
+  const update = termuxPlugin.commands.find((command) => command.name === 'update');
+  const restart = termuxPlugin.commands.find((command) => command.name === 'restart');
+
+  const updateOwner = fakeContext({ args: [], control });
+  await update.execute(updateOwner.ctx);
+  assert.deepEqual(calls, ['update']);
+  assert.match(updateOwner.replies.at(-1), /Restart.*Kerit server panel/);
+
+  const restartOwner = fakeContext({ args: [], control });
+  await restart.execute(restartOwner.ctx);
+  assert.deepEqual(calls, ['update']);
+  assert.match(restartOwner.replies.at(-1), /will not exit itself/);
+});
+
 test('WhatsApp update and restart commands require the private owner-control chat', async () => {
   const calls = [];
   const control = {

@@ -51,7 +51,7 @@ import { NoteStore } from './core/notes.js';
 import { AiClient } from './core/ai.js';
 import { OutboundQueue } from './core/outboundQueue.js';
 import { LogBuffer } from './core/logBuffer.js';
-import { TermuxControl } from './core/termuxControl.js';
+import { HostControl } from './core/hostControl.js';
 import { Dashboard } from './web/dashboard.js';
 import { normalizeJid } from './core/jid.js';
 import { formatUptime } from './lib/format.js';
@@ -366,7 +366,7 @@ async function main() {
   });
 
   const selfJid = normalizeJid(socket.user?.id || '');
-  const termuxControl = new TermuxControl({ root: config.root, logger });
+  const hostControl = new HostControl({ root: config.root, logger });
   const askContext = new AskContext({ db });
   const chatContext = new ChatContext({ db });
   const statusFeed = new StatusFeed({ db });
@@ -418,7 +418,7 @@ async function main() {
     config, logger, db, startedAt,
     registry, contacts, cache, mediaStore, messageInbox, notes, audit, webhooks, triggers,
     presenceLog, profileWatch, groupWatch, editWatch, antiDelete, viewOnce,
-    scheduler, scheduleWizard, reconnectCatchup, ai, askContext, chatContext, statusFeed, prompts, envEditor, backup, vault, termuxControl, plugins, dispatcher, queue, logs, connection,
+    scheduler, scheduleWizard, reconnectCatchup, ai, askContext, chatContext, statusFeed, prompts, envEditor, backup, vault, hostControl, plugins, dispatcher, queue, logs, connection,
     selfJid,
     // Kill-switch: the only thing that can stop outbound instantly.
     safety: {
