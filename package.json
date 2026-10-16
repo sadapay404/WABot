@@ -2,14 +2,14 @@
   "name": "nexus-wa",
   "version": "0.2.0",
   "private": true,
-  "description": "Nexus-WA — modular 24/7 personal WhatsApp assistant & automation tool with a Telegram control panel and web dashboard",
+  "description": "Nexus-WA \u2014 modular 24/7 personal WhatsApp assistant & automation tool with a Telegram control panel and web dashboard",
   "type": "module",
   "engines": {
     "node": ">=22.5.0"
   },
   "main": "src/index.js",
   "scripts": {
-    "postinstall": "node scripts/patch-baileys-smb-android.mjs && node scripts/patch-baileys-encrypted-edits.mjs",
+    "postinstall": "node scripts/patch-baileys-smb-android.mjs && node scripts/patch-baileys-encrypted-edits.mjs && node scripts/patch-libsignal-quiet.mjs",
     "start": "node --disable-warning=ExperimentalWarning src/index.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch src/index.js",
     "preview": "node --disable-warning=ExperimentalWarning src/index.js --dry-run",

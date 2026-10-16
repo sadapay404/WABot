@@ -37,13 +37,26 @@ function makeLogger(level = 'info', scope = 'nexus', bindings = {}) {
   const write = (lvl, args) => {
     if (LEVELS[lvl] < threshold) return;
 
+    // Baileys debug/info payloads can contain protocol frames and registration
+    // details. The app emits its own pairing/connection messages separately,
+    // so suppress library chatter while retaining concise warnings and errors.
+    const isBaileys = scope.split(':').includes('baileys');
+    if (isBaileys && LEVELS[lvl] < LEVELS.warn) return;
+    const safeArgs = isBaileys
+      ? args.map((arg) => {
+          if (arg instanceof Error) return `Baileys error: ${arg.message}`;
+          if (typeof arg === 'object' && arg !== null) return '[Baileys details redacted]';
+          return arg;
+        })
+      : args;
+
     const ts = new Date().toISOString().slice(11, 23);
     const scopeTxt = scope === 'nexus' ? '' : ` ${DIM}[${scope}]${RESET}`;
     const head = `${DIM}${ts}${RESET} ${COLOR[lvl]}${lvl.toUpperCase().padEnd(5)}${RESET}${scopeTxt}`;
 
     let line = `${head} `;
     const extras = [];
-    for (const a of args) {
+    for (const a of safeArgs) {
       if (a instanceof Error) extras.push(a.stack || String(a));
       else if (typeof a === 'object' && a !== null) extras.push(JSON.stringify(a));
       else line += `${a} `;
@@ -52,7 +65,7 @@ function makeLogger(level = 'info', scope = 'nexus', bindings = {}) {
     stream.write(`${line.trimEnd()}${extras.length ? `\n      ${extras.join('\n      ')}` : ''}\n`);
 
     if (sinks.size) {
-      const plain = args
+      const plain = safeArgs
         .map((a) =>
           a instanceof Error ? a.message : typeof a === 'object' ? JSON.stringify(a) : String(a)
         )

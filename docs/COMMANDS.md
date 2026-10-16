@@ -43,7 +43,7 @@ category in WhatsApp, use `.help` followed by `admin`, `ai`, `automation`, `medi
 | `.presence` | `.lastseen`, `.online` | Owner | Review recorded presence |
 | `.receive` | `.recieve` | Owner | Privately inspect cached inbound messages |
 | `.remind` | `.reminder` | Owner | Schedule a recipient-specific reminder |
-| `.restart` | `.reboot` | Owner | Restart the Termux-managed bot without unlinking WhatsApp |
+| `.restart` | `.reboot` | Owner | Restart the Termux bot, or show the safe Kerit panel restart path |
 | `.schedule` | `.sched` | Owner | Schedule a WhatsApp message |
 | `.search` | `.find`, `.q` | Owner | Search the local message cache |
 | `.sessions` | `.numbers`, `.linked`, `.accounts` | Owner | List linked numbers/sessions |
@@ -54,10 +54,10 @@ category in WhatsApp, use `.help` followed by `admin`, `ai`, `automation`, `medi
 | `.transcribe` | `.stt` | Owner | Transcribe an attached voice note |
 | `.translate` | `.tr` | Anyone | Translate supplied text or the last cached message |
 | `.trigger` | `.triggers` | Owner | Configure keyword auto-replies (off by default) |
-| `.update` | `.upgrade` | Owner | Check GitHub and, if there is a newer version, install it and restart |
+| `.update` | `.upgrade` | Owner | Check GitHub and safely fast-forward Termux or Kerit source deployments |
 | `.vault` | `.backup-remote` | Owner | Check/test/push the configured remote vault |
 | `.viewonce` | `.vo` | Owner | Control or review view-once capture |
-| `.vision` | `.describe`, `.ocr` | Owner | Describe/OCR an attached image |
+| `.vision` | `.describe`, `.ocr`, `.visual` | Owner | Describe/OCR an attached image |
 | `.watch` | `.watchers` | Owner | Show/toggle passive watchers |
 | `.webhook` | `.hooks` | Owner | Add/list/remove outbound webhooks |
 
@@ -504,7 +504,7 @@ asks whether to skip that month/year or use its last day. You can start and
 answer the guided flow in the private owner-control chat or the linked account’s
 “You” chat; bot echoes and replayed history do not count as replies.
 
-### `.restart` — restart the Termux-managed bot
+### `.restart` — restart safely on Termux or Kerit
 **Alias:** `.reboot` · **Access:** Owner; private controller chat or “You” chat · **Category:** Admin
 
 ```text
@@ -512,10 +512,14 @@ answer the guided flow in the private owner-control chat or the linked account�
 .reboot
 ```
 
-Uses the installed `nexus restart` supervisor command. It is available only when
-the bot is running from the standard `~/nexus-wa` Termux install under `nexus
-start`; it does not kill Node directly, unlink WhatsApp, or change the session
-or database in `~/.nexus-wa`.
+On the standard `~/nexus-wa` **Termux** install under `nexus start`, this uses the
+installed `nexus restart` supervisor command. It does not kill Node directly,
+unlink WhatsApp, or change the session/database in `~/.nexus-wa`.
+
+On **Kerit/Pterodactyl**, `.restart` deliberately does not stop the process:
+a clean in-container exit is not guaranteed to make the panel start it again.
+Press **Restart** in the Kerit server panel instead. The command is available
+there only after the host variable `NEXUS_HOST=kerit` is set.
 
 ### `.schedule` — schedule a WhatsApp message
 **Alias:** `.sched` · **Access:** Owner · **Category:** Automation
@@ -661,28 +665,29 @@ have a 90-second per-chat cooldown. Triggers are off by default. **`on` enables
 unprompted auto-replies**, which can be disruptive and carry account risk; use
 `off` to stop them.
 
-### `.update` — update the Termux-managed bot
+### `.update` — safely update a Termux or Kerit source deployment
 **Alias:** `.upgrade` · **Access:** Owner; private controller chat or “You” chat · **Category:** Admin
 
 ```text
-.update
 .update check
-.upgrade
+.update
+.upgrade check
 ```
 
-`.update` does everything in one step: it checks GitHub for the branch's latest
-version, and if there is a newer one it fast-forwards to it, runs
-`npm ci --omit=optional --no-audit --fund=false`, refreshes the `nexus` command,
-and restarts the bot. If the bot is already up to date it says so and does not
-restart. `.update check` only reports whether an update is available and installs
-nothing.
+`.update check` fetches the configured GitHub upstream and reports whether the
+current branch has updates; it installs nothing. `.update` refuses a dirty
+worktree, local-only commits, a missing upstream, branch switching, forced
+updates, resets, and clean operations. When it is safe, it uses only
+`git pull --ff-only` followed by `npm ci --omit=optional --no-audit --fund=false`.
 
-It only works in the standard Termux `~/nexus-wa` install under `nexus start`. It
-stops safely if the worktree has local changes, the branch has local commits not on
-GitHub, or no upstream is configured; it never switches branches, resets files, or
-removes local changes. The same update is available from Termux as `nexus update`.
-The WhatsApp auth session, database, and notes under `~/.nexus-wa` are outside the
-repository and are preserved.
+On the standard supervised **Termux** install it refreshes the `nexus` command
+and restarts after the dependency install succeeds. On a **Kerit/Pterodactyl**
+Git checkout, set `NEXUS_HOST=kerit` to enable the same safe check/fast-forward.
+After a successful Kerit update it tells you to press **Restart** once in the
+server panel; it never calls `process.exit()` because that can leave the
+container offline. An uploaded ZIP has no Git checkout, so it is reported as
+not updateable rather than changed. WhatsApp auth, database, and notes are
+preserved when they are on persistent storage.
 
 ### `.env` — private approved settings and owner access
 **Access:** Owner; private controller chat only · **Category:** Admin
@@ -904,7 +909,7 @@ asks whether to skip that month/year or use its last day. You can start and
 answer the guided flow in the private owner-control chat or the linked account’s
 “You” chat; bot echoes and replayed history do not count as replies.
 
-### `.restart` — restart the Termux-managed bot
+### `.restart` — restart safely on Termux or Kerit
 **Alias:** `.reboot` · **Access:** Owner; private controller chat or “You” chat · **Category:** Admin
 
 ```text
@@ -912,10 +917,14 @@ answer the guided flow in the private owner-control chat or the linked account�
 .reboot
 ```
 
-Uses the installed `nexus restart` supervisor command. It is available only when
-the bot is running from the standard `~/nexus-wa` Termux install under `nexus
-start`; it does not kill Node directly, unlink WhatsApp, or change the session
-or database in `~/.nexus-wa`.
+On the standard `~/nexus-wa` **Termux** install under `nexus start`, this uses the
+installed `nexus restart` supervisor command. It does not kill Node directly,
+unlink WhatsApp, or change the session/database in `~/.nexus-wa`.
+
+On **Kerit/Pterodactyl**, `.restart` deliberately does not stop the process:
+a clean in-container exit is not guaranteed to make the panel start it again.
+Press **Restart** in the Kerit server panel instead. The command is available
+there only after the host variable `NEXUS_HOST=kerit` is set.
 
 ### `.schedule` — schedule a WhatsApp message
 **Alias:** `.sched` · **Access:** Owner · **Category:** Automation
@@ -1061,7 +1070,7 @@ have a 90-second per-chat cooldown. Triggers are off by default. **`on` enables
 unprompted auto-replies**, which can be disruptive and carry account risk; use
 `off` to stop them.
 
-### `.update` — update the Termux-managed bot
+### `.update` — safely update a Termux or Kerit source deployment
 **Alias:** `.upgrade` · **Access:** Owner; private controller chat or “You” chat · **Category:** Admin
 
 ```text
@@ -1071,16 +1080,19 @@ unprompted auto-replies**, which can be disruptive and carry account risk; use
 ```
 
 `.update check` fetches the configured GitHub upstream and reports whether the
-current branch has updates; it does not install them. `.update` fast-forwards
-the current branch and runs `npm ci --omit=optional --no-audit --fund=false`,
-then restarts with `nexus restart` after installation succeeds. `npm ci` uses the
-committed lockfile without rewriting it.
-This works only in the standard Termux `~/nexus-wa` install while supervised by
-`nexus start`. It stops safely if the worktree has local changes, the branch is
-diverged/ahead of GitHub, or no upstream is configured; it never switches
-branches, resets files, or removes local changes. An already-current bot is not
-restarted. The WhatsApp auth session, database, and notes under `~/.nexus-wa`
-are outside the repository and are preserved.
+current branch has updates; it installs nothing. `.update` refuses a dirty
+worktree, local-only commits, a missing upstream, branch switching, forced
+updates, resets, and clean operations. When it is safe, it uses only
+`git pull --ff-only` followed by `npm ci --omit=optional --no-audit --fund=false`.
+
+On the standard supervised **Termux** install it refreshes the `nexus` command
+and restarts after the dependency install succeeds. On a **Kerit/Pterodactyl**
+Git checkout, set `NEXUS_HOST=kerit` to enable the same safe check/fast-forward.
+After a successful Kerit update it tells you to press **Restart** once in the
+server panel; it never calls `process.exit()` because that can leave the
+container offline. An uploaded ZIP has no Git checkout, so it is reported as
+not updateable rather than changed. WhatsApp auth, database, and notes are
+preserved when they are on persistent storage.
 
 ### `.vault` — configured remote backup
 **Alias:** `.backup-remote` · **Access:** Owner · **Category:** Admin
@@ -1110,16 +1122,20 @@ It can only save media bytes WhatsApp delivers to this linked-device profile;
 a marker alone cannot be turned into media.
 
 ### `.vision` — describe/OCR an attached image
-**Aliases:** `.describe`, `.ocr` · **Access:** Owner · **Category:** AI
+**Aliases:** `.describe`, `.ocr`, `.visual` · **Access:** Owner · **Category:** AI
 
 ```text
 # Send an image with the command/instruction in the same message's caption:
 .vision
-.vision Read the sign and translate it to English.
+.visual Read the sign and translate it to English.
 ```
 
-The image and instruction are sent to the configured AI provider. A separate or
-quoted image is not used; the image must be attached to the command message.
+The image and instruction are sent to a configured **vision-capable model**. A
+separate or quoted image is not used; the image must be attached to the command
+message. The bot skips text-only models (including Groq
+`openai/gpt-oss-120b`) instead of sending them an image and producing a false
+fallback warning. Configure Gemini or another documented vision-capable model
+if the command says none is available.
 
 ### `.watch` — passive watcher switches
 **Alias:** `.watchers` · **Access:** Owner · **Category:** Privacy

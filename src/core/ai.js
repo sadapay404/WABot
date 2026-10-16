@@ -25,7 +25,27 @@ const ENDPOINTS = {
   openrouter: 'https://openrouter.ai/api/v1/chat/completions',
 };
 
-const IMAGE_PROVIDERS = ['gemini', 'groq', 'openrouter', 'openai'];
+// Vision support belongs to the selected *model*, not to a whole provider.
+// In particular Groq's default text model (openai/gpt-oss-120b) cannot accept
+// image_url content. Keep this conservative: skipping an unknown model lets a
+// known vision-capable fallback answer instead of needlessly sending a failing
+// request (and a user image) to a text-only model.
+const IMAGE_MODEL_PATTERNS = {
+  gemini: [/^gemini-/i],
+  groq: [/^meta-llama\/llama-4-(?:scout|maverick)-/i],
+  openai: [/^gpt-4o(?:-|$)/i, /^gpt-4\.1(?:-|$)/i, /^gpt-5(?:-|$)/i],
+  openrouter: [
+    /^google\/gemini-/i,
+    /^openai\/gpt-4o(?:-|$)/i,
+    /^openai\/gpt-4\.1(?:-|$)/i,
+    /^meta-llama\/llama-4-(?:scout|maverick)-/i,
+  ],
+};
+
+/** Whether one exact provider/model pair is known to accept image input. */
+export function modelSupportsImages(provider, model) {
+  return (IMAGE_MODEL_PATTERNS[provider] || []).some((pattern) => pattern.test(String(model || '')));
+}
 
 // Checked against each provider's docs. Groq retired llama-3.3-70b-versatile on
 // free and developer tiers (Aug 2026); Google shut down gemini-2.0-flash (Jun 2026).
@@ -111,13 +131,14 @@ export class AiClient {
    */
   chain({ images = false } = {}) {
     const ordered = (this.config.providers || []).filter((e) => this.config.keys?.[e.provider]);
-    const usable = images ? ordered.filter((e) => IMAGE_PROVIDERS.includes(e.provider)) : ordered;
-    return usable.map((e) => ({
-      provider: e.provider,
-      key: this.config.keys[e.provider],
-      model:
-        (e.provider === this.config.provider && this.config.model) || DEFAULT_MODEL[e.provider],
-    }));
+    return ordered
+      .map((e) => ({
+        provider: e.provider,
+        key: this.config.keys[e.provider],
+        model:
+          (e.provider === this.config.provider && this.config.model) || DEFAULT_MODEL[e.provider],
+      }))
+      .filter((link) => !images || modelSupportsImages(link.provider, link.model));
   }
 
   /**
@@ -210,7 +231,9 @@ export class AiClient {
   async complete({ prompt, system = null, chatKey = null, maxTokens = 800, temperature = 0.4, images = [] }) {
     const links = this.chain({ images: images.length > 0 });
     if (!links.length && images.length && this.configured()) {
-      throw new AiError('no configured provider can read images (use gemini, groq, openrouter or openai)');
+      throw new AiError(
+        'no configured AI model can read images. Add Gemini, or choose a documented vision-capable model; Groq openai/gpt-oss-120b is text-only.'
+      );
     }
     if (!links.length) throw new AiNotConfigured(this.provider);
     if (!prompt?.trim()) throw new AiError('empty prompt');
