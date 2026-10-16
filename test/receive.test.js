@@ -97,13 +97,13 @@ test('.receive phone selector reports text, voice notes and view-once media only
   assert.match(report, /Ayesha/);
   assert.match(report, /Please bring the documents/);
   assert.match(report, /voice note/);
-  assert.match(report, /view-once photo/);
+  assert.match(report, /Unavailable because ViewOnce/);
   assert.match(report, /exceeds the 16 MB per-file limit/);
-  assert.equal(sent.length, 2, 'voice note and view-once photo are attached; large media is skipped');
+  assert.equal(sent.length, 1, 'only the voice note is attached; view-once and large media are skipped');
   assert.deepEqual(downloads, ['R-VOICE'], 'oversized media is rejected before download; archived view-once bytes use local storage');
   assert.ok(sent.every((item) => item.jid === OWNER), 'no message is sent to the source chat');
   assert.equal(sent.find((item) => item.content.audio)?.content.ptt, true);
-  assert.ok(sent.some((item) => item.content.image), 'archived view-once bytes can be inspected on request');
+  assert.ok(!sent.some((item) => item.content.image), 'view-once media is never forwarded by .receive');
   assert.equal(ctx.readCount(), 0, 'the receiver never invokes readMessages');
 });
 

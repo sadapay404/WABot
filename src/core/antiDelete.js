@@ -18,6 +18,7 @@
  */
 
 import { normalizeJid, isGroupJid, describeChat } from './jid.js';
+import { chatTag, dateTime12, senderLine } from '../lib/display.js';
 import { captureAlertJid } from './alertRouting.js';
 import { getSetting, setSetting } from '../database/index.js';
 import { downloadWhatsAppMedia } from './mediaDownloader.js';
@@ -75,9 +76,6 @@ function describeMedia(record) {
   return MEDIA_LABEL[kind] || kind || 'message';
 }
 
-function clockTime(ms) {
-  return new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-}
 
 export class AntiDelete {
   /**
@@ -292,10 +290,7 @@ export function formatDeletion(d) {
 
   const lines = [`🗑️ *Deleted ${kindLabel}*`, ''];
 
-  const who = [p.name, p.phoneE164 && p.phoneE164 !== p.name ? p.phoneE164 : null]
-    .filter(Boolean)
-    .join(' · ');
-  lines.push(`👤 ${who || 'unknown sender'}`);
+  lines.push(`👤 ${senderLine(p)}`);
 
   if (p.localName && p.notifyName && p.localName !== p.notifyName) {
     lines.push(`   push name: ${p.notifyName}`);
@@ -304,8 +299,8 @@ export function formatDeletion(d) {
   const meta = [
     p.countryName,
     p.numberType ? String(p.numberType).toLowerCase() : null,
-    d.isGroup ? d.chatLabel : null,
-    clockTime(d.at),
+    chatTag(d.chatJid, d.chatLabel),
+    dateTime12(d.at),
   ].filter(Boolean);
   if (meta.length) lines.push(`ℹ️ ${meta.join(' · ')}`);
 

@@ -294,6 +294,15 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- Persistent public-AI access controls. This is a database-backed owner tool,
+-- not an environment setting, so it survives restarts without exposing a list
+-- of restricted users in panel configuration.
+CREATE TABLE IF NOT EXISTS ai_blocklist (
+  jid        TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  created_by TEXT
+);
 `;
 
 /**

@@ -24,6 +24,8 @@ logs/
 node_modules/
 dist/
 coverage/
+# Locally generated deployment archives are deliverables, never source.
+*.zip
 .cache/
 
 # ── OS / editor ────────────────────────────────────────────────────

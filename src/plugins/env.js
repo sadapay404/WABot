@@ -1,18 +1,17 @@
-import { jidToPhone, normalizeJid } from '../core/jid.js';
-
-function isControlChat(ctx) {
-  const chat = normalizeJid(ctx.jid);
-  const self = normalizeJid(ctx.bot?.selfJid);
-  const owners = (ctx.config?.safety?.ownerJids || []).map(normalizeJid);
-  return Boolean(chat && (chat === self || owners.includes(chat)));
-}
+import { jidToPhone } from '../core/jid.js';
 
 function ownerLabel(jid) {
   const phone = jidToPhone(jid);
   return phone ? `+${phone}` : jid;
 }
 
-const API_KEYS = new Set(['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY']);
+const API_KEYS = new Set([
+  'GROQ_API_KEY',
+  'OPENAI_API_KEY',
+  'GEMINI_API_KEY',
+  'OPENROUTER_API_KEY',
+  'CLOUDFLARE_API_TOKEN',
+]);
 
 export default {
   name: 'env',
@@ -20,13 +19,9 @@ export default {
   description: 'Manage approved AI settings and owner access without exposing secrets',
   usage: '.env status | .env set <setting> <value> | .env set <API_KEY> | .env owner add|remove <number>',
   ownerOnly: true,
-  privateOnly: true,
   async execute(ctx) {
     const editor = ctx.bot?.envEditor;
     if (!editor) return ctx.reply('Remote configuration is not active in this mode.');
-    if (!isControlChat(ctx)) {
-      return ctx.reply('For safety, use `.env` only in your private controller chat or the linked account’s “You” chat.');
-    }
 
     const sub = String(ctx.args[0] || 'status').toLowerCase();
     const rawKey = String(ctx.args[1] || '').toUpperCase();
@@ -61,7 +56,7 @@ export default {
       const value = ctx.args.slice(2).join(' ').trim();
       if (API_KEYS.has(rawKey)) {
         if (value) {
-          return ctx.reply('For safety, do not put an API key in the command. Use `.env set GROQ_API_KEY` and send the key as your next private message instead.');
+          return ctx.reply(`For safety, do not put an API key in the command. Use \`.env set ${rawKey}\` and send the key as your next private message instead.`);
         }
         const prompt = [
           `*Enter ${rawKey}*`,
@@ -69,7 +64,14 @@ export default {
           'WhatsApp still retains the message in this chat; delete it locally afterward if you want it removed from your chat history.',
           'Reply `.env cancel` to abort.',
         ].join('\n');
-        editor.startSecret({ ownerJid: ctx.sender, chatJid: ctx.jid, key: rawKey, promptText: prompt });
+        editor.startSecret({
+          ownerJid: ctx.sender,
+          ownerAlt: ctx.senderAlt,
+          chatJid: ctx.jid,
+          chatJidAlt: ctx.jidAlt,
+          key: rawKey,
+          promptText: prompt,
+        });
         try {
           const sent = await ctx.reply(prompt);
           editor.setPromptMessageId({ ownerJid: ctx.sender, chatJid: ctx.jid, messageId: sent?.key?.id });
@@ -80,7 +82,7 @@ export default {
         }
       }
       if (!value) {
-        return ctx.reply('Usage: `.env set AI_PROVIDER groq` | `.env set AI_MODEL <model-id>` | `.env set AI_MAX_HISTORY 12` | `.env set AI_ASK_MAX_CHARS 60000` | `.env set CAPTURE_ALERT_JID <number>`');
+        return ctx.reply('Usage: `.env set AI_PROVIDER groq` | `.env set AI_MODEL <model-id>` | `.env set AI_MAX_HISTORY 12` | `.env set CLOUDFLARE_ACCOUNT_ID <id>` | `.env set CAPTURE_ALERT_JID <number>`');
       }
       try {
         const key = editor.setValue(rawKey, value);
@@ -104,6 +106,9 @@ export default {
       '`.env status` — show approved settings; secrets remain hidden.',
       '`.env set AI_PROVIDER groq|openai|gemini`',
       '`.env set GROQ_API_KEY` — then send the key as the next private message.',
+      '`.env set CLOUDFLARE_ACCOUNT_ID <id>` — enable the account half of `.imagine`.',
+      '`.env set CLOUDFLARE_API_TOKEN` — then send the Workers AI token as the next private message.',
+      'Public `.ai`, quoted `.ai`, linked-account `.ai <n>`, and `.imagine` behavior are source-controlled in live mode; their limits are not panel variables.',
       '`.env unset GROQ_API_KEY` — remove a saved key.',
       '`.env owner add <number>` — authorize the linked account or another controller.',
       'Only approved AI and owner settings can be changed; arbitrary environment variables are blocked.',
