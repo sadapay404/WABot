@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { parseAiProviders } from '../src/config/index.js';
-import { AiClient, AiError, AiNotConfigured } from '../src/core/ai.js';
+import { AiClient, AiError, AiNotConfigured, modelSupportsImages } from '../src/core/ai.js';
 import { createLogger } from '../src/core/logger.js';
 import { setEnvValue } from '../src/core/envFile.js';
 
@@ -79,6 +79,30 @@ test('audio transcription never goes to openrouter', async () => {
     fetchImpl: async () => openAiReply('x'),
   });
   await assert.rejects(ai.transcribeAudio({ base64: 'AAAA' }), AiNotConfigured);
+});
+
+test('Groq Qwen and OpenRouter free router are recognised as vision-capable', () => {
+  assert.equal(modelSupportsImages('groq', 'qwen/qwen3.8-27b'), true);
+  assert.equal(modelSupportsImages('openrouter', 'openrouter/free'), true);
+  assert.equal(modelSupportsImages('groq', 'openai/gpt-oss-120b'), false);
+});
+
+test('an image request automatically uses Groq Qwen when Groq text model is not visual', async () => {
+  const seen = [];
+  const ai = clientWith({
+    providers: parseAiProviders('groq:1'),
+    keys: { groq: 'g' },
+    fetchImpl: async (url, init) => {
+      seen.push({ url, body: JSON.parse(init.body) });
+      return openAiReply('image understood');
+    },
+  });
+
+  assert.equal(await ai.complete({ prompt: 'read this', images: ['aGVsbG8='] }), 'image understood');
+  assert.match(seen[0].url, /groq\.com/);
+  assert.equal(seen[0].body.model, 'qwen/qwen3.8-27b');
+  assert.equal(seen[0].body.messages.at(-1).content[1].type, 'image_url');
+  assert.match(seen[0].body.messages.at(-1).content[1].image_url.url, /^data:image\/jpeg;base64,aGVsbG8=/);
 });
 
 test('complete() falls back to the next provider when the first fails', async () => {

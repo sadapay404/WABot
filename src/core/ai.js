@@ -32,13 +32,21 @@ const ENDPOINTS = {
 // request (and a user image) to a text-only model.
 const IMAGE_MODEL_PATTERNS = {
   gemini: [/^gemini-/i],
-  groq: [/^meta-llama\/llama-4-(?:scout|maverick)-/i],
+  // Qwen 3.8 27B is Groq's documented vision model. GPT-OSS remains the
+  // default text model, so image requests swap to Qwen below.
+  groq: [/^qwen\/qwen3\.8-27b$/i, /^meta-llama\/llama-4-(?:scout|maverick)-/i],
   openai: [/^gpt-4o(?:-|$)/i, /^gpt-4\.1(?:-|$)/i, /^gpt-5(?:-|$)/i],
   openrouter: [
+    // OpenRouter's free router filters its current free roster by required
+    // capabilities, including image understanding.
+    /^openrouter\/free$/i,
     /^google\/gemini-/i,
+    /^google\/gemma-/i,
+    /^qwen\/qwen3(?:\.|-|$)/i,
     /^openai\/gpt-4o(?:-|$)/i,
     /^openai\/gpt-4\.1(?:-|$)/i,
     /^meta-llama\/llama-4-(?:scout|maverick)-/i,
+    /^nvidia\/nemotron-.*(?:omni|vision)/i,
   ],
 };
 
@@ -55,6 +63,14 @@ const DEFAULT_MODEL = {
   openai: 'gpt-4o-mini',
   gemini: 'gemini-3.8-flash',
   // Fixed on purpose: the free router picks a free model per request.
+  openrouter: 'openrouter/free',
+};
+
+// Do not make every ordinary text request use a vision model. For an image
+// request only, replace an explicitly text-only configured/default model with
+// a no-extra-config documented image model from the same provider.
+const DEFAULT_IMAGE_MODEL = {
+  groq: 'qwen/qwen3.8-27b',
   openrouter: 'openrouter/free',
 };
 
@@ -132,12 +148,17 @@ export class AiClient {
   chain({ images = false } = {}) {
     const ordered = (this.config.providers || []).filter((e) => this.config.keys?.[e.provider]);
     return ordered
-      .map((e) => ({
-        provider: e.provider,
-        key: this.config.keys[e.provider],
-        model:
-          (e.provider === this.config.provider && this.config.model) || DEFAULT_MODEL[e.provider],
-      }))
+      .map((e) => {
+        const selected =
+          (e.provider === this.config.provider && this.config.model) || DEFAULT_MODEL[e.provider];
+        // An AI_MODEL choice is often a text model. Image commands should not
+        // fail merely because the same provider has a documented vision model
+        // available without another key or setting.
+        const model = images && !modelSupportsImages(e.provider, selected)
+          ? DEFAULT_IMAGE_MODEL[e.provider] || selected
+          : selected;
+        return { provider: e.provider, key: this.config.keys[e.provider], model };
+      })
       .filter((link) => !images || modelSupportsImages(link.provider, link.model));
   }
 
@@ -232,7 +253,7 @@ export class AiClient {
     const links = this.chain({ images: images.length > 0 });
     if (!links.length && images.length && this.configured()) {
       throw new AiError(
-        'no configured AI model can read images. Add Gemini, or choose a documented vision-capable model; Groq openai/gpt-oss-120b is text-only.'
+        'no configured AI model can read images. Add a Groq, Gemini, or OpenRouter key; Groq image requests use qwen/qwen3.8-27b automatically.'
       );
     }
     if (!links.length) throw new AiNotConfigured(this.provider);
