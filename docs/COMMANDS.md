@@ -1,6 +1,6 @@
 # Command reference
 
-A sorted, practical reference for the 43 WhatsApp commands currently loaded by
+A sorted, practical reference for the 54 WhatsApp commands currently loaded by
 Nexus-WA. Examples assume the default `.` prefix (`NEXUS_PREFIX` can change it).
 Replace names, numbers, IDs, and messages with your own. **Commands that schedule
 or send messages can cause real WhatsApp sends in live mode; test with a safe
@@ -27,6 +27,17 @@ category in WhatsApp, use `.help` followed by `admin`, `ai`, `automation`, `medi
 | `.audit` | `.log` | Owner | Review bot actions |
 | `.backup` | `.export` | Owner | Create an encrypted local backup or list backups |
 | `.calc` | `.calculate` | Anyone | Solve safe arithmetic locally; use AI for algebra/word equations or `--process` |
+| `.clean` | `.stripmeta` | Anyone | Return a JPEG/PNG/WebP copy with common metadata removed |
+| `.docxray` | `.docmeta`, `.pdfxray` | Anyone | Inspect PDF/Office document metadata, links, and macro markers |
+| `.file` | `.filexray` | Anyone | Compare a file's shown name/type with its binary signature |
+| `.fingerprint` | `.hash` | Anyone | Hash media and compare local exact/visual fingerprints |
+| `.md` | `.metadata`, `.xray` | Anyone | Reveal embedded image/audio/video/document metadata; `.md full` attaches readable fields |
+| `.qr` | `.decodeqr` | Anyone | Decode a QR code in a replied image or sticker |
+| `.save` | `.asfile`, `.download` | Anyone | Re-send replied media as a downloadable Files document |
+| `.timeline` | `.when` | Anyone | Show readable capture, creation, and modification timestamps |
+| `.videoxray` | `.vmeta` | Anyone | Inspect video container, tracks, codec, and tags |
+| `.audioxray` | `.ameta` | Anyone | Inspect voice/audio codec, tags, and technical details |
+| `.where` | `.gps`, `.geotag` | Anyone | Make a map link from GPS embedded in a replied image |
 | `.blocked` | `.blockcheck` | Owner | Review suspected blocks (never certain) |
 | `.digest` | `.summary`, `.briefing` | Owner | Summarize recent activity |
 | `.draft` | `.reply` | Owner | Draft a reply; never sends it |
@@ -189,6 +200,42 @@ stops processing/recording future delete events as well as their alerts; it does
 not erase previously recorded events or cached originals. `media off` only stops
 forwarding recovered media. Nothing can recover content WhatsApp never sent to
 the device.
+
+## Reply-based media forensics
+
+All commands below work only on a file you explicitly reply to (or on media carrying
+the command in its caption). Parsing happens **locally**: file bytes are not sent to
+an AI or external metadata service. WhatsApp frequently removes EXIF from normal
+photo sends, so the bot can report only fields that still exist—images sent as
+documents are more likely to preserve their original metadata.
+
+```text
+.md                 # neat camera/GPS/timestamp/container report
+.md full            # report plus a downloadable text file of readable fields
+.where              # a Maps URL only when GPS is embedded
+.file               # actual binary type vs shown filename/MIME
+.docxray            # PDF/DOCX/XLSX/PPTX details, links, macro markers
+.videoxray          # container, tracks, codec, dimensions/FPS where present
+.audioxray          # voice/audio format, duration, tags and technical fields
+.qr                 # decode QR from an image or sticker
+.fingerprint        # SHA-256 and local visual duplicate comparison
+.timeline           # readable capture/creation/modification times
+.clean              # downloadable JPEG/PNG/WebP copy with common metadata stripped
+.save               # re-send a voice note/sticker/media as a normal file
+```
+
+`.save` is particularly useful for normal voice notes: reply with `.save` and it
+returns the unchanged audio bytes as an `.ogg` document that can be downloaded to
+Files. It also works for stickers, images, video, audio, and documents while the
+original is still available. It has a 100 MB safety limit. It does **not** bypass
+WhatsApp view-once media.
+
+`.file` reports signatures, extension mismatches, macro markers, external links,
+and PDF JavaScript markers, but it is not an antivirus verdict. `.timeline` only
+reports timestamps embedded in the file; differences can come from copying or
+editing and are not proof that somebody lied. `.fingerprint` stores only hashes
+for later local comparisons, not the media itself, and does not perform an internet
+reverse-image search.
 
 ### `.archive` — locally archived media
 **Alias:** `.media` · **Access:** Owner · **Category:** Media

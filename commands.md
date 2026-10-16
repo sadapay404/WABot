@@ -1,6 +1,6 @@
 # Nexus-WA command quick reference
 
-This is the compact reference for the **43-command** Nexus-WA build. Commands use the `.` prefix shown below. In observe mode, replies are limited to the configured owner; commands that could send a message remain subject to the outbound safety controls.
+This is the compact reference for the **54-command** Nexus-WA build. Commands use the `.` prefix shown below. In observe mode, replies are limited to the configured owner; commands that could send a message remain subject to the outbound safety controls.
 
 **Access:** **Owner** means the sender must be a phone-number JID in `OWNER_JIDS`. **Anyone** means the command is not owner-only. Public `.ai` replies are built into live mode; fixed safeguards are described below.
 
@@ -19,6 +19,17 @@ This is the compact reference for the **43-command** Nexus-WA build. Commands us
 | `.audit` | `.log` | Owner | Review bot actions |
 | `.backup` | `.export` | Owner | Create an encrypted local backup or list backups |
 | `.calc` | `.calculate` | Anyone | Solve safe arithmetic locally; AI handles algebra/word equations and `--process` |
+| `.clean` | `.stripmeta` | Anyone | Return a metadata-clean JPEG/PNG/WebP document |
+| `.docxray` | `.docmeta`, `.pdfxray` | Anyone | Inspect PDF/Office metadata, links, and macro markers |
+| `.file` | `.filexray` | Anyone | Compare a file name/type against its binary signature |
+| `.fingerprint` | `.hash` | Anyone | Hash media and compare local visual/exact fingerprints |
+| `.md` | `.metadata`, `.xray` | Anyone | Reveal embedded media metadata; add `full` for a text attachment |
+| `.qr` | `.decodeqr` | Anyone | Decode QR from a replied image/sticker |
+| `.save` | `.asfile`, `.download` | Anyone | Return replied media as a downloadable document |
+| `.timeline` | `.when` | Anyone | Show embedded capture/creation/modification dates |
+| `.videoxray` | `.vmeta` | Anyone | Inspect video tracks, codec, and tags |
+| `.audioxray` | `.ameta` | Anyone | Inspect voice/audio codec, duration, and tags |
+| `.where` | `.gps`, `.geotag` | Anyone | Link GPS embedded in a replied image |
 | `.blocked` | `.blockcheck` | Owner | Review suspected blocks (never certain) |
 | `.digest` | `.summary`, `.briefing` | Owner | Summarize recent activity |
 | `.draft` | `.reply` | Owner | Draft a reply; never sends it |
@@ -56,8 +67,10 @@ This is the compact reference for the **43-command** Nexus-WA build. Commands us
 
 ## Common usage reminders
 
-- Use **`.vision`**, `.describe`, `.ocr`, or **`.visual`** with an image caption. It uses only vision-capable AI models; Groq `openai/gpt-oss-120b` is text-only.
+- Use **`.vision`**, `.describe`, `.ocr`, or **`.visual`** with an image caption. If Gemini is busy, image requests can fall back to Groq `qwen/qwen3.8-27b` and then OpenRouter’s free vision router when their keys are configured.
 - Use **`.sticker`** as the caption of an attached image; it is not a text-only command. The FFmpeg conversion now uses a portable transparent padding color.
+- Reply to ordinary media with `.save` to receive an unchanged, downloadable document; it works especially well for WhatsApp voice notes. View-once media is intentionally excluded.
+- `.md`, `.where`, `.file`, `.docxray`, `.videoxray`, `.audioxray`, `.qr`, `.fingerprint`, `.timeline`, and `.clean` process only the replied file locally—no AI/upload is involved. GPS or camera details appear only if the shared file still contains them.
 - **`.status`** lists statuses. Use **`.health`** for bot/runtime health.
 - In live mode, public `.ai` works in DMs/groups without `PUBLIC_AI_*` or `SELF_AI_COMMANDS` settings. It sends only the question, or exactly one quoted text/caption/image when invoked as a reply; public users cannot request cached history.
 - The linked main account may use `.ai <question>` and `.ai <n> <question>` in any direct chat/group. Normal outgoing text remains ignored; replayed commands are deduplicated. The spare controller can use `.ai -blist- <number>` / `.ai -wlist- <number>` privately to manage the persistent AI blocklist.
