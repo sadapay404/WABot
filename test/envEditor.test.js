@@ -118,29 +118,15 @@ test('owner additions update the running whitelist; the final owner cannot be re
   }
 });
 
-test('public AI controls update the running policy with bounded values', () => {
-  const { dir, config, editor, file } = fixture();
-  const originals = Object.fromEntries([
-    'PUBLIC_AI_ENABLED', 'PUBLIC_AI_GROUPS', 'SELF_AI_COMMANDS', 'PUBLIC_AI_SENDER_COOLDOWN_SEC', 'PUBLIC_AI_DAILY_LIMIT', 'PUBLIC_AI_PER_SENDER_DAILY_LIMIT',
-  ].map((key) => [key, process.env[key]]));
+test('public AI policy is source-controlled and cannot be changed through .env commands', () => {
+  const { dir, config, editor } = fixture();
   try {
-    editor.setValue('PUBLIC_AI_ENABLED', 'true');
-    editor.setValue('PUBLIC_AI_GROUPS', 'yes');
-    editor.setValue('SELF_AI_COMMANDS', 'on');
-    editor.setValue('PUBLIC_AI_SENDER_COOLDOWN_SEC', '25');
-    editor.setValue('PUBLIC_AI_DAILY_LIMIT', '120');
-    editor.setValue('PUBLIC_AI_PER_SENDER_DAILY_LIMIT', '12');
-    assert.deepEqual(
-      [config.ai.publicEnabled, config.ai.publicGroups, config.ai.selfCommands, config.ai.publicSenderCooldownSec, config.ai.publicDailyLimit, config.ai.publicPerSenderDailyLimit],
-      [true, true, true, 25, 120, 12]
-    );
-    assert.match(fs.readFileSync(file, 'utf8'), /PUBLIC_AI_GROUPS="true"/);
-    assert.throws(() => editor.setValue('PUBLIC_AI_SENDER_COOLDOWN_SEC', '2'), /5 to 300/);
+    assert.equal('publicEnabled' in config.ai, false);
+    assert.equal('publicGroups' in config.ai, false);
+    assert.throws(() => editor.setValue('PUBLIC_AI_ENABLED', 'false'), /not remotely editable/);
+    assert.throws(() => editor.setValue('SELF_AI_COMMANDS', 'false'), /not remotely editable/);
+    assert.match(editor.status(), /built into live mode/);
   } finally {
-    for (const [key, value] of Object.entries(originals)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

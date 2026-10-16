@@ -1,6 +1,6 @@
 # Command reference
 
-A sorted, practical reference for the 42 WhatsApp commands currently loaded by
+A sorted, practical reference for the 43 WhatsApp commands currently loaded by
 Nexus-WA. Examples assume the default `.` prefix (`NEXUS_PREFIX` can change it).
 Replace names, numbers, IDs, and messages with your own. **Commands that schedule
 or send messages can cause real WhatsApp sends in live mode; test with a safe
@@ -18,7 +18,7 @@ category in WhatsApp, use `.help` followed by `admin`, `ai`, `automation`, `medi
 | Command | Aliases | Access | Purpose |
 |---|---|---|---|
 | `.agenda` | — | Owner | View pending sends or decide missed jobs |
-| `.ai` | `.gpt` | Anyone (explicit public opt-in) | Ask the configured AI; public users can use `.ai <question>`, while the owner can use `.ai <n> <question>` for selected chat context |
+| `.ai` | `.gpt` | Anyone in live mode | Ask AI, analyse one replied-to text/image, or use linked-main `.ai <n>` context; controller can manage the AI blocklist |
 | `.ai -check-` | — | Owner | Test each AI provider and explain any that does not work |
 | `.aiprovider` | `.aiorder` | Owner | Show or set AI provider priority (1 = tried first, the rest are fallbacks) |
 | `.antidelete` | `.ad`, `.deleted`, `.deletes` | Owner | Toggle deletion capture/alerts and review history |
@@ -26,6 +26,7 @@ category in WhatsApp, use `.help` followed by `admin`, `ai`, `automation`, `medi
 | `.ask` | — | Owner | Ask about explicitly selected direct-chat history |
 | `.audit` | `.log` | Owner | Review bot actions |
 | `.backup` | `.export` | Owner | Create an encrypted local backup or list backups |
+| `.calc` | `.calculate` | Anyone | Solve safe arithmetic locally; use AI for algebra/word equations or `--process` |
 | `.blocked` | `.blockcheck` | Owner | Review suspected blocks (never certain) |
 | `.digest` | `.summary`, `.briefing` | Owner | Summarize recent activity |
 | `.draft` | `.reply` | Owner | Draft a reply; never sends it |
@@ -88,34 +89,51 @@ future occurrence. All displayed times use `SCHEDULE_TIMEZONE` (default
 `Asia/Karachi`).
 
 ### `.ai` — ask the configured AI
-**Alias:** `.gpt` · **Access:** Owner, or anyone after explicit public opt-in · **Category:** AI
+**Alias:** `.gpt` · **Access:** Anyone in `NEXUS_MODE=live` · **Category:** AI
 
 ```text
 .ai Explain this in three short bullet points.
-.ai 5 what did he decide about Friday?       # owner only
+.ai 5 what did he decide about Friday?       # linked main account/controller only
+
+# Reply to one text message or image, then send:
+.ai What does this mean?
 ```
 
-The owner can use `.ai` in any chat and may add a number (1–50) to include that
-many recent messages from the current chat. That context is sent to the
-configured AI provider, so use it only for chat content you are allowed to
-share.
+In live mode, any participant in a direct chat or group can use simple
+`.ai <question>`. It sends the question to the configured AI provider with no
+conversation memory or cached chat history. This public behavior is built into
+source—there are no `PUBLIC_AI_*` or `SELF_AI_COMMANDS` environment entries to
+add. Fixed in-memory safeguards silently apply a 20-second per-sender cooldown,
+a limit of 10 provider requests per sender/day, and 100 public provider requests
+per day (reset at midnight UTC).
 
-For anyone else to receive a reply, all of these must be true: the bot runs in
-`NEXUS_MODE=live`, `PUBLIC_AI_ENABLED=true`, and—for a group—
-`PUBLIC_AI_GROUPS=true`. Public users can use only `.ai <question>`: no cached
-chat messages or AI conversation memory are sent on their behalf. Public usage
-is silently limited by `PUBLIC_AI_SENDER_COOLDOWN_SEC` (default 20 seconds),
-`PUBLIC_AI_PER_SENDER_DAILY_LIMIT` (default 10), and
-`PUBLIC_AI_DAILY_LIMIT` (default 100, midnight UTC reset). Silent throttling
-prevents a command flood from creating reply spam. Keep `OWNER_JIDS` limited to
-your private controller number and remember that every permitted prompt goes to
-your selected AI provider.
+A public reply-to-message request sends **only the replied-to item** and the new
+question: one quoted text/caption or one quoted image. It does not fetch
+surrounding messages or cached history. Quoted image bytes are sent to the
+configured vision-capable provider. Replying to voice notes, documents, video,
+stickers, or empty messages is not supported by this command.
 
-Normally the linked main account's own outgoing messages are ignored to prevent
-command loops. Set `SELF_AI_COMMANDS=true` to opt into one exception: the linked
-main account may send a simple `.ai <question>` in a direct chat or an enabled
-group and receive the answer there. This form deliberately rejects `.ai <n>`
-history context and `.ai -check-`, and ignores replayed outgoing messages.
+The linked main account may deliberately send `.ai <question>` or
+`.ai <n> <question>` (1–50 cached text messages) from its own phone in direct
+chats and any group. The number form sends those selected cached messages to the
+AI provider, so use it only where you are allowed to share that content. Normal
+outgoing messages remain ignored; replayed/history deliveries are rejected and
+message IDs are deduplicated. The linked main account cannot run `.ai -check-`,
+`.ai -blist-`, or `.ai -wlist-` from another chat.
+
+### AI blocklist (controller only)
+
+```text
+.ai -blist- 15551234567    # block a number
+.ai -blist- list           # show the persistent blocklist
+.ai -wlist- 15551234567    # remove the block
+```
+
+Use these only from the private spare-controller chat. A blocked participant
+gets one random mild sarcastic preset instead of a provider-backed AI result.
+The block applies to `.ai`, `.gpt`, quoted-message AI, and the provider-backed
+part of `.calc`; strictly local arithmetic in `.calc` still works. The list is
+stored in the local database, not `.env`.
 
 ### `.ai -check-` — test each AI provider (owner)
 **Access:** Owner · **Category:** AI
@@ -256,6 +274,24 @@ The first form lists recorded suspects; the second checks one full WhatsApp
 user JID. Results are inference from independent profile/presence/contact
 signals, **not proof**—WhatsApp does not report blocks.
 
+### `.calc` — solve an equation
+**Alias:** `.calculate` · **Access:** Anyone · **Category:** Tools
+
+```text
+.calc (12 / 3) + 1
+.calc 2x + 3 = 11
+.calc 2 + 2 --process
+```
+
+Basic arithmetic is evaluated locally using a safe parser; it never executes
+JavaScript, shell commands, or arbitrary code. It supports parentheses,
+`+ - * / % ^`, decimal values, `pi`, `e`, and `sqrt`, `abs`, `sin`, `cos`,
+`tan`, `log`, and `ln`. Algebra and word equations use the configured AI
+provider. Add `--process` at the end for a concise working explanation; that
+also uses the provider. Replies use the `Equation Solved--Calc` label. A
+blacklisted number can still use a strictly local calculation, but cannot use
+the provider fallback or process explanation.
+
 ### `.digest` — recent activity summary
 **Aliases:** `.summary`, `.briefing` · **Access:** Owner · **Category:** Productivity
 
@@ -296,12 +332,6 @@ text marked “Draft (not sent)”; copy/edit/send it yourself.
 .env set AI_MODEL <provider-model-id>
 .env set AI_MAX_HISTORY 12
 .env set AI_ASK_MAX_CHARS 60000
-.env set PUBLIC_AI_ENABLED true
-.env set PUBLIC_AI_GROUPS true
-.env set SELF_AI_COMMANDS true
-.env set PUBLIC_AI_SENDER_COOLDOWN_SEC 20
-.env set PUBLIC_AI_DAILY_LIMIT 100
-.env set PUBLIC_AI_PER_SENDER_DAILY_LIMIT 10
 .env set CAPTURE_ALERT_JID 15551234567
 .env set GROQ_API_KEY
 .env set OPENAI_API_KEY
@@ -316,14 +346,12 @@ text marked “Draft (not sent)”; copy/edit/send it yourself.
 ```
 
 Only approved settings can be changed. `AI_MAX_HISTORY` accepts 2–40 and
-`AI_ASK_MAX_CHARS` accepts 4,000–100,000. Public AI controls take effect now:
-use `PUBLIC_AI_ENABLED=true` for direct messages and additionally
-`PUBLIC_AI_GROUPS=true` for groups. `SELF_AI_COMMANDS=true` lets the linked
-main account use simple `.ai <question>` in another chat, without context. Its cooldown is 5–300 seconds and its
-daily limits are 1–10,000 global / 1–1,000 per sender. `CAPTURE_ALERT_JID`
-must be a WhatsApp user number/JID, not a group. Unsetting `AI_PROVIDER`
-resets it to `groq`; unsetting other non-secret settings clears/resets that
-setting. The last configured owner cannot be removed.
+`AI_ASK_MAX_CHARS` accepts 4,000–100,000. Public AI, quoted-message AI, and
+linked-main `.ai <n>` are source-controlled live-mode behavior; their fixed
+public safeguards do not need `.env` entries and cannot be remotely changed.
+`CAPTURE_ALERT_JID` must be a WhatsApp user number/JID, not a group. Unsetting
+`AI_PROVIDER` resets it to `groq`; unsetting other non-secret settings
+clears/resets that setting. The last configured owner cannot be removed.
 
 **API keys are entered separately; never put a key in the command.** For
 example, send `.env set GROQ_API_KEY`, then send the actual key alone as your
@@ -701,12 +729,6 @@ preserved when they are on persistent storage.
 .env set AI_MODEL <provider-model-id>
 .env set AI_MAX_HISTORY 12
 .env set AI_ASK_MAX_CHARS 60000
-.env set PUBLIC_AI_ENABLED true
-.env set PUBLIC_AI_GROUPS true
-.env set SELF_AI_COMMANDS true
-.env set PUBLIC_AI_SENDER_COOLDOWN_SEC 20
-.env set PUBLIC_AI_DAILY_LIMIT 100
-.env set PUBLIC_AI_PER_SENDER_DAILY_LIMIT 10
 .env set CAPTURE_ALERT_JID 15551234567
 .env set GROQ_API_KEY
 .env set OPENAI_API_KEY
@@ -721,14 +743,12 @@ preserved when they are on persistent storage.
 ```
 
 Only approved settings can be changed. `AI_MAX_HISTORY` accepts 2–40 and
-`AI_ASK_MAX_CHARS` accepts 4,000–100,000. Public AI controls take effect now:
-use `PUBLIC_AI_ENABLED=true` for direct messages and additionally
-`PUBLIC_AI_GROUPS=true` for groups. `SELF_AI_COMMANDS=true` lets the linked
-main account use simple `.ai <question>` in another chat, without context. Its cooldown is 5–300 seconds and its
-daily limits are 1–10,000 global / 1–1,000 per sender. `CAPTURE_ALERT_JID`
-must be a WhatsApp user number/JID, not a group. Unsetting `AI_PROVIDER`
-resets it to `groq`; unsetting other non-secret settings clears/resets that
-setting. The last configured owner cannot be removed.
+`AI_ASK_MAX_CHARS` accepts 4,000–100,000. Public AI, quoted-message AI, and
+linked-main `.ai <n>` are source-controlled live-mode behavior; their fixed
+public safeguards do not need `.env` entries and cannot be remotely changed.
+`CAPTURE_ALERT_JID` must be a WhatsApp user number/JID, not a group. Unsetting
+`AI_PROVIDER` resets it to `groq`; unsetting other non-secret settings
+clears/resets that setting. The last configured owner cannot be removed.
 
 **API keys are entered separately; never put a key in the command.** For
 example, send `.env set GROQ_API_KEY`, then send the actual key alone as your

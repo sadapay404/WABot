@@ -8,6 +8,14 @@
 
 import { AiNotConfigured, AiError } from '../core/ai.js';
 import { jidToPhone } from '../core/jid.js';
+import { extractMediaType, extractQuotedRaw, extractText } from '../core/message.js';
+import {
+  addAiBlock,
+  authorizeAiRequest,
+  displayAiUser,
+  listAiBlocks,
+  removeAiBlock,
+} from '../core/aiAccess.js';
 import { setEnvValue } from '../core/envFile.js';
 import { downloadWhatsAppMedia } from '../core/mediaDownloader.js';
 
@@ -34,70 +42,7 @@ async function run(ctx, build) {
 
 const PROVIDER_NAMES = ['groq', 'gemini', 'openrouter', 'openai'];
 const MAX_CONTEXT = 50;
-const DAY_CAP_FALLBACK = 200;
-const COOLDOWN_FALLBACK_SEC = 15;
-
-/**
- * Public AI is intentionally a separate opt-in from live mode. Quotas are kept
- * in memory: a restart clears them, but they still prevent one group member
- * from turning the linked personal account into a high-volume responder.
- */
-const quotaStates = new WeakMap();
-const fallbackQuotaConfig = {};
-
-function quotaState(config) {
-  const key = config && typeof config === 'object' ? config : fallbackQuotaConfig;
-  const day = new Date().toISOString().slice(0, 10);
-  let state = quotaStates.get(key);
-  if (!state || state.day !== day) {
-    state = { day, owner: 0, public: 0, publicBySender: new Map(), lastAskAt: new Map() };
-    quotaStates.set(key, state);
-  }
-  return state;
-}
-
-/** True only when the explicit public AI policy permits this non-owner request. */
-function publicAiAllowed(ctx) {
-  if (ctx.isOwner) return true;
-  const ai = ctx.config?.ai || {};
-  if (ctx.isSelfIssued) {
-    return Boolean(ctx.config?.isLive && ai.selfCommands && (!ctx.isGroup || ai.publicGroups));
-  }
-  return Boolean(ctx.config?.isLive && ai.publicEnabled && (!ctx.isGroup || ai.publicGroups));
-}
-
-/**
- * @returns {{allowed:boolean, notice?:string}}. Public throttle/cap rejections
- * are silent so a malicious command flood cannot make the account send more.
- */
-function takeQuota(ctx) {
-  const state = quotaState(ctx.config);
-  const ai = ctx.config?.ai || {};
-
-  if (ctx.isOwner || ctx.isSelfIssued) {
-    const cap = ai.dailyLimit ?? DAY_CAP_FALLBACK;
-    if (state.owner >= cap) {
-      return { allowed: false, notice: `🤖 Owner AI daily limit reached (${cap}). It resets at midnight UTC.` };
-    }
-    state.owner += 1;
-    return { allowed: true };
-  }
-
-  const sender = String(ctx.sender || ctx.jid);
-  const now = Date.now();
-  const cooldownMs = (ai.publicSenderCooldownSec ?? COOLDOWN_FALLBACK_SEC) * 1_000;
-  if ((state.lastAskAt.get(sender) || 0) + cooldownMs > now) return { allowed: false };
-
-  const globalCap = ai.publicDailyLimit ?? 100;
-  const senderCap = ai.publicPerSenderDailyLimit ?? 10;
-  const senderUsed = state.publicBySender.get(sender) || 0;
-  if (state.public >= globalCap || senderUsed >= senderCap) return { allowed: false };
-
-  state.lastAskAt.set(sender, now);
-  state.public += 1;
-  state.publicBySender.set(sender, senderUsed + 1);
-  return { allowed: true };
-}
+const MAX_QUOTED_TEXT = 8_000;
 
 /** `.ai 5 what did he say` -> { count: 5, question }. A bare number is a usage error. */
 function parseAiArgs(args) {
@@ -139,32 +84,64 @@ function renderProviders(ctx) {
 
 /** The question path: `.ai <question>` or `.ai <n> <question>`. */
 async function askAi(ctx) {
-  if (!publicAiAllowed(ctx)) return; // fail closed and do not advertise a public bot
-
   const parsed = parseAiArgs(ctx.args || []);
   if (parsed.error) return ctx.reply(parsed.error);
   if (!parsed.question) {
     return ctx.reply(`usage: .ai <question>\nor: .ai <n> <question> (uses the last n messages of this chat, 1–${MAX_CONTEXT})`);
   }
 
-  // A public request must never upload unrelated chat history to an AI provider.
-  // The owner may explicitly request local context; everyone else gets only
-  // their text after `.ai`.
-  if (!ctx.isOwner && parsed.count) {
+  const quotedRaw = extractQuotedRaw(ctx.msg?.raw);
+  if (quotedRaw && parsed.count) {
+    return ctx.reply('When replying to one message, use `.ai <question>` without a history number.');
+  }
+
+  // A public user cannot request cached multi-message history. The deliberately
+  // linked main account is allowed to do so from its own phone; that command is
+  // opt-in through physical possession of the linked account, not .env.
+  if (!ctx.isOwner && !ctx.isSelfIssued && parsed.count) {
     return ctx.reply('For privacy, public AI accepts only `.ai <question>` without chat-history context.');
   }
 
-  const quota = takeQuota(ctx);
-  if (!quota.allowed) {
-    if (quota.notice) return ctx.reply(quota.notice);
-    return;
-  }
+  // Check access before downloading a quoted image or invoking any provider.
+  const access = await authorizeAiRequest(ctx);
+  if (!access.allowed) return;
 
   let rows = [];
   if (parsed.count) {
     rows = ctx.bot?.chatContext?.recent(ctx.jid, parsed.count) || [];
     if (!rows.length) return ctx.reply('No messages cached for this chat yet, so there is no context to use.');
   }
+
+  if (quotedRaw) {
+    const quotedMedia = extractMediaType(quotedRaw.message);
+    const quotedText = extractText(quotedRaw.message).trim().slice(0, MAX_QUOTED_TEXT);
+    if (quotedMedia && quotedMedia.type !== 'image') {
+      return ctx.reply('Reply-to-message AI supports quoted text, captions, or images.');
+    }
+    if (!quotedMedia && !quotedText) {
+      return ctx.reply('That quoted message has no text, caption, or supported image to analyse.');
+    }
+
+    let images = [];
+    if (quotedMedia?.type === 'image') {
+      try {
+        const buffer = await downloadWhatsAppMedia(ctx.socket, quotedRaw, ctx.logger);
+        images = [buffer.toString('base64')];
+      } catch (err) {
+        return ctx.reply(`⚠️ Could not download the quoted image: ${err.message}`);
+      }
+    }
+
+    const source = quotedMedia
+      ? `One quoted image${quotedText ? ` with this caption:\n${quotedText}` : ''}`
+      : `One quoted message:\n${quotedText}`;
+    const prompt = `${source}\n\nQuestion about ONLY that quoted item:\n${parsed.question}`;
+    return run(ctx, async (ai) => {
+      const answer = await ai.complete({ prompt, system: SYSTEM_BASE, images, maxTokens: 1000 });
+      return `🤖 *AI's Answer*\n\n${answer}`;
+    });
+  }
+
   const prompt = rows.length
     ? `Conversation so far (last ${rows.length} messages in this chat):\n${transcript(rows, ctx.bot?.contacts)}\n\nQuestion: ${parsed.question}`
     : parsed.question;
@@ -177,6 +154,35 @@ async function askAi(ctx) {
 
 const CHECK_PROVIDERS = ['gemini', 'groq', 'openrouter'];
 const CHECK_TRIGGER = '-check-';
+const BLOCK_TRIGGER = '-blist-';
+const UNBLOCK_TRIGGER = '-wlist-';
+
+async function manageAiBlocklist(ctx, action, args) {
+  if (!ctx.isOwner) return ctx.reply('Only the controller can change the AI blocklist.');
+  if (ctx.isGroup) return ctx.reply('For safety, use AI blocklist controls in the private controller chat.');
+
+  const target = String(args[0] || '').trim();
+  if (!target || target.toLowerCase() === 'list') {
+    const rows = listAiBlocks(ctx.db);
+    if (!rows.length) return ctx.reply('🤖 *AI blocklist*\n\nNo numbers are blocked.');
+    return ctx.reply(`🤖 *AI blocklist (${rows.length})*\n\n${rows.map((row) => `• ${displayAiUser(row.jid)}`).join('\n')}`);
+  }
+
+  try {
+    if (action === 'block') {
+      const result = addAiBlock(ctx.db, target, ctx.sender);
+      return ctx.reply(result.changed
+        ? `🤖 ${displayAiUser(result.jid)} cannot use provider-backed AI commands now.`
+        : `🤖 ${displayAiUser(result.jid)} is already blocked from provider-backed AI commands.`);
+    }
+    const result = removeAiBlock(ctx.db, target);
+    return ctx.reply(result.changed
+      ? `🤖 ${displayAiUser(result.jid)} can use AI commands again.`
+      : `🤖 ${displayAiUser(result.jid)} was not on the AI blocklist.`);
+  } catch (err) {
+    return ctx.reply(`⚠️ ${err.message}`);
+  }
+}
 
 /**
  * `.ai -check- [all|gemini|groq|openrouter|openai]`. Owner only.
@@ -212,9 +218,10 @@ export default {
       usage: '.ai <question>  or  .ai <n> <question>',
       ownerOnly: false,
       async execute(ctx) {
-        if (String(ctx.args?.[0] || '').toLowerCase() === CHECK_TRIGGER) {
-          return aiCheck(ctx, ctx.args.slice(1));
-        }
+        const subcommand = String(ctx.args?.[0] || '').toLowerCase();
+        if (subcommand === CHECK_TRIGGER) return aiCheck(ctx, ctx.args.slice(1));
+        if (subcommand === BLOCK_TRIGGER) return manageAiBlocklist(ctx, 'block', ctx.args.slice(1));
+        if (subcommand === UNBLOCK_TRIGGER) return manageAiBlocklist(ctx, 'unblock', ctx.args.slice(1));
         try {
           return await askAi(ctx);
         } catch (err) {

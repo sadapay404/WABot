@@ -1,8 +1,8 @@
 # Nexus-WA command quick reference
 
-This is the compact reference for the **42-command** Nexus-WA build. Commands use the `.` prefix shown below. In observe mode, replies are limited to the configured owner; commands that could send a message remain subject to the outbound safety controls.
+This is the compact reference for the **43-command** Nexus-WA build. Commands use the `.` prefix shown below. In observe mode, replies are limited to the configured owner; commands that could send a message remain subject to the outbound safety controls.
 
-**Access:** **Owner** means the sender must be a phone-number JID in `OWNER_JIDS`. **Anyone** means the command is not owner-only. Public `.ai` replies still need its explicit live-mode opt-in described below.
+**Access:** **Owner** means the sender must be a phone-number JID in `OWNER_JIDS`. **Anyone** means the command is not owner-only. Public `.ai` replies are built into live mode; fixed safeguards are described below.
 
 > For complete examples, guided flows, scheduling grammar, privacy limitations, and troubleshooting, see [`docs/COMMANDS.md`](docs/COMMANDS.md).
 
@@ -11,13 +11,14 @@ This is the compact reference for the **42-command** Nexus-WA build. Commands us
 | Command | Aliases | Access | Purpose |
 |---|---|---|---|
 | `.agenda` | — | Owner | View pending sends or decide missed jobs |
-| `.ai` | `.gpt` | Anyone (explicit public opt-in) | Ask the configured AI; public users use `.ai <question>`, while owner-only `.ai <n> <question>` adds context and `.ai -check-` tests providers |
+| `.ai` | `.gpt` | Anyone in live mode | Ask AI or analyse one replied-to text/image; the linked main account may use `.ai <n>` context; controller has `-check-` and blocklist controls |
 | `.aiprovider` | `.aiorder` | Owner | Show or set AI provider priority (1 = tried first, the rest are fallbacks) |
 | `.antidelete` | `.ad`, `.deleted`, `.deletes` | Owner | Toggle deletion capture/alerts and review history |
 | `.archive` | `.media` | Owner | List locally archived media |
 | `.ask` | — | Owner | Ask about explicitly selected direct-chat history |
 | `.audit` | `.log` | Owner | Review bot actions |
 | `.backup` | `.export` | Owner | Create an encrypted local backup or list backups |
+| `.calc` | `.calculate` | Anyone | Solve safe arithmetic locally; AI handles algebra/word equations and `--process` |
 | `.blocked` | `.blockcheck` | Owner | Review suspected blocks (never certain) |
 | `.digest` | `.summary`, `.briefing` | Owner | Summarize recent activity |
 | `.draft` | `.reply` | Owner | Draft a reply; never sends it |
@@ -58,8 +59,9 @@ This is the compact reference for the **42-command** Nexus-WA build. Commands us
 - Use **`.vision`**, `.describe`, `.ocr`, or **`.visual`** with an image caption. It uses only vision-capable AI models; Groq `openai/gpt-oss-120b` is text-only.
 - Use **`.sticker`** as the caption of an attached image; it is not a text-only command. The FFmpeg conversion now uses a portable transparent padding color.
 - **`.status`** lists statuses. Use **`.health`** for bot/runtime health.
-- Public AI requires `NEXUS_MODE=live`, `PUBLIC_AI_ENABLED=true`, and for groups `PUBLIC_AI_GROUPS=true`. Public questions never carry cached chat context; owner `.ai <n>` context does.
-- The linked main account normally ignores its own outgoing commands to prevent loops. Set `SELF_AI_COMMANDS=true` to let it use simple `.ai <question>` in friend chats/enabled groups; it cannot use `.ai <n>` context there.
+- In live mode, public `.ai` works in DMs/groups without `PUBLIC_AI_*` or `SELF_AI_COMMANDS` settings. It sends only the question, or exactly one quoted text/caption/image when invoked as a reply; public users cannot request cached history.
+- The linked main account may use `.ai <question>` and `.ai <n> <question>` in any direct chat/group. Normal outgoing text remains ignored; replayed commands are deduplicated. The spare controller can use `.ai -blist- <number>` / `.ai -wlist- <number>` privately to manage the persistent AI blocklist.
+- `.calc <equation>` evaluates safe arithmetic locally. Algebra, word equations, and `.calc <equation> --process` use the configured AI; its label is `Equation Solved--Calc`.
 - On Kerit, set `ALLOW_LIVE_WITHOUT_TELEGRAM=true` only with the spare controller number in `OWNER_JIDS`. Set `NEXUS_HOST=kerit` only for a Git checkout; after `.update`, use the panel **Restart** button.
 - Use `.help` or `.help <category>` to see the commands loaded by the running bot.
 - In the main-number setup, send owner commands from the configured **spare controller phone** in a direct chat with the main linked number—not from the main account’s self/You chat.

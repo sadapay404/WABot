@@ -12,12 +12,6 @@ const EDITABLE_KEYS = new Set([
   'AI_MODEL',
   'AI_MAX_HISTORY',
   'AI_ASK_MAX_CHARS',
-  'PUBLIC_AI_ENABLED',
-  'PUBLIC_AI_GROUPS',
-  'SELF_AI_COMMANDS',
-  'PUBLIC_AI_SENDER_COOLDOWN_SEC',
-  'PUBLIC_AI_DAILY_LIMIT',
-  'PUBLIC_AI_PER_SENDER_DAILY_LIMIT',
   'CAPTURE_ALERT_JID',
 ]);
 const SECRET_TTL_MS = 2 * 60 * 1_000;
@@ -215,9 +209,8 @@ export class EnvEditor {
       `AI provider: ${ai.provider || 'groq'}`,
       `AI model: ${ai.model || '(provider default)'}`,
       `AI history window: ${ai.maxHistory || 12}`,
-      `Public AI: ${ai.publicEnabled ? (ai.publicGroups ? 'DMs and groups' : 'DMs only') : 'off'}`,
-      `Linked-account .ai: ${ai.selfCommands ? 'enabled (simple questions only)' : 'off'}`,
-      `Public AI limits: ${ai.publicSenderCooldownSec ?? 20}s per sender, ${ai.publicPerSenderDailyLimit ?? 10} per sender/day, ${ai.publicDailyLimit ?? 100} total/day`,
+      'Public AI: built into live mode for DMs and groups (20s per sender, 10 per sender/day, 100 total/day).',
+      'Linked-account AI: built into live mode, including `.ai <n>` cached history.',
       ...keys,
       `Capture alerts: ${alert}`,
       `Owner numbers: ${this.#normalizedOwners().length}`,
@@ -247,25 +240,6 @@ export class EnvEditor {
       if (!Number.isInteger(number) || number < 4_000 || number > 100_000) throw new Error('AI_ASK_MAX_CHARS must be from 4000 to 100000');
       return String(number);
     }
-    if (['PUBLIC_AI_ENABLED', 'PUBLIC_AI_GROUPS', 'SELF_AI_COMMANDS'].includes(key)) {
-      if (!/^(?:true|false|1|0|yes|no|on|off)$/i.test(text)) throw new Error(`${key} must be true or false`);
-      return /^(?:true|1|yes|on)$/i.test(text) ? 'true' : 'false';
-    }
-    if (key === 'PUBLIC_AI_SENDER_COOLDOWN_SEC') {
-      const number = Number(text);
-      if (!Number.isInteger(number) || number < 5 || number > 300) throw new Error('PUBLIC_AI_SENDER_COOLDOWN_SEC must be from 5 to 300');
-      return String(number);
-    }
-    if (key === 'PUBLIC_AI_DAILY_LIMIT') {
-      const number = Number(text);
-      if (!Number.isInteger(number) || number < 1 || number > 10_000) throw new Error('PUBLIC_AI_DAILY_LIMIT must be from 1 to 10000');
-      return String(number);
-    }
-    if (key === 'PUBLIC_AI_PER_SENDER_DAILY_LIMIT') {
-      const number = Number(text);
-      if (!Number.isInteger(number) || number < 1 || number > 1_000) throw new Error('PUBLIC_AI_PER_SENDER_DAILY_LIMIT must be from 1 to 1000');
-      return String(number);
-    }
     if (key === 'CAPTURE_ALERT_JID') {
       const jid = userJid(text);
       if (!jid) throw new Error('use a full WhatsApp user number or JID');
@@ -291,24 +265,6 @@ export class EnvEditor {
     } else if (key === 'AI_ASK_MAX_CHARS') {
       this.config.ai.askMaxChars = Number(value) || 60_000;
       process.env.AI_ASK_MAX_CHARS = value;
-    } else if (key === 'PUBLIC_AI_ENABLED') {
-      this.config.ai.publicEnabled = value === 'true';
-      process.env.PUBLIC_AI_ENABLED = value;
-    } else if (key === 'PUBLIC_AI_GROUPS') {
-      this.config.ai.publicGroups = value === 'true';
-      process.env.PUBLIC_AI_GROUPS = value;
-    } else if (key === 'SELF_AI_COMMANDS') {
-      this.config.ai.selfCommands = value === 'true';
-      process.env.SELF_AI_COMMANDS = value;
-    } else if (key === 'PUBLIC_AI_SENDER_COOLDOWN_SEC') {
-      this.config.ai.publicSenderCooldownSec = Number(value) || 20;
-      process.env.PUBLIC_AI_SENDER_COOLDOWN_SEC = value;
-    } else if (key === 'PUBLIC_AI_DAILY_LIMIT') {
-      this.config.ai.publicDailyLimit = Number(value) || 100;
-      process.env.PUBLIC_AI_DAILY_LIMIT = value;
-    } else if (key === 'PUBLIC_AI_PER_SENDER_DAILY_LIMIT') {
-      this.config.ai.publicPerSenderDailyLimit = Number(value) || 10;
-      process.env.PUBLIC_AI_PER_SENDER_DAILY_LIMIT = value;
     } else if (key === 'CAPTURE_ALERT_JID') {
       this.config.safety.captureAlertJid = value;
       process.env.CAPTURE_ALERT_JID = value;

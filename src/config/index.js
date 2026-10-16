@@ -227,17 +227,8 @@ export function buildConfig(overrides = {}) {
       model: process.env.AI_MODEL || '',
       senderCooldownSec: int(process.env.AI_SENDER_COOLDOWN_SEC, 15),
       dailyLimit: int(process.env.AI_DAILY_LIMIT, 200),
-      // Public AI is opt-in even in live mode. Groups need their own explicit
-      // opt-in because every prompt is sent to the configured AI provider.
-      publicEnabled: bool(process.env.PUBLIC_AI_ENABLED, false),
-      publicGroups: bool(process.env.PUBLIC_AI_GROUPS, false),
-      // Allows the linked main account to deliberately invoke a simple `.ai`
-      // command in another chat. Kept separate from public access because
-      // normal outgoing messages must remain inert to prevent command loops.
-      selfCommands: bool(process.env.SELF_AI_COMMANDS, false),
-      publicSenderCooldownSec: Math.max(5, Math.min(300, int(process.env.PUBLIC_AI_SENDER_COOLDOWN_SEC, 20))),
-      publicDailyLimit: Math.max(1, Math.min(10_000, int(process.env.PUBLIC_AI_DAILY_LIMIT, 100))),
-      publicPerSenderDailyLimit: Math.max(1, Math.min(1_000, int(process.env.PUBLIC_AI_PER_SENDER_DAILY_LIMIT, 10))),
+      // Public-AI behavior/caps live in core/aiAccess.js. There are no
+      // PUBLIC_AI_* or SELF_AI_COMMANDS panel variables in this configuration.
       maxHistory: int(process.env.AI_MAX_HISTORY, 12),
       askMaxChars: Math.max(4_000, Math.min(int(process.env.AI_ASK_MAX_CHARS, 60_000), 100_000)),
       keys: {
@@ -285,15 +276,6 @@ export function validateConfig(cfg) {
   }
   if (cfg.mode === MODES.LIVE && !cfg.telegram.enabled && cfg.safety.allowLiveWithoutTelegram) {
     warnings.push('Live mode without Telegram was explicitly enabled; use the configured WhatsApp owner chat and .panic as the control path.');
-  }
-  if (cfg.ai.publicEnabled && !cfg.isLive) {
-    warnings.push('PUBLIC_AI_ENABLED only takes effect in NEXUS_MODE=live; observe mode never replies to non-owners.');
-  }
-  if (cfg.ai.publicGroups && !cfg.ai.publicEnabled) {
-    warnings.push('PUBLIC_AI_GROUPS=true has no effect until PUBLIC_AI_ENABLED=true (except an explicitly enabled linked-account SELF_AI_COMMANDS request).');
-  }
-  if (cfg.ai.selfCommands && !cfg.isLive) {
-    warnings.push('SELF_AI_COMMANDS only takes effect in NEXUS_MODE=live.');
   }
   if (!cfg.isDryRun && cfg.dashboard.enabled && !cfg.dashboard.token) {
     problems.push(

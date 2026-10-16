@@ -19,35 +19,62 @@ const MAIN = '15550008888@s.whatsapp.net';
 const BOB = '15550002222@s.whatsapp.net';
 const GROUP = '120363000000000001@g.us';
 
-async function setup({ cooldown = 15, publicEnabled = true, publicGroups = true, selfCommands = false } = {}) {
+async function setup() {
   const db = await getMemoryDb();
   const config = buildConfig({ mode: 'live' });
   config.safety.ownerJids = [OWNER];
   config.safety.typingIndicator = false;
-  config.ai.senderCooldownSec = cooldown;
   config.ai.dailyLimit = 200;
-  config.ai.publicEnabled = publicEnabled;
-  config.ai.publicGroups = publicGroups;
-  config.ai.selfCommands = selfCommands;
-  config.ai.publicSenderCooldownSec = cooldown;
-  config.ai.publicDailyLimit = 200;
-  config.ai.publicPerSenderDailyLimit = 200;
   const plugins = new PluginLoader({ dir: path.join(ROOT, 'src', 'plugins'), logger: quiet });
   await plugins.loadAll();
   const socket = new MockWhatsAppSocket({ logger: quiet, ownerJid: OWNER, botJid: MAIN });
   const queue = new OutboundQueue(socket, config, quiet);
   queue.attach();
-  const prompts = [];
-  const ai = { complete: async ({ prompt }) => { prompts.push(prompt); return 'Hi there'; } };
+  const calls = [];
+  const ai = {
+    complete: async (input) => {
+      calls.push(input);
+      return input.images?.length ? 'I see the quoted image.' : 'Hi there';
+    },
+  };
   const chatContext = new ChatContext({ db });
   const dispatcher = new Dispatcher({ plugins, config, logger: quiet, db });
   dispatcher.bot = { ai, chatContext, contacts: null, selfJid: MAIN };
   dispatcher.trackSocket(socket);
-  const send = async (text, { from = BOB, jid = BOB, fromMe = false, upsertType = 'notify', id = `m${Math.random()}` } = {}) => {
+
+  const send = async (text, {
+    from = BOB,
+    jid = BOB,
+    fromMe = false,
+    upsertType = 'notify',
+    id = `m${Math.random()}`,
+    quotedMessage = null,
+    quotedId = 'quoted-1',
+    senderAlt = null,
+  } = {}) => {
+    const message = quotedMessage
+      ? {
+          extendedTextMessage: {
+            text,
+            contextInfo: {
+              stanzaId: quotedId,
+              participant: from,
+              quotedMessage,
+            },
+          },
+        }
+      : { conversation: text };
     const raw = {
-      key: { id, remoteJid: jid, participant: jid === from ? undefined : from, fromMe },
+      key: {
+        id,
+        remoteJid: jid,
+        remoteJidAlt: jid === from ? senderAlt || undefined : undefined,
+        participant: jid === from ? undefined : from,
+        participantAlt: jid === from ? undefined : senderAlt || undefined,
+        fromMe,
+      },
       messageTimestamp: Math.floor(Date.now() / 1000),
-      message: { conversation: text },
+      message,
       pushName: 'T',
       upsertType,
     };
@@ -55,73 +82,105 @@ async function setup({ cooldown = 15, publicEnabled = true, publicGroups = true,
     await dispatcher.handle(socket, msg);
     return msg;
   };
-  return { socket, send, prompts, chatContext, config };
+  return { db, socket, send, calls, chatContext, config };
 }
 
-test('.ai answers with the AI\'s Answer label, from any chat', async () => {
-  const { socket, send } = await setup();
+test('public .ai is built into live mode for direct chats and groups without PUBLIC_AI_* config', async () => {
+  const { socket, send, config } = await setup();
+  assert.equal('publicEnabled' in config.ai, false);
+  assert.equal('publicGroups' in config.ai, false);
+
   await send('.ai what is two plus two', { jid: GROUP, from: BOB });
   assert.equal(socket.outbox.at(-1).text, "🤖 *AI's Answer*\n\nHi there");
 });
 
-test('the linked main account can deliberately use simple .ai in another chat only after self-command opt-in', async () => {
-  const blocked = await setup({ selfCommands: false });
-  await blocked.send('.ai Who is the CEO of Xiaomi?', { jid: BOB, fromMe: true });
-  assert.equal(blocked.socket.outbox.length, 0);
-
-  const enabled = await setup({ selfCommands: true });
-  await enabled.send('.ai Who is the CEO of Xiaomi?', { jid: BOB, fromMe: true, id: 'self-ai-1' });
-  assert.match(enabled.socket.outbox.at(-1).text, /AI's Answer/);
-  // Replayed fromMe upserts must not create a second provider call/reply.
-  await enabled.send('.ai Who is the CEO of Xiaomi?', { jid: BOB, fromMe: true, id: 'self-ai-1' });
-  assert.equal(enabled.socket.outbox.length, 1);
-
-  // The linked account cannot use the `.ai <n>` history-export form.
-  await enabled.send('.ai 2 summarize our chat', { jid: BOB, fromMe: true, id: 'self-ai-context' });
-  assert.equal(enabled.socket.outbox.length, 1);
-});
-
-test('public .ai is silent unless explicitly enabled for the chat type', async () => {
-  const disabled = await setup({ publicEnabled: false });
-  await disabled.send('.ai hello', { jid: BOB, from: BOB });
-  assert.equal(disabled.socket.outbox.length, 0);
-
-  const noGroups = await setup({ publicGroups: false });
-  await noGroups.send('.ai hello', { jid: GROUP, from: BOB });
-  assert.equal(noGroups.socket.outbox.length, 0);
-  await noGroups.send('.ai hello', { jid: BOB, from: BOB });
-  assert.match(noGroups.socket.outbox.at(-1).text, /AI's Answer/);
-});
-
-test('.ai shows usage for a bare count and rejects counts over the limit', async () => {
-  const { socket, send } = await setup();
-  await send('.ai 3', { jid: GROUP, from: BOB });
-  assert.match(socket.outbox.at(-1).text, /usage: \.ai <question>/);
-  await send('.ai 500 hello', { jid: GROUP, from: OWNER });
-  assert.match(socket.outbox.at(-1).text, /between 1 and 50/);
-});
-
-test('.ai <n> passes chat context only for the owner, not a public group participant', async () => {
-  const { socket, send, prompts, chatContext } = await setup();
+test('linked main account can issue simple and cached-history .ai in all groups without SELF_AI_COMMANDS', async () => {
+  const { socket, send, calls, chatContext, config } = await setup();
+  assert.equal('selfCommands' in config.ai, false);
   chatContext.record({ id: 'a', jid: GROUP, sender: BOB, isBot: false, text: 'lunch at one?', timestamp: 1 });
-  chatContext.record({ id: 'b', jid: GROUP, sender: OWNER, isBot: true, text: 'yes', timestamp: 2 });
+  chatContext.record({ id: 'b', jid: GROUP, sender: MAIN, isBot: true, text: 'yes', timestamp: 2 });
 
-  await send('.ai 2 what time was that', { jid: GROUP, from: BOB });
-  assert.equal(prompts.length, 0);
-  assert.match(socket.outbox.at(-1).text, /For privacy/);
+  await send('.ai 2 what time was that', { jid: GROUP, fromMe: true, id: 'self-history' });
+  assert.match(socket.outbox.at(-1).text, /AI's Answer/);
+  assert.match(calls.at(-1).prompt, /lunch at one/);
+  assert.match(calls.at(-1).prompt, /Question: what time was that/);
 
-  await send('.ai 2 what time was that', { jid: GROUP, from: OWNER });
-  assert.equal(prompts.length, 1);
-  assert.match(prompts[0], /Me: yes/);
-  assert.match(prompts[0], /\+15550002222: lunch at one\?/);
-  assert.match(prompts[0], /Question: what time was that/);
+  await send('.ai hello again', { jid: GROUP, fromMe: true, id: 'self-simple' });
+  assert.match(socket.outbox.at(-1).text, /AI's Answer/);
+
+  // Replayed outgoing upserts do not duplicate either an AI call or reply.
+  const callsBeforeReplay = calls.length;
+  const repliesBeforeReplay = socket.outbox.length;
+  await send('.ai hello again', { jid: GROUP, fromMe: true, id: 'self-simple' });
+  await send('.ai new history replay', { jid: GROUP, fromMe: true, id: 'history-append', upsertType: 'append' });
+  assert.equal(calls.length, callsBeforeReplay);
+  assert.equal(socket.outbox.length, repliesBeforeReplay);
 });
 
-test('public per-sender cooldown silently blocks a second question from the same person', async () => {
-  const { socket, send, prompts } = await setup({ cooldown: 60 });
-  await send('.ai first', { jid: GROUP, from: BOB });
-  const replies = socket.outbox.length;
-  await send('.ai second', { jid: GROUP, from: BOB });
-  assert.equal(prompts.length, 1);
-  assert.equal(socket.outbox.length, replies);
+test('linked main account can use .calc in another chat without opening normal outgoing commands', async () => {
+  const { socket, send } = await setup();
+  await send('.calc 6 * 7', { jid: GROUP, fromMe: true, id: 'self-calc' });
+  assert.equal(socket.outbox.at(-1).text, '🧮 *Equation Solved--Calc*\n\n42');
+});
+
+test('public users cannot request cached multi-message history', async () => {
+  const { socket, send, calls } = await setup();
+  await send('.ai 2 summarize our chat', { jid: GROUP, from: BOB });
+  assert.equal(calls.length, 0);
+  assert.match(socket.outbox.at(-1).text, /For privacy/);
+});
+
+test('reply-to-message .ai sends only quoted text and the new question', async () => {
+  const { send, calls } = await setup();
+  await send('.ai What does this mean?', {
+    jid: GROUP,
+    from: BOB,
+    quotedMessage: { conversation: 'Only this quoted sentence is sent.' },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].prompt, /Only this quoted sentence is sent/);
+  assert.match(calls[0].prompt, /What does this mean/);
+  assert.doesNotMatch(calls[0].prompt, /Conversation so far/);
+  assert.deepEqual(calls[0].images || [], []);
+});
+
+test('reply-to-message .ai can analyse one quoted image and optional caption', async () => {
+  const { socket, send, calls } = await setup();
+  await send('.ai Read the sign.', {
+    jid: GROUP,
+    from: BOB,
+    quotedMessage: {
+      imageMessage: {
+        mimetype: 'image/jpeg',
+        caption: 'A shop-front sign',
+        mediaKey: Buffer.alloc(32).toString('base64'),
+        directPath: '/mock-image',
+      },
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].images.length, 1);
+  assert.match(calls[0].prompt, /A shop-front sign/);
+  assert.match(calls[0].prompt, /Read the sign/);
+  assert.match(socket.outbox.at(-1).text, /I see the quoted image/);
+});
+
+test('controller can persistently block and unblock public provider-backed AI', async () => {
+  const { send, calls, socket } = await setup();
+  await send('.ai -blist- 15550002222', { from: OWNER, jid: OWNER });
+  assert.match(socket.outbox.at(-1).text, /cannot use provider-backed AI/);
+
+  const beforeBlocked = calls.length;
+  // A group delivery can identify this same phone by an LID and provide the
+  // phone JID in participantAlt; the number block must still apply.
+  await send('.ai hello', { from: '22222@lid', senderAlt: BOB, jid: GROUP });
+  assert.equal(calls.length, beforeBlocked);
+  assert.match(socket.outbox.at(-1).text, /^🤖 /);
+
+  await send('.ai -wlist- 15550002222', { from: OWNER, jid: OWNER });
+  assert.match(socket.outbox.at(-1).text, /can use AI commands again/);
+  await send('.ai hello', { from: BOB, jid: BOB });
+  assert.equal(calls.length, beforeBlocked + 1);
 });

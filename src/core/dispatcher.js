@@ -75,10 +75,10 @@ export class Dispatcher {
     /** name -> last invocation ms */
     this.lastRun = new Map();
     this.selfEchoes = new Map();
-    // A phone-sent command can be delivered more than once while WhatsApp
-    // catches up. Only an explicitly enabled self `.ai` may cross the normal
-    // fromMe gate, and a message id is claimed once to prevent duplicate AI
-    // calls/replies on an upsert replay.
+    // A phone-sent assistant command can be delivered more than once while
+    // WhatsApp catches up. Only the narrow `.ai` / `.calc` exceptions cross
+    // the normal fromMe gate, and a message id is claimed once to prevent
+    // duplicate provider calls/replies on an upsert replay.
     this.selfAiCommands = new Map();
     this.observedQueues = new WeakSet();
     this.stats = { handled: 0, rejected: 0, errors: 0 };
@@ -196,18 +196,16 @@ export class Dispatcher {
       const candidate = parsed.isCommand ? this.plugins.resolve(parsed.command) : null;
       const firstArg = String(parsed.args?.[0] || '').toLowerCase();
       // Outgoing messages normally remain inert: that is the loop-prevention
-      // boundary. The sole opt-in exception is a newly sent, simple `.ai`
-      // question from the linked account, never a history export or checker.
+      // boundary. The narrow built-in exception is a newly sent `.ai`/`.gpt`
+      // question (including deliberate `.ai <n>` context) or `.calc` from the
+      // linked account. Owner-only AI administration remains controller-only.
       const selfIssuedAi = Boolean(
         msg.isBot &&
         !isSelfChat &&
-        candidate?.name === 'ai' &&
         this.config.isLive &&
-        this.config.ai?.selfCommands &&
-        (!msg.isGroup || this.config.ai?.publicGroups) &&
         parsed.args.length &&
-        firstArg !== '-check-' &&
-        !/^\d{1,3}$/.test(firstArg)
+        ((candidate?.name === 'ai' && !['-check-', '-blist-', '-wlist-'].includes(firstArg)) ||
+          candidate?.name === 'calc')
       );
       if (msg.isBot && !isSelfChat) {
         if (!selfIssuedAi) return;

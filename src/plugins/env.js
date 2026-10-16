@@ -80,7 +80,7 @@ export default {
         }
       }
       if (!value) {
-        return ctx.reply('Usage: `.env set AI_PROVIDER groq` | `.env set AI_MODEL <model-id>` | `.env set PUBLIC_AI_ENABLED true` | `.env set PUBLIC_AI_GROUPS true` | `.env set SELF_AI_COMMANDS true` | `.env set CAPTURE_ALERT_JID <number>`');
+        return ctx.reply('Usage: `.env set AI_PROVIDER groq` | `.env set AI_MODEL <model-id>` | `.env set AI_MAX_HISTORY 12` | `.env set CAPTURE_ALERT_JID <number>`');
       }
       try {
         const key = editor.setValue(rawKey, value);
@@ -104,9 +104,7 @@ export default {
       '`.env status` — show approved settings; secrets remain hidden.',
       '`.env set AI_PROVIDER groq|openai|gemini`',
       '`.env set GROQ_API_KEY` — then send the key as the next private message.',
-      '`.env set PUBLIC_AI_ENABLED true` — enable public direct-message `.ai` replies.',
-      '`.env set PUBLIC_AI_GROUPS true` — also enable public group `.ai` replies.',
-      '`.env set SELF_AI_COMMANDS true` — let the linked main account use simple `.ai` in other chats.',
+      'Public `.ai`, quoted `.ai`, and the linked-account `.ai <n>` behavior are built into live mode; no public-AI environment variables are needed.',
       '`.env unset GROQ_API_KEY` — remove a saved key.',
       '`.env owner add <number>` — authorize the linked account or another controller.',
       'Only approved AI and owner settings can be changed; arbitrary environment variables are blocked.',
