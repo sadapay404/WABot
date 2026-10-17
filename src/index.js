@@ -28,6 +28,9 @@ import { ContactStore } from './core/contactStore.js';
 import { MessageCache } from './core/messageCache.js';
 import { MessageInbox } from './core/messageInbox.js';
 import { AskContext } from './core/askContext.js';
+import { PendingPrompts } from './core/pendingPrompts.js';
+import { ChatContext } from './core/chatContext.js';
+import { StatusFeed } from './core/statusFeed.js';
 import { EnvEditor } from './core/envEditor.js';
 import { MediaStore } from './core/mediaStore.js';
 import { AntiDelete } from './core/antiDelete.js';
@@ -46,9 +49,10 @@ import { SessionBackup } from './core/backup.js';
 import { RemoteVault } from './core/remoteVault.js';
 import { NoteStore } from './core/notes.js';
 import { AiClient } from './core/ai.js';
+import { ImageGenerationClient } from './core/imageGeneration.js';
 import { OutboundQueue } from './core/outboundQueue.js';
 import { LogBuffer } from './core/logBuffer.js';
-import { TermuxControl } from './core/termuxControl.js';
+import { HostControl } from './core/hostControl.js';
 import { Dashboard } from './web/dashboard.js';
 import { normalizeJid } from './core/jid.js';
 import { formatUptime } from './lib/format.js';
@@ -75,6 +79,27 @@ const logger = createLogger(config.logLevel, 'nexus');
 const logs = new LogBuffer(600).attach();
 const startedAt = Date.now();
 
+// Forwards every call to the connection's current socket. A call made during
+// a reconnect gap fails the way a call on a dropped link does.
+function liveSocket(connection) {
+  return new Proxy(
+    {},
+    {
+      get(_, prop) {
+        const live = connection.socket;
+        if (!live) throw new Error('Connection Closed');
+        const value = live[prop];
+        return typeof value === 'function' ? value.bind(live) : value;
+      },
+      set(_, prop, value) {
+        const live = connection.socket;
+        if (live) live[prop] = value;
+        return true;
+      },
+    }
+  );
+}
+
 // ── Banner ───────────────────────────────────────────────────────────
 function banner() {
   const bar = '─'.repeat(62);
@@ -90,7 +115,7 @@ function banner() {
 function wireEvents(socket, app) {
   // The mock is a plain EventEmitter; Baileys emits through `socket.ev`.
   const on = socket.ev ? (e, f) => socket.ev.on(e, f) : (e, f) => socket.on(e, f);
-  const { dispatcher, cache, antiDelete, viewOnce, editWatch, registry, contacts, presenceLog, profileWatch, groupWatch, messageInbox, webhooks, logger: log } = app;
+  const { dispatcher, cache, chatContext, statusFeed, antiDelete, viewOnce, editWatch, registry, contacts, presenceLog, profileWatch, groupWatch, messageInbox, webhooks, logger: log } = app;
   const selfJid = () => (socket.user?.id ? normalizeJid(socket.user.id) : '');
 
   on('messages.upsert', async ({ messages = [], type = null } = {}) => {
@@ -105,13 +130,22 @@ function wireEvents(socket, app) {
         msg.upsertType = type || 'unknown';
         if (selfJid()) registry.countIn(selfJid());
 
+        // Recorded before any early return below: status feed and the chat
+        // transcript used by `.ai <n>`. A failure here must not stop dispatch.
+        try {
+          statusFeed?.record(raw, msg);
+          chatContext?.record(msg);
+        } catch (err) {
+          log?.warn?.({ err: err.message }, 'context capture failed');
+        }
+
         // A pending owner API key is consumed before any cache, watcher, or
         // command handler can persist the plaintext. The confirmation is sent
         // directly and the secret message never enters ordinary dispatch.
         if (await app.envEditor?.consumePending({
           msg,
           socket,
-          isOwner: dispatcher.isOwner(msg.sender),
+          isOwner: dispatcher.isOwner(msg.sender, msg.senderAlt),
         })) continue;
         if (app.envEditor?.shouldSkipMessage(msg)) msg.sensitive = true;
 
@@ -269,6 +303,7 @@ async function main() {
   const triggers = new Triggers({ db, logger });
   const presenceLog = new PresenceLog({ db, logger });
   const ai = new AiClient({ config, logger });
+  const imageGenerator = new ImageGenerationClient({ config, logger });
 
   // Plugins.
   const plugins = new PluginLoader({ dir: path.join(config.root, 'src', 'plugins'), logger });
@@ -306,13 +341,21 @@ async function main() {
     };
     connection.on('open', (payload) => dispatchConnectionEvent('open', payload));
     connection.on('close', (payload) => dispatchConnectionEvent('close', payload));
-    socket = await connection.connect();
+    await connection.connect();
+    // Baileys replaces its socket on every reconnect. Services hold this
+    // forwarder, not the first socket, so sends always go to the live one.
+    socket = liveSocket(connection);
   }
 
-  // Structural rate limiting, applied to both transports so dry-run pacing
-  // matches production. attach() wraps the socket in place and returns it.
-  const queue = new OutboundQueue(socket, config, logger);
-  queue.attach();
+  // The kill switch (halt/resume) lives on this queue. The real connection
+  // owns one queue and re-attaches it to every new socket.
+  let queue;
+  if (config.isDryRun) {
+    queue = new OutboundQueue(socket, config, logger);
+    queue.attach();
+  } else {
+    queue = connection.queue;
+  }
 
   // Dispatcher.
   const dispatcher = new Dispatcher({
@@ -325,8 +368,11 @@ async function main() {
   });
 
   const selfJid = normalizeJid(socket.user?.id || '');
-  const termuxControl = new TermuxControl({ root: config.root, logger });
+  const hostControl = new HostControl({ root: config.root, logger });
   const askContext = new AskContext({ db });
+  const chatContext = new ChatContext({ db });
+  const statusFeed = new StatusFeed({ db });
+  const prompts = new PendingPrompts();
   const messageInbox = new MessageInbox({
     db,
     cache,
@@ -374,7 +420,7 @@ async function main() {
     config, logger, db, startedAt,
     registry, contacts, cache, mediaStore, messageInbox, notes, audit, webhooks, triggers,
     presenceLog, profileWatch, groupWatch, editWatch, antiDelete, viewOnce,
-    scheduler, scheduleWizard, reconnectCatchup, ai, askContext, envEditor, backup, vault, termuxControl, plugins, dispatcher, queue, logs, connection,
+    scheduler, scheduleWizard, reconnectCatchup, ai, imageGenerator, askContext, chatContext, statusFeed, prompts, envEditor, backup, vault, hostControl, plugins, dispatcher, queue, logs, connection,
     selfJid,
     // Kill-switch: the only thing that can stop outbound instantly.
     safety: {
@@ -629,6 +675,7 @@ function allStats(app, dispatcher) {
     media: app.mediaStore?.stats(),
     notes: app.notes?.summary(),
     ai: { provider: app.ai?.provider, configured: app.ai?.configured(), ...app.ai?.stats },
+    imageGeneration: { configured: app.imageGenerator?.configured(), ...app.imageGenerator?.stats },
   };
 }
 

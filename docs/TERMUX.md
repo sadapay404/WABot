@@ -120,6 +120,108 @@ your send-now/skip choice instead of being sent late automatically.
 
 ---
 
+## Staying running after an outage or reboot
+
+Three layers now work together. Each one starts the bot only if it should be
+running and is not, so they never fight:
+
+1. **Termux:Boot** runs `nexus ensure` after the phone starts. It waits for
+   WiFi, then starts anyway.
+2. **Android job watchdog** (Termux:API) runs `nexus ensure` every 15 minutes,
+   even after Android has killed Termux. It survives reboots. Turn it on with
+   `nexus watchdog on`. `nexus start` also turns it on.
+3. **MacroDroid macros** (see "MacroDroid macros" below) run the same check every
+   15 minutes, after each reboot, and on Wi-Fi reconnect. They use the Termux:Tasker
+   plugin.
+
+The bot itself keeps reconnecting when WiFi drops. It only stops for two reasons,
+and neither is restarted automatically: `nexus stop` (you stopped it), and exit
+code 3 (another device took the session, or WhatsApp unlinked it). Both are shown
+by `nexus doctor`. Run `nexus start` to bring it back.
+
+A WiFi drop can also leave the connection half-open: Termux keeps running, but
+WhatsApp never answers, and nothing exits. The bot now handles that itself:
+
+- If no data arrives from WhatsApp for 3 minutes, it drops the connection and
+  reconnects. A connection attempt that hangs for 2 minutes is retried the same way.
+- Every 30 seconds it writes a heartbeat file (~/.nexus-wa/heartbeat). Every
+  15 minutes the watchdog checks it. If the heartbeat is more than 5 minutes old,
+  or a linked bot has been offline for 20 minutes, the watchdog restarts the bot.
+  Each restart is written to the log as "watchdog: restarting bot — ...".
+
+You do not need to do anything for this. If it still happens, send the output of
+`tail -50 ~/.nexus-wa/logs/nexus.log` and `nexus doctor`. Remove any pairing code or
+token before you send them.
+
+Check the whole setup any time with:
+
+    nexus doctor
+
+It lists the boot hook, the last boot, whether the bot is running, the last exit
+reason, when the watchdog last ran, and what is still missing.
+
+### Phone steps (one time, only you can do these)
+
+- Install **Termux:Boot** and **Termux:API** from F-Droid. Open Termux:Boot once.
+- Settings → Apps → Termux, Termux:Boot, Termux:API → Battery → **Unrestricted**.
+- Settings → Wi-Fi → Advanced → **Keep Wi-Fi on during sleep → Always**. This is
+  the one that matters for your WiFi drops: otherwise Android turns WiFi off when
+  the screen sleeps.
+- Keep the phone on a charger (ideally on a UPS or a power strip with a UPS).
+  A phone whose battery fully dies is off, and it only powers itself back on when
+  your phone model does that. No app can start a phone that is switched off.
+- Optional, for the MacroDroid watchdog: install **MacroDroid** and grant it
+  Termux's permission (see the steps below).
+
+### MacroDroid macros (the restart-proof layer)
+
+This is the setup that worked on the phone. It uses the Termux:Tasker plugin, so
+it needs the **Termux:Tasker** app from F-Droid and the Termux setup from Step 0
+below. Make three macros in MacroDroid. Each one runs the same `nexus` command
+with a different argument.
+
+**Step 0, once, in Termux:** run `nexus update`, then this line (it is safe to
+run again):
+
+    mkdir -p ~/.termux/tasker && ln -sf ~/nexus-wa/deploy/termux/nexus ~/.termux/tasker/nexus && chmod +x ~/nexus-wa/deploy/termux/nexus && grep -q '^allow-external-apps *= *true' ~/.termux/termux.properties 2>/dev/null || echo 'allow-external-apps = true' >> ~/.termux/termux.properties; termux-reload-settings
+
+**Macro 1: Nexus safety check (every 15 minutes)**
+
+1. Trigger: **Time → Repeat** every **15 minutes**. Choose the repeating option, not "once".
+2. Action: **Plugin → Tasker / Locale plugin → Termux:Tasker**. Choose **nexus**.
+3. Argument: `ensure`
+4. Save and turn it on.
+
+`ensure` does nothing if the bot is running and healthy. If the bot is stopped
+(not on purpose), it starts it. If the bot is wedged, it restarts it.
+
+**Macro 2: Nexus after reboot**
+
+1. Trigger: **Device Boot**.
+2. Action: **Wait / Delay**, 90 seconds. This lets Wi-Fi come up first.
+3. Action: **Plugin → Tasker / Locale plugin → Termux:Tasker**. Choose **nexus**.
+4. Argument: `ensure`
+5. Save and turn it on.
+
+Termux:Boot also starts the bot after a reboot. This macro is a second copy, in
+case Termux:Boot was not allowed to run.
+
+**Macro 3: Nexus Wi-Fi reconnect (the one that worked)**
+
+Keep it as it is: Wi-Fi connected, 20-second wait, Termux:Tasker → nexus →
+`restart`. Leave the argument as `restart` for now. After you have confirmed the
+bot recovers on its own (see below), you can change this argument to `ensure`.
+
+**Checking it works**
+
+Wait 15 minutes after you set up Macro 1, then run `nexus doctor`. The line
+"last safety check (any trigger)" should show a time from the last 15 minutes.
+If it is old or missing, the macro is not firing: check that it is turned on and
+that Termux:Tasker is installed.
+
+Every trigger calls the same `nexus ensure`, and a lock stops two of them from
+starting the bot twice.
+
 ## Keep Android from killing it
 
 This is the part that decides whether the whole thing works. Without it Android
@@ -230,21 +332,24 @@ deletions, and view-once media that the linked device receives. A marker-only
 view-once event means WhatsApp supplied no media bytes to save; this cannot be
 fixed by changing the command whitelist.
 
-Keep the owner whitelist for administrative commands. From the current owner’s
-private controller chat, `.env owner add <linked-number>` adds the paired
-number without removing the main controller. Once added, owner-only commands
-also work in the linked account’s fresh “You” chat. `.env owner list` shows the
-current allowlist.
+Keep the owner whitelist for administrative commands. Any configured owner can
+run `.env owner add <linked-number>` from a direct chat or group without
+removing the main controller. `.env owner list` shows the current allowlist;
+WhatsApp PN/LID address variants supplied alongside a message are recognized for
+owner authorization.
 
 ## Ask AI about selected one-to-one chats
 
 `.ask chats` lists private chats with text currently cached by the linked
 session. The numbered selection lasts 30 minutes; you can also select one
-cached direct chat by phone number (`03…` Pakistani format is accepted). Ask
-about one or more chats with:
+cached direct chat by a complete phone number (`03…` Pakistani format is
+accepted) or by an exact locally saved contact name. Partial/near-name matches
+are listed as choices and require a numbered reply. Ask about one or more chats
+with:
 
 ```text
 .ask 2 40 What should I reply?
+.ask Ayesha Khan 40 What should I reply?
 .ask 03001234567 40 What should I reply?
 .ask 2 all Summarize our chat
 .ask 2,4 50 Compare what we discussed
@@ -274,8 +379,7 @@ design discussion.
 
 ## Read cached messages privately
 
-Use either spelling in the owner's private controller chat or the linked
-account’s “You” chat:
+Run either spelling in any chat where a configured owner sends it:
 
 ```text
 .receive 03001234567 5  # latest 5 cached messages from one direct chat
@@ -285,7 +389,7 @@ account’s “You” chat:
 .receive 03001234567 5 --text-only
 ```
 
-The report stays in the private control chat. A direct phone/contact lookup
+The report stays in the owner chat that ran the command. A direct phone/contact lookup
 identifies message kinds (text, voice note, view-once, photo, video, document,
 location, contact, and other cached types); locally available media may be
 attached, up to five files per request and 16 MB per file. In `unread` mode WhatsApp provides only a
@@ -298,8 +402,7 @@ guaranteed without live WhatsApp testing.
 
 ## Change approved settings from WhatsApp
 
-Use the owner’s private controller chat (or the linked account’s “You” chat
-once it is on the owner list):
+Use any chat where a configured owner sends the command:
 
 ```text
 .env status
@@ -308,7 +411,7 @@ once it is on the owner list):
 ```
 
 After the last command, send the API key as the **next plain-text message** in
-the same private chat, within two minutes. The key is written with owner-only
+the same private direct chat, within two minutes. The key is written with owner-only
 file permissions, is not echoed or placed in the bot’s message/AI-context cache,
 and becomes active without a restart. `.env status` never prints secret values.
 Only approved AI settings, capture-alert destination, and owner numbers can be
@@ -323,9 +426,28 @@ from that chat on your phone.
 nexus status     # running? linked? memory? battery?
 nexus logs       # follow the log (Ctrl-C stops watching, not the bot)
 nexus restart
+nexus update   # fetch the latest version from GitHub, install it, and restart
+nexus doctor   # why it may not be running after an outage or reboot
 nexus stop
 nexus pair       # reprint the pairing code
+nexus pair --new 923001234567   # switch the bot to another WhatsApp number
 ```
+
+### Switching to another WhatsApp number
+
+`nexus pair --new <number>` does the whole move in one step:
+
+1. Stops the bot.
+2. Moves the current session and database into `~/.nexus-wa` (renamed, not deleted).
+   Scheduled jobs from the old account go with the database, so they cannot fire from the new one.
+3. Points `.env` at a fresh session, makes the new number the owner, and uses a separate remote-vault file so the old backup is not restored.
+4. Starts the bot in `observe` mode and prints the pairing code.
+
+Then link the account on its phone (Settings → Linked devices → Link a device → Link with phone number). Add `--yes` to skip the confirmation prompt.
+
+Rollback: `nexus stop`, restore the `.env.bak-*` copy it saved, and move the `auth-old-*` folder back to `~/.nexus-wa/auth`.
+
+After the phone update below, reinstall the command once: `install -m 755 ~/nexus-wa/deploy/termux/nexus $PREFIX/bin/nexus`.
 
 `nexus status` reports memory deliberately: Android kills the largest process
 first, so it is worth knowing. Expect roughly **80 MB**.
@@ -359,7 +481,7 @@ The stash keeps the old lockfile change for review. Do not `stash pop` it over
 the updated lockfile unless you specifically need that local change.
 
 After this version is installed, the owner can also manage the Termux bot from
-WhatsApp's private controller chat or the linked account's “You” chat:
+any chat where a configured owner sends the command:
 
 ```text
 .update check   # see whether the configured GitHub branch is ahead
@@ -400,7 +522,7 @@ That does a real push-then-pull and tells you which setting is wrong if it fails
 safe double-stop. The previous supervisor smoke test booted with
 `ready · 34 command(s) · 5 session(s)`. The current no-connection dry-run
 registry, including `.agenda`, selected-chat `.ask`, `.env`, and Termux controls,
-reports 40 commands across 17 plugin files.
+reports 55 commands across 22 plugin files.
 
 **Not verified:** Termux itself. This sandbox is Linux, not Android, so
 `pkg install`, `termux-wake-lock`, `Termux:Boot` autostart, and Android's

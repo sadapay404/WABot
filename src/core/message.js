@@ -183,6 +183,38 @@ export function extractMediaType(message) {
 }
 
 /**
+ * Rebuild the one message nested in a WhatsApp reply context. The quoted payload
+ * is deliberately returned alone: callers must not query surrounding history
+ * when a user asks to analyse a specific replied-to message.
+ */
+export function extractQuotedRaw(raw) {
+  const { inner } = unwrap(raw?.message);
+  const contextInfo =
+    inner?.extendedTextMessage?.contextInfo ||
+    inner?.imageMessage?.contextInfo ||
+    inner?.videoMessage?.contextInfo ||
+    inner?.audioMessage?.contextInfo ||
+    inner?.documentMessage?.contextInfo ||
+    inner?.stickerMessage?.contextInfo ||
+    null;
+  if (!contextInfo?.stanzaId || !contextInfo.quotedMessage) return null;
+
+  return {
+    key: {
+      remoteJid: contextInfo.remoteJid || raw?.key?.remoteJid,
+      remoteJidAlt: contextInfo.remoteJidAlt,
+      id: contextInfo.stanzaId,
+      fromMe: false,
+      participant: contextInfo.participant || undefined,
+      participantAlt: contextInfo.participantAlt || undefined,
+    },
+    message: contextInfo.quotedMessage,
+    messageTimestamp: raw?.messageTimestamp,
+    pushName: raw?.pushName,
+  };
+}
+
+/**
  * Normalise a raw Baileys message object into a flat, plugin-friendly context.
  * @param {object} raw - one element of the `messages` array from messages.upsert
  * @returns {object} NormalisedMessage
@@ -199,6 +231,22 @@ export function normalize(raw) {
     : isGroup
       ? key.participant || jid
       : jid;
+  // Baileys can provide a PN alternative alongside an LID sender. Preserve it
+  // for policy checks (such as a phone-number AI blocklist) without replacing
+  // the native address used by the rest of the message pipeline.
+  // The exact alternate field varies across Baileys/WhatsApp protocol
+  // revisions (`*Alt` is current; some builds expose `*Pn`). Preserve every
+  // phone-number alternative so OWNER_JIDS and other phone policies work when
+  // the primary sender address is an LID.
+  const firstAddress = (...values) => values.find((value) => typeof value === 'string' && value.trim()) || null;
+  const senderAlt = key.fromMe
+    ? firstAddress(key.remoteJidAlt, key.remoteJidPn, key.remoteJidPN)
+    : isGroup
+      ? firstAddress(key.participantAlt, key.participantPn, key.participantPN)
+      : firstAddress(key.remoteJidAlt, key.remoteJidPn, key.remoteJidPN);
+  // A DM's remote JID can also move between an LID and its phone alias. Keep
+  // that pairing available to private, owner-only continuation flows.
+  const jidAlt = firstAddress(key.remoteJidAlt, key.remoteJidPn, key.remoteJidPN);
 
   // Context lives on the UNWRAPPED message, so a quoted reply inside a
   // disappearing-messages chat is still visible.
@@ -217,7 +265,9 @@ export function normalize(raw) {
     raw,
     id: key.id || null,
     jid,
+    jidAlt: jidAlt ? String(jidAlt) : null,
     sender,
+    senderAlt: senderAlt ? String(senderAlt) : null,
     isGroup,
     isBot: Boolean(key.fromMe),
     groupName: contextInfo?.groupName || null,
@@ -234,6 +284,10 @@ export function normalize(raw) {
       ? { id: contextInfo.stanzaId, participant: contextInfo.participant || null }
       : null,
     mentions: (contextInfo?.mentionedJid || []).map((m) => String(m).split('@')[0]),
+    // `messages.upsert` carries notify/append separately in production. Tests
+    // may attach it directly to each raw message; preserve either form so
+    // loop prevention can reject replayed outgoing commands.
+    upsertType: raw?.upsertType || raw?.upsert_type || null,
     timestamp: Number(raw?.messageTimestamp || Date.now() / 1000),
   };
 }
@@ -260,4 +314,4 @@ export function parseCommand(normalized, prefix = '.') {
   };
 }
 
-export default { normalize, extractText, extractMediaType, parseCommand };
+export default { normalize, extractText, extractMediaType, extractQuotedRaw, parseCommand };

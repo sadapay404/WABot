@@ -173,6 +173,29 @@ test('gate 1: owner-only command runs for the owner', async () => {
   assert.deepEqual(socket.outbox.map((o) => o.text), ['vault opened']);
 });
 
+test('gate 1: a PN owner alias authorizes an LID sender in a group', async () => {
+  const config = rig({ ownerJids: [OWNER] });
+  const loader = new PluginLoader({ dir: path.join(ROOT, 'test', 'fixtures', 'plugins'), logger: quiet });
+  await loader.loadAll();
+  const socket = new MockWhatsAppSocket({ logger: quiet, ownerJid: OWNER });
+  const dispatcher = new Dispatcher({ plugins: loader, config, logger: quiet });
+  const raw = {
+    key: {
+      id: 'OWNER-LID',
+      remoteJid: MOCK_GROUP_JID,
+      participant: '123456789012345@lid',
+      participantPN: OWNER,
+      fromMe: false,
+    },
+    message: { conversation: '.secret' },
+  };
+  const msg = normalize(raw);
+  assert.equal(msg.sender, '123456789012345@lid');
+  assert.equal(msg.senderAlt, OWNER);
+  await dispatcher.handle(socket, msg);
+  assert.deepEqual(socket.outbox.map((o) => o.text), ['vault opened']);
+});
+
 test('gate 1: an unknown command sends nothing and is counted as rejected', async () => {
   const { socket, dispatcher } = await dispatchFixture('.doesnotexist', { from: OWNER });
   assert.equal(socket.outbox.length, 0);

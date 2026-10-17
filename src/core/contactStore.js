@@ -121,12 +121,35 @@ export class ContactStore {
   }
 
   /**
-   * Resolve a saved address-book name without silently choosing an ambiguous
-   * partial match. Exact local-name matches are preferred; if none exist,
-   * return matching substrings so the caller can ask which person was meant.
+   * Resolve a saved address-book name without silently choosing a non-exact
+   * result. Exact local-name matches come first; otherwise callers receive a
+   * small, ranked list of partial/nearby names and can ask the owner to choose.
    */
   findByName(query) {
-    const needle = String(query || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+    const nameKey = (value) => String(value || '')
+      .normalize('NFKD')
+      .replace(/\p{M}/gu, '')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toLocaleLowerCase();
+    const distance = (left, right) => {
+      const a = [...left];
+      const b = [...right];
+      const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+      for (let i = 1; i <= a.length; i++) {
+        let previous = row[0];
+        row[0] = i;
+        for (let j = 1; j <= b.length; j++) {
+          const saved = row[j];
+          row[j] = Math.min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1));
+          previous = saved;
+        }
+      }
+      return row[b.length];
+    };
+
+    const needle = nameKey(query);
     if (!needle) return [];
     const rows = this.db
       .prepare(
@@ -135,16 +158,26 @@ export class ContactStore {
           WHERE local_name IS NOT NULL AND local_name <> ''
           ORDER BY local_name`
       )
-      .all();
-    const exact = rows.filter(
-      (row) => String(row.local_name).trim().replace(/\s+/g, ' ').toLocaleLowerCase() === needle
-    );
-    const matches = exact.length
-      ? exact
-      : rows.filter((row) =>
-          String(row.local_name).trim().replace(/\s+/g, ' ').toLocaleLowerCase().includes(needle)
-        );
-    return matches.map((row) => ({ ...row, jid: normalizeJid(row.jid) }));
+      .all()
+      .map((row) => ({ ...row, jid: normalizeJid(row.jid), key: nameKey(row.local_name) }));
+
+    const exact = rows.filter((row) => row.key === needle);
+    if (exact.length) return exact.map(({ key, ...row }) => ({ ...row, matchType: 'exact' }));
+
+    const partial = rows.filter((row) => row.key.includes(needle) || needle.includes(row.key));
+    if (partial.length) {
+      return partial.map(({ key, ...row }) => ({ ...row, matchType: 'partial' }));
+    }
+
+    // A typo should offer a choice, not force the controller to remember the
+    // precise saved spelling. Keep the threshold conservative to avoid dumping
+    // an unrelated address book into a command response.
+    return rows
+      .map((row) => ({ ...row, distance: distance(needle, row.key) }))
+      .filter((row) => row.distance <= Math.max(1, Math.floor(Math.max(needle.length, row.key.length) / 3)))
+      .sort((a, b) => a.distance - b.distance || a.local_name.localeCompare(b.local_name))
+      .slice(0, 8)
+      .map(({ key, distance: _distance, ...row }) => ({ ...row, matchType: 'similar' }));
   }
 
   /** Contacts that have a name saved in YOUR address book. */

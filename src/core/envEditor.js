@@ -5,7 +5,13 @@ import { parseCommand } from './message.js';
 import { isUserJid, normalizeJid, phoneToJid } from './jid.js';
 import { captureAlertJid } from './alertRouting.js';
 
-const SECRET_KEYS = new Set(['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY']);
+const SECRET_KEYS = new Set([
+  'GROQ_API_KEY',
+  'OPENAI_API_KEY',
+  'GEMINI_API_KEY',
+  'OPENROUTER_API_KEY',
+  'CLOUDFLARE_API_TOKEN',
+]);
 const EDITABLE_KEYS = new Set([
   ...SECRET_KEYS,
   'AI_PROVIDER',
@@ -13,6 +19,7 @@ const EDITABLE_KEYS = new Set([
   'AI_MAX_HISTORY',
   'AI_ASK_MAX_CHARS',
   'CAPTURE_ALERT_JID',
+  'CLOUDFLARE_ACCOUNT_ID',
 ]);
 const SECRET_TTL_MS = 2 * 60 * 1_000;
 const MAX_SECRET_LENGTH = 4_096;
@@ -22,6 +29,10 @@ function userJid(value) {
   if (!text) return '';
   const jid = normalizeJid(text.includes('@') ? text : phoneToJid(text));
   return isUserJid(jid) ? jid : '';
+}
+
+function identities(...values) {
+  return [...new Set(values.map(normalizeJid).filter(Boolean))];
 }
 
 function encodeEnv(value) {
@@ -51,14 +62,18 @@ export class EnvEditor {
     return parsed.command === 'backup' && parsed.args.length > 0 && parsed.args[0] !== 'list';
   }
 
-  startSecret({ ownerJid, chatJid, key, promptText = '' }) {
-    const owner = normalizeJid(ownerJid);
+  startSecret({ ownerJid, ownerAlt = '', chatJid, chatJidAlt = '', key, promptText = '' }) {
+    const ownerIds = identities(ownerJid, ownerAlt);
+    const chatIds = identities(chatJid, chatJidAlt);
+    const owner = ownerIds[0] || '';
     for (const [pendingKey, pending] of this.pending) {
-      if (pending.ownerJid === owner) this.pending.delete(pendingKey);
+      if ((pending.ownerIds || [pending.ownerJid]).some((id) => ownerIds.includes(id))) this.pending.delete(pendingKey);
     }
     this.pending.set(this.#pendingKey(ownerJid, chatJid), {
       ownerJid: owner,
-      chatJid: normalizeJid(chatJid),
+      ownerIds,
+      chatJid: chatIds[0] || '',
+      chatIds,
       key,
       promptText: String(promptText),
       promptMessageId: '',
@@ -79,8 +94,10 @@ export class EnvEditor {
   /** Consume the next private message in a pending owner secret-entry flow. */
   async consumePending({ msg, socket, isOwner }) {
     if (!isOwner) return false;
-    const owner = normalizeJid(msg.sender);
-    const entry = [...this.pending.entries()].find(([, pending]) => pending.ownerJid === owner);
+    const senderIds = identities(msg.sender, msg.senderAlt);
+    const entry = [...this.pending.entries()].find(([, pending]) =>
+      (pending.ownerIds || [pending.ownerJid]).some((id) => senderIds.includes(id))
+    );
     if (!entry) return false;
     const [key, pending] = entry;
     if (msg?.upsertType && msg.upsertType !== 'notify') {
@@ -97,7 +114,8 @@ export class EnvEditor {
     if (msg?.isBot && normalizeJid(msg.jid) !== normalizeJid(this.selfJid)) return false;
     this.pending.delete(key);
 
-    if (msg?.isGroup || normalizeJid(msg.jid) !== pending.chatJid) {
+    const messageChatIds = identities(msg.jid, msg.jidAlt);
+    if (msg?.isGroup || !(pending.chatIds || [pending.chatJid]).some((id) => messageChatIds.includes(id))) {
       // If the owner sends anything outside the prompted private chat during
       // the secret-entry window, drop it from local caches and cancel the flow.
       msg.sensitive = true;
@@ -110,7 +128,7 @@ export class EnvEditor {
       return true;
     }
     if (pending.expiresAt <= this.now()) {
-      await socket.sendMessage(msg.jid, { text: 'Secret entry expired. Start again with `.env set GROQ_API_KEY` (or another provider key).' });
+      await socket.sendMessage(msg.jid, { text: `Secret entry expired. Start again with \`.env set ${pending.key}\`.` });
       return true;
     }
 
@@ -202,14 +220,20 @@ export class EnvEditor {
 
   status() {
     const ai = this.config.ai || {};
-    const keys = ['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY']
+    const keys = ['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY']
       .map((name) => `${name}: ${ai.keys?.[name.toLowerCase().replace('_api_key', '')] ? 'set (hidden)' : 'not set'}`);
+    const imageGen = this.config.imageGen || {};
     const alert = captureAlertJid(this.config, this.selfJid) || 'linked account self-chat';
     return [
       `AI provider: ${ai.provider || 'groq'}`,
       `AI model: ${ai.model || '(provider default)'}`,
       `AI history window: ${ai.maxHistory || 12}`,
+      'Public AI: built into live mode for DMs and groups (20s per sender, 10 per sender/day, 100 total/day).',
+      'Linked-account AI: built into live mode, including `.ai <n>` cached history.',
       ...keys,
+      `Cloudflare image account: ${imageGen.accountId ? 'set (hidden)' : 'not set'}`,
+      `Cloudflare image token: ${imageGen.apiToken ? 'set (hidden)' : 'not set'}`,
+      `Image generation: ${imageGen.accountId && imageGen.apiToken ? 'ready' : 'needs Cloudflare account ID and API token'}.`,
       `Capture alerts: ${alert}`,
       `Owner numbers: ${this.#normalizedOwners().length}`,
     ].join('\n');
@@ -221,7 +245,7 @@ export class EnvEditor {
     if (/[\0\r\n]/.test(text)) throw new Error('values must fit on one line');
     if (key === 'AI_PROVIDER') {
       const provider = text.toLowerCase();
-      if (!['groq', 'openai', 'gemini'].includes(provider)) throw new Error('provider must be groq, openai, or gemini');
+      if (!['groq', 'openai', 'gemini', 'openrouter'].includes(provider)) throw new Error('provider must be groq, gemini, openrouter, or openai');
       return provider;
     }
     if (key === 'AI_MODEL') {
@@ -243,14 +267,26 @@ export class EnvEditor {
       if (!jid) throw new Error('use a full WhatsApp user number or JID');
       return jid;
     }
+    if (key === 'CLOUDFLARE_ACCOUNT_ID') {
+      if (text.length < 8 || text.length > 128 || !/^[a-zA-Z0-9_-]+$/.test(text)) {
+        throw new Error('Cloudflare account ID contains unsupported characters');
+      }
+      return text;
+    }
     throw new Error('unsupported setting');
   }
 
   #applyValue(key, value) {
-    if (key === 'GROQ_API_KEY' || key === 'OPENAI_API_KEY' || key === 'GEMINI_API_KEY') {
+    if (['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY'].includes(key)) {
       const provider = key.replace('_API_KEY', '').toLowerCase();
       this.config.ai.keys[provider] = value;
       process.env[key] = value;
+    } else if (key === 'CLOUDFLARE_API_TOKEN') {
+      this.config.imageGen.apiToken = value;
+      process.env.CLOUDFLARE_API_TOKEN = value;
+    } else if (key === 'CLOUDFLARE_ACCOUNT_ID') {
+      this.config.imageGen.accountId = value;
+      process.env.CLOUDFLARE_ACCOUNT_ID = value;
     } else if (key === 'AI_PROVIDER') {
       this.config.ai.provider = value || 'groq';
       process.env.AI_PROVIDER = this.config.ai.provider;
