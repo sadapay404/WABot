@@ -20,12 +20,10 @@ import { captureAlertJid } from './alertRouting.js';
 import { normalize, unwrap } from './message.js';
 import { flag, setFlag } from '../database/index.js';
 import { describeMedia, mediaIcon } from '../lib/media.js';
+import { chatTag, dateTime12, senderLine } from '../lib/display.js';
 
 const VIEW_ONCE_RECOVERY_REPLIES = new Set(['*', '🤔', '👀']);
 
-function clockTime(ms) {
-  return new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-}
 
 export class ViewOnceCapture {
   /**
@@ -102,7 +100,9 @@ export class ViewOnceCapture {
 
     this.stats.detected++;
     const at = Date.now();
-    const profile = this.contacts.profile(msg.sender);
+    // messages.upsert normally linked this pair already; passing it here also
+    // makes direct view-once handling display a supplied PN alias immediately.
+    const profile = this.contacts.profile(msg.sender, msg.senderAlt);
     const kind = msg.media?.type || 'unknown';
     const mimetype = msg.media?.mimetype || null;
     const chatLabel = describeChat(msg.jid, { myJid: this.selfJid() });
@@ -349,15 +349,12 @@ export function formatViewOnce(r) {
   const p = r.profile || {};
   const lines = [`${mediaIcon(r.kind)} *View-once ${describeMedia(r)}*`, ''];
 
-  const who = [p.name, p.phoneE164 && p.phoneE164 !== p.name ? p.phoneE164 : null]
-    .filter(Boolean)
-    .join(' · ');
-  lines.push(`👤 ${who || 'unknown sender'}`);
+  lines.push(`👤 ${senderLine(p)}`);
 
   const meta = [
     p.countryName,
-    r.isGroup ? r.chatLabel : null,
-    clockTime(r.at),
+    chatTag(r.chatJid, r.chatLabel),
+    dateTime12(r.at),
     r.mediaBytes ? `${Math.round(r.mediaBytes / 1024)} KB` : null,
   ].filter(Boolean);
   if (meta.length) lines.push(`ℹ️ ${meta.join(' · ')}`);

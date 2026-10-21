@@ -91,6 +91,14 @@ export class MessageInbox {
     ).all(jid, alt, alt, safeLimit).reverse();
   }
 
+  /** Latest cached inbound messages across every chat, oldest first. */
+  recent({ limit = 5 } = {}) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 1, 500));
+    return this.db.prepare(
+      'SELECT * FROM message_cache ORDER BY ts DESC LIMIT ?'
+    ).all(safeLimit).reverse();
+  }
+
   /** Return media bytes only when cached raw data or a local archive has them. */
   async readMedia(record) {
     if (!record?.has_media) return null;

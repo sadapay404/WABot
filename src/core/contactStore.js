@@ -15,6 +15,14 @@
 
 import { normalizeJid, jidToPhone, resolvePhone } from './jid.js';
 
+function uniqueJids(values = []) {
+  return [...new Set(values.map(normalizeJid).filter(Boolean))];
+}
+
+function contactName(row) {
+  return row?.manual_name || row?.local_name || null;
+}
+
 export class ContactStore {
   constructor(db, logger) {
     this.db = db;
@@ -69,48 +77,152 @@ export class ContactStore {
 
   /** Bulk-load from a history sync payload. */
   upsertMany(list = []) {
-    for (const c of list) this.upsert(c);
+    for (const c of list) {
+      this.upsert(c);
+      // Baileys revisions use different spellings for a companion phone/LID
+      // association. Only save an alias that arrived in the contact payload.
+      const alternatives = [
+        c.idAlt, c.idPn, c.idPN, c.lid, c.phoneJid,
+        // Current Baileys Contact fields used by history sync.
+        c.phoneNumber, c.pnJid,
+      ].filter(Boolean);
+      if (alternatives.length) this.linkAliases(c.id, ...alternatives);
+    }
     return list.length;
   }
 
+  /** Persist a protocol-observed phone/LID relationship; no numeric guessing. */
+  linkAliases(...values) {
+    const ids = uniqueJids(values);
+    if (ids.length < 2) return ids[0] || '';
+
+    const aliases = ids.map((jid) => this.canonicalJid(jid));
+    const canonical = aliases.find((jid) => jidToPhone(jid)) || ids.find((jid) => jidToPhone(jid)) || aliases[0];
+    const now = Date.now();
+    const save = this.db.prepare(
+      `INSERT INTO contact_aliases(alias_jid, canonical_jid, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(alias_jid) DO UPDATE SET canonical_jid = excluded.canonical_jid, updated_at = excluded.updated_at`
+    );
+    for (const jid of uniqueJids([...ids, ...aliases])) {
+      if (jid !== canonical) save.run(jid, canonical, now);
+      this.mem.delete(jid);
+    }
+    // Collapse a previously observed LID-only cluster onto the newly observed
+    // PN identity too, so associations remain transitive across reconnects.
+    for (const previous of aliases) {
+      if (previous !== canonical) {
+        this.db.prepare('UPDATE contact_aliases SET canonical_jid = ?, updated_at = ? WHERE canonical_jid = ?')
+          .run(canonical, now, previous);
+      }
+      this.mem.delete(previous);
+    }
+    this.mem.delete(canonical);
+    return canonical;
+  }
+
+  /** The phone JID when a verified protocol alias has associated an LID to it. */
+  canonicalJid(jid) {
+    let current = normalizeJid(jid);
+    const seen = new Set();
+    while (current && !seen.has(current)) {
+      seen.add(current);
+      const row = this.db.prepare('SELECT canonical_jid FROM contact_aliases WHERE alias_jid = ?').get(current);
+      const next = normalizeJid(row?.canonical_jid);
+      if (!next || next === current) break;
+      current = next;
+    }
+    return current;
+  }
+
+  /** Owner-entered names override all synced/profile labels without storing a secret. */
+  setManualName(jid, name) {
+    const target = this.canonicalJid(jid);
+    const clean = String(name || '').replace(/\s+/g, ' ').trim();
+    if (!target) throw new Error('enter a WhatsApp contact number or JID');
+    if (!clean || clean.length > 120) throw new Error('name must contain 1–120 characters');
+    const phone = jidToPhone(target);
+    const info = phone ? resolvePhone(phone) : null;
+    this.db.prepare(
+      `INSERT INTO contacts(jid, manual_name, phone_e164, country_iso, country_name, last_seen)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(jid) DO UPDATE SET manual_name = excluded.manual_name, last_seen = excluded.last_seen`
+    ).run(target, clean, info?.e164 || null, info?.countryIso || null, info?.countryName || null, Date.now());
+    this.mem.delete(target);
+    return { jid: target, name: clean };
+  }
+
+  clearManualName(jid) {
+    const target = this.canonicalJid(jid);
+    if (!target) return false;
+    const result = this.db.prepare('UPDATE contacts SET manual_name = NULL WHERE jid = ?').run(target);
+    this.mem.delete(target);
+    return Boolean(result.changes);
+  }
+
   get(jid) {
-    const j = normalizeJid(jid);
+    const j = this.canonicalJid(jid);
     if (this.mem.has(j)) return this.mem.get(j);
     const row = this.db.prepare('SELECT * FROM contacts WHERE jid = ?').get(j) || null;
     if (row) this.mem.set(j, row);
     return row;
   }
 
+  #recordsFor(jid) {
+    const requested = normalizeJid(jid);
+    const canonical = this.canonicalJid(requested);
+    const aliases = canonical
+      ? this.db.prepare('SELECT alias_jid FROM contact_aliases WHERE canonical_jid = ?').all(canonical).map((row) => row.alias_jid)
+      : [];
+    const rows = [];
+    for (const id of uniqueJids([canonical, requested, ...aliases])) {
+      const row = this.db.prepare('SELECT * FROM contacts WHERE jid = ?').get(id);
+      if (row) rows.push(row);
+    }
+    return { canonical, ids: uniqueJids([canonical, requested, ...aliases]), rows };
+  }
+
   /**
    * Best human label for a JID, most personal first.
-   * @returns {{name:string, source:'local'|'notify'|'verified'|'phone'|'jid'}}
+   * @returns {{name:string, source:'manual'|'local'|'notify'|'verified'|'phone'|'jid'}}
    */
   displayName(jid, fallback = null) {
-    const c = this.get(jid);
-    if (c?.local_name) return { name: c.local_name, source: 'local' };
-    if (c?.verified_name) return { name: c.verified_name, source: 'verified' };
-    if (c?.notify_name) return { name: c.notify_name, source: 'notify' };
-    const phone = jidToPhone(jid);
+    const { ids, rows } = this.#recordsFor(jid);
+    const manual = rows.map((row) => row.manual_name).find(Boolean);
+    if (manual) return { name: manual, source: 'manual' };
+    const local = rows.map((row) => row.local_name).find(Boolean);
+    if (local) return { name: local, source: 'local' };
+    const verified = rows.map((row) => row.verified_name).find(Boolean);
+    if (verified) return { name: verified, source: 'verified' };
+    const notify = rows.map((row) => row.notify_name).find(Boolean);
+    if (notify) return { name: notify, source: 'notify' };
+    const phone = ids.map(jidToPhone).find(Boolean);
     if (phone) return { name: `+${phone}`, source: 'phone' };
     return { name: fallback || normalizeJid(jid), source: 'jid' };
   }
 
-  /** Full profile used by the anti-delete notifier and the dashboard. */
-  profile(jid) {
-    const c = this.get(jid) || {};
-    const phone = jidToPhone(jid);
+  /** Full profile used by alerts, reports, and command responses. */
+  profile(jid, ...observedAliases) {
+    // The alias is only stored when it was explicitly supplied by WhatsApp in
+    // this event; an LID is never reverse-engineered into a phone number.
+    if (observedAliases.filter(Boolean).length) this.linkAliases(jid, ...observedAliases);
+    const { canonical, ids, rows } = this.#recordsFor(jid);
+    const c = rows.find((row) => row.jid === canonical) || rows[0] || {};
+    const phone = rows.map((row) => row.phone_e164).find(Boolean) || ids.map(jidToPhone).find(Boolean) || null;
     const info = phone ? resolvePhone(phone) : null;
-    const { name, source } = this.displayName(jid);
+    const { name, source } = this.displayName(canonical || jid);
     return {
-      jid: normalizeJid(jid),
+      jid: canonical || normalizeJid(jid),
+      aliases: ids,
       name,
       nameSource: source,
-      localName: c.local_name || null,
-      notifyName: c.notify_name || null,
-      phoneE164: info?.e164 || c.phone_e164 || null,
+      manualName: rows.map((row) => row.manual_name).find(Boolean) || null,
+      localName: rows.map((row) => row.local_name).find(Boolean) || null,
+      notifyName: rows.map((row) => row.notify_name).find(Boolean) || null,
+      phoneE164: info?.e164 || phone || null,
       phoneNational: info?.national || null,
-      countryIso: info?.countryIso || c.country_iso || null,
-      countryName: info?.countryName || c.country_name || null,
+      countryIso: c.country_iso || info?.countryIso || null,
+      countryName: c.country_name || info?.countryName || null,
       numberValid: info?.valid ?? false,
       numberType: info?.type || null,
     };
@@ -121,43 +233,87 @@ export class ContactStore {
   }
 
   /**
-   * Resolve a saved address-book name without silently choosing an ambiguous
-   * partial match. Exact local-name matches are preferred; if none exist,
-   * return matching substrings so the caller can ask which person was meant.
+   * Resolve a saved address-book name without silently choosing a non-exact
+   * result. Exact local-name matches come first; otherwise callers receive a
+   * small, ranked list of partial/nearby names and can ask the owner to choose.
    */
   findByName(query) {
-    const needle = String(query || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+    const nameKey = (value) => String(value || '')
+      .normalize('NFKD')
+      .replace(/\p{M}/gu, '')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toLocaleLowerCase();
+    const distance = (left, right) => {
+      const a = [...left];
+      const b = [...right];
+      const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+      for (let i = 1; i <= a.length; i++) {
+        let previous = row[0];
+        row[0] = i;
+        for (let j = 1; j <= b.length; j++) {
+          const saved = row[j];
+          row[j] = Math.min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1));
+          previous = saved;
+        }
+      }
+      return row[b.length];
+    };
+
+    const needle = nameKey(query);
     if (!needle) return [];
     const rows = this.db
       .prepare(
-        `SELECT jid, local_name, notify_name, verified_name, phone_e164
+        `SELECT jid, manual_name, local_name, notify_name, verified_name, phone_e164
            FROM contacts
-          WHERE local_name IS NOT NULL AND local_name <> ''
-          ORDER BY local_name`
+          WHERE (manual_name IS NOT NULL AND manual_name <> '')
+             OR (local_name IS NOT NULL AND local_name <> '')
+          ORDER BY CASE WHEN manual_name IS NOT NULL AND manual_name <> '' THEN 0 ELSE 1 END, manual_name, local_name`
       )
-      .all();
-    const exact = rows.filter(
-      (row) => String(row.local_name).trim().replace(/\s+/g, ' ').toLocaleLowerCase() === needle
-    );
-    const matches = exact.length
-      ? exact
-      : rows.filter((row) =>
-          String(row.local_name).trim().replace(/\s+/g, ' ').toLocaleLowerCase().includes(needle)
-        );
-    return matches.map((row) => ({ ...row, jid: normalizeJid(row.jid) }));
+      .all()
+      .map((row) => ({
+        ...row,
+        jid: this.canonicalJid(row.jid),
+        // Manual names take precedence even during targeting, not merely when
+        // an alert is displayed.
+        local_name: contactName(row),
+        key: nameKey(contactName(row)),
+      }))
+      .filter((row, index, all) => all.findIndex((other) => other.jid === row.jid && other.key === row.key) === index);
+
+    const exact = rows.filter((row) => row.key === needle);
+    if (exact.length) return exact.map(({ key, ...row }) => ({ ...row, matchType: 'exact' }));
+
+    const partial = rows.filter((row) => row.key.includes(needle) || needle.includes(row.key));
+    if (partial.length) {
+      return partial.map(({ key, ...row }) => ({ ...row, matchType: 'partial' }));
+    }
+
+    // A typo should offer a choice, not force the controller to remember the
+    // precise saved spelling. Keep the threshold conservative to avoid dumping
+    // an unrelated address book into a command response.
+    return rows
+      .map((row) => ({ ...row, distance: distance(needle, row.key) }))
+      .filter((row) => row.distance <= Math.max(1, Math.floor(Math.max(needle.length, row.key.length) / 3)))
+      .sort((a, b) => a.distance - b.distance || a.local_name.localeCompare(b.local_name))
+      .slice(0, 8)
+      .map(({ key, distance: _distance, ...row }) => ({ ...row, matchType: 'similar' }));
   }
 
-  /** Contacts that have a name saved in YOUR address book. */
+  /** Contacts that have a synced or owner-entered name. */
   named() {
     return this.db
       .prepare(
-        `SELECT jid, local_name, notify_name, country_name
+        `SELECT jid, manual_name, local_name, notify_name, country_name
            FROM contacts
-          WHERE local_name IS NOT NULL AND local_name <> ''
-          ORDER BY local_name
+          WHERE (manual_name IS NOT NULL AND manual_name <> '')
+             OR (local_name IS NOT NULL AND local_name <> '')
+          ORDER BY CASE WHEN manual_name IS NOT NULL AND manual_name <> '' THEN 0 ELSE 1 END, manual_name, local_name
           LIMIT 500`
       )
-      .all();
+      .all()
+      .map((row) => ({ ...row, jid: this.canonicalJid(row.jid), local_name: contactName(row) }));
   }
 }
 

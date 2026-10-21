@@ -50,6 +50,32 @@ test('capture alerts prefer explicit destination, then a remote owner, then link
   assert.equal(captureAlertJid(cfg, SPARE), SPARE);
 });
 
+test('revoke alerts immediately use a WhatsApp-supplied LID phone alias and owner name', async () => {
+  const db = await getMemoryDb();
+  const socket = socketSink();
+  const cache = new MessageCache(db, quiet);
+  const contacts = new ContactStore(db, quiet);
+  const pn = '923001234567@s.whatsapp.net';
+  const lid = '123456789012345@lid';
+  contacts.upsert({ id: pn, name: 'Synced Address Book Name', notify: 'Remote Push Name' });
+  contacts.setManualName(pn, 'Ayesha — Doctor');
+  const raw = {
+    key: { remoteJid: lid, remoteJidAlt: pn, fromMe: false, id: 'ALIAS-ORIGINAL' },
+    messageTimestamp: Math.floor(Date.now() / 1_000),
+    message: { conversation: 'Alias-aware alert text.' },
+  };
+  cache.store(raw, normalize(raw), SPARE);
+  const deleted = new AntiDelete({ socket, db, cache, contacts, registry: null, logger: quiet, config: config() });
+  await deleted.onUpdate({
+    key: { remoteJid: lid, remoteJidAlt: pn, fromMe: false, id: 'ALIAS-REVOKE' },
+    update: { message: { protocolMessage: { type: 0, stanzaId: 'ALIAS-ORIGINAL' } } },
+  });
+  const alert = socket.sent.at(-1).content.text;
+  assert.match(alert, /Ayesha — Doctor \(\+923001234567\)/);
+  assert.doesNotMatch(alert, /number not known/);
+  assert.equal(contacts.canonicalJid(lid), pn, 'the observed relationship is durable for later LID-only events');
+});
+
 test('delete, edit, and view-once events from a non-owner chat are stored and alerted to the remote owner', async () => {
   const db = await getMemoryDb();
   const socket = socketSink();

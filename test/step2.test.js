@@ -158,6 +158,28 @@ test('contacts: falls back through verified → notify → phone → jid', async
   assert.equal(cs.displayName('120363000000000000@g.us').source, 'jid');
 });
 
+test('contacts: persistent owner names and observed PN/LID aliases override profiles in every identity form', async () => {
+  const db = await getMemoryDb();
+  const cs = new ContactStore(db, quiet);
+  const pn = '923001234567@s.whatsapp.net';
+  const lid = '123456789012345@lid';
+  cs.upsert({ id: pn, name: 'WhatsApp Saved Name', notify: 'Their Push Name' });
+  cs.setManualName(pn, 'Ayesha — Doctor');
+  cs.linkAliases(lid, pn);
+  cs.upsert({ id: lid, name: 'LID profile label', notify: 'Changed remote profile' });
+
+  const byLid = cs.profile(lid);
+  assert.equal(byLid.jid, pn, 'the observed PN remains the canonical stored identity');
+  assert.equal(byLid.name, 'Ayesha — Doctor');
+  assert.equal(byLid.nameSource, 'manual');
+  assert.equal(byLid.phoneE164, '+923001234567', 'an LID alert uses its explicit PN alias');
+  assert.equal(cs.displayName(lid).name, 'Ayesha — Doctor');
+  assert.equal(cs.displayName(lid).source, 'manual');
+
+  cs.clearManualName(lid);
+  assert.equal(cs.profile(pn).name, 'WhatsApp Saved Name', 'removal restores synced-name fallback only');
+});
+
 // ══════════════════════════════════════════════════════════════════
 function rawMsg(id, text, { jid = MOM, sender = MOM } = {}) {
   return {
