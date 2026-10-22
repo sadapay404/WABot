@@ -483,6 +483,7 @@ export class WhatsAppConnection {
     socket.ev.on('chats.update', (p) => this.#emit('chats.update', p));
     socket.ev.on('chats.upsert', (p) => this.#emit('chats.upsert', p));
     socket.ev.on('messaging-history.set', (p) => this.#emit('messaging-history.set', p));
+    socket.ev.on('presence.update', (p) => this.#emit('presence.update', p));
   }
 
   async #requestPairingCode(socket) {

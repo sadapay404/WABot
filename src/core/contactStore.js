@@ -13,7 +13,7 @@
  * is theirs, and when someone deletes a message you want to know which is which.
  */
 
-import { normalizeJid, jidToPhone, resolvePhone } from './jid.js';
+import { normalizeJid, isLidJid, isUserJid, jidToPhone, resolvePhone } from './jid.js';
 
 function uniqueJids(values = []) {
   return [...new Set(values.map(normalizeJid).filter(Boolean))];
@@ -29,7 +29,11 @@ export class ContactStore {
     this.logger = logger.child({ scope: 'contacts' });
     /** in-memory read-through cache so hot paths never hit SQLite */
     this.mem = new Map();
-    this.stats = { updates: 0 };
+    this.stats = { updates: 0, aliasesRejected: 0, aliasesRepaired: 0 };
+    // Older builds accepted any pair of JIDs as an alias. Repair that legacy
+    // state before a profile is ever rendered, so one accidental mapping can
+    // never make every contact inherit the owner's name and number.
+    this.repairAliases();
   }
 
   /**
@@ -91,34 +95,85 @@ export class ContactStore {
     return list.length;
   }
 
-  /** Persist a protocol-observed phone/LID relationship; no numeric guessing. */
+  /**
+   * Persist exactly one protocol-observed LID ↔ phone-number relationship.
+   *
+   * A remoteJidAlt is useful only when it is the corresponding other identity;
+   * it is not a general contact relationship. Mapping group IDs, two phone
+   * JIDs, or multiple LIDs to one PN is how an owner's label can leak into
+   * unrelated contacts, so those shapes are deliberately rejected.
+   */
   linkAliases(...values) {
     const ids = uniqueJids(values);
-    if (ids.length < 2) return ids[0] || '';
+    const lids = ids.filter(isLidJid);
+    const pns = ids.filter(isUserJid);
+    const requested = ids[0] || '';
+    if (ids.length !== 2 || lids.length !== 1 || pns.length !== 1) {
+      if (ids.length > 1) this.stats.aliasesRejected++;
+      return this.canonicalJid(requested);
+    }
 
-    const aliases = ids.map((jid) => this.canonicalJid(jid));
-    const canonical = aliases.find((jid) => jidToPhone(jid)) || ids.find((jid) => jidToPhone(jid)) || aliases[0];
+    const [lid] = lids;
+    const [pn] = pns;
     const now = Date.now();
-    const save = this.db.prepare(
+    const previous = this.db
+      .prepare('SELECT alias_jid FROM contact_aliases WHERE canonical_jid = ?')
+      .all(pn)
+      .map((row) => normalizeJid(row.alias_jid))
+      .filter(Boolean);
+
+    // A WhatsApp user has one current LID. If a legitimate protocol update
+    // rotates it, replace the prior mapping instead of accumulating a fan-out.
+    for (const oldLid of previous) {
+      if (oldLid !== lid) this.db.prepare('DELETE FROM contact_aliases WHERE alias_jid = ?').run(oldLid);
+      this.mem.delete(oldLid);
+    }
+
+    this.db.prepare(
       `INSERT INTO contact_aliases(alias_jid, canonical_jid, updated_at)
        VALUES (?, ?, ?)
        ON CONFLICT(alias_jid) DO UPDATE SET canonical_jid = excluded.canonical_jid, updated_at = excluded.updated_at`
-    );
-    for (const jid of uniqueJids([...ids, ...aliases])) {
-      if (jid !== canonical) save.run(jid, canonical, now);
-      this.mem.delete(jid);
-    }
-    // Collapse a previously observed LID-only cluster onto the newly observed
-    // PN identity too, so associations remain transitive across reconnects.
-    for (const previous of aliases) {
-      if (previous !== canonical) {
-        this.db.prepare('UPDATE contact_aliases SET canonical_jid = ?, updated_at = ? WHERE canonical_jid = ?')
-          .run(canonical, now, previous);
+    ).run(lid, pn, now);
+    this.mem.delete(lid);
+    this.mem.delete(pn);
+    return pn;
+  }
+
+  /**
+   * Drop legacy/unsafe mappings before they can affect a display name.
+   * Returning an empty or unknown number is safer than confidently attaching
+   * the linked owner's identity to an unrelated person.
+   */
+  repairAliases() {
+    const rows = this.db.prepare('SELECT alias_jid, canonical_jid FROM contact_aliases').all();
+    const remove = new Set();
+    const byPhone = new Map();
+    for (const row of rows) {
+      const alias = normalizeJid(row.alias_jid);
+      const canonical = normalizeJid(row.canonical_jid);
+      if (!isLidJid(alias) || !isUserJid(canonical)) {
+        remove.add(alias || row.alias_jid);
+        continue;
       }
-      this.mem.delete(previous);
+      const list = byPhone.get(canonical) || [];
+      list.push(alias);
+      byPhone.set(canonical, list);
     }
-    this.mem.delete(canonical);
-    return canonical;
+    // More than one LID for a phone is ambiguous rather than a safe alias.
+    // Remove the entire cluster; a later explicit Baileys mapping re-adds only
+    // the current one.
+    for (const aliases of byPhone.values()) {
+      if (aliases.length > 1) aliases.forEach((alias) => remove.add(alias));
+    }
+    for (const alias of remove) {
+      this.db.prepare('DELETE FROM contact_aliases WHERE alias_jid = ?').run(alias);
+      this.mem?.delete(alias);
+    }
+    if (remove.size) {
+      this.stats.aliasesRepaired += remove.size;
+      this.logger.warn(`discarded ${remove.size} unsafe contact identity mapping(s)`);
+    }
+    return remove.size;
   }
 
   /** The phone JID when a verified protocol alias has associated an LID to it. */

@@ -55,6 +55,7 @@ import { LogBuffer } from './core/logBuffer.js';
 import { HostControl } from './core/hostControl.js';
 import { Dashboard } from './web/dashboard.js';
 import { normalizeJid } from './core/jid.js';
+import { createLiveSocket } from './core/socketForwarder.js';
 import { formatUptime } from './lib/format.js';
 
 // ── CLI ──────────────────────────────────────────────────────────────
@@ -78,27 +79,6 @@ const config = buildConfig(overrides);
 const logger = createLogger(config.logLevel, 'nexus');
 const logs = new LogBuffer(600).attach();
 const startedAt = Date.now();
-
-// Forwards every call to the connection's current socket. A call made during
-// a reconnect gap fails the way a call on a dropped link does.
-function liveSocket(connection) {
-  return new Proxy(
-    {},
-    {
-      get(_, prop) {
-        const live = connection.socket;
-        if (!live) throw new Error('Connection Closed');
-        const value = live[prop];
-        return typeof value === 'function' ? value.bind(live) : value;
-      },
-      set(_, prop, value) {
-        const live = connection.socket;
-        if (live) live[prop] = value;
-        return true;
-      },
-    }
-  );
-}
 
 // ── Banner ───────────────────────────────────────────────────────────
 function banner() {
@@ -366,7 +346,7 @@ async function main() {
     await connection.connect();
     // Baileys replaces its socket on every reconnect. Services hold this
     // forwarder, not the first socket, so sends always go to the live one.
-    socket = liveSocket(connection);
+    socket = createLiveSocket(connection);
   }
 
   // The kill switch (halt/resume) lives on this queue. The real connection

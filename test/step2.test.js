@@ -180,6 +180,41 @@ test('contacts: persistent owner names and observed PN/LID aliases override prof
   assert.equal(cs.profile(pn).name, 'WhatsApp Saved Name', 'removal restores synced-name fallback only');
 });
 
+test('contacts: unsafe alias fan-out is repaired before it can show the owner name for everyone', async () => {
+  const db = await getMemoryDb();
+  const cs = new ContactStore(db, quiet);
+  const ownerPn = '923251111111@s.whatsapp.net';
+  const otherPn = '923252222222@s.whatsapp.net';
+  const lidOne = '111111111111111@lid';
+  const lidTwo = '222222222222222@lid';
+  cs.upsert({ id: ownerPn, name: 'Awais 兄弟' });
+  cs.upsert({ id: otherPn, name: 'Real Contact' });
+
+  // Model the old faulty state: several unrelated LIDs all pointed at one
+  // phone identity, causing that one saved name/number to leak everywhere.
+  db.prepare('INSERT INTO contact_aliases(alias_jid, canonical_jid, updated_at) VALUES (?,?,?)')
+    .run(lidOne, ownerPn, Date.now());
+  db.prepare('INSERT INTO contact_aliases(alias_jid, canonical_jid, updated_at) VALUES (?,?,?)')
+    .run(lidTwo, ownerPn, Date.now());
+  assert.equal(cs.repairAliases(), 2);
+  assert.equal(cs.canonicalJid(lidOne), lidOne);
+  assert.equal(cs.canonicalJid(lidTwo), lidTwo);
+  assert.notEqual(cs.displayName(lidOne).name, 'Awais 兄弟');
+
+  // Only one LID and one PN are a valid relationship. A second live LID
+  // replaces an earlier one instead of creating another fan-out.
+  assert.equal(cs.linkAliases(lidOne, ownerPn), ownerPn);
+  assert.equal(cs.linkAliases(lidTwo, ownerPn), ownerPn);
+  assert.equal(cs.canonicalJid(lidOne), lidOne);
+  assert.equal(cs.canonicalJid(lidTwo), ownerPn);
+
+  // Two phones and group IDs are not aliases and must never contaminate names.
+  cs.linkAliases(ownerPn, otherPn);
+  cs.linkAliases('120363000000000001@g.us', ownerPn);
+  assert.equal(cs.canonicalJid(otherPn), otherPn);
+  assert.equal(cs.displayName(otherPn).name, 'Real Contact');
+});
+
 // ══════════════════════════════════════════════════════════════════
 function rawMsg(id, text, { jid = MOM, sender = MOM } = {}) {
   return {
