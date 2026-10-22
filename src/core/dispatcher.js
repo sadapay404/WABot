@@ -30,6 +30,26 @@ import { normalizeJid } from './jid.js';
 
 const SELF_ECHO_TTL_MS = 120_000;
 const SELF_ECHO_MAX_KEYS = 500;
+const SELF_AI_COMMAND_TTL_MS = 120_000;
+
+
+function sameJid(a, b) {
+  return Boolean(a && b) && normalizeJid(a) === normalizeJid(b);
+}
+
+/**
+ * First requirement whose argument is absent or fails validation. Plugins
+ * declare `requires: [{ index, name, prompt, validate }]`; validate returns the
+ * normalised value, or null when the answer is unusable.
+ */
+function firstMissingArg(plugin, args = []) {
+  if (!args.length || !Array.isArray(plugin.requires)) return null;
+  for (const req of plugin.requires) {
+    const current = args[req.index];
+    if (current === undefined || req.validate(String(current)) === null) return req;
+  }
+  return null;
+}
 
 export class Dispatcher {
   /**
@@ -55,11 +75,23 @@ export class Dispatcher {
     /** name -> last invocation ms */
     this.lastRun = new Map();
     this.selfEchoes = new Map();
+    // A phone-sent assistant command can be delivered more than once while
+    // WhatsApp catches up. Only the narrow `.ai` / `.calc` exceptions cross
+    // the normal fromMe gate, and a message id is claimed once to prevent
+    // duplicate provider calls/replies on an upsert replay.
+    this.selfAiCommands = new Map();
     this.observedQueues = new WeakSet();
     this.stats = { handled: 0, rejected: 0, errors: 0 };
   }
 
-  isOwner(jid) {
+  /**
+   * Accept the WhatsApp phone JID and any PN alternative carried beside an LID.
+   * WhatsApp can identify one owner as an LID in a group while OWNER_JIDS uses
+   * that person's phone JID; treating only the primary address as authoritative
+   * silently locks the real owner out of every owner command. Domains still
+   * remain distinct unless Baileys provided the alternate on the message.
+   */
+  isOwner(...identities) {
     const owners = this.config.safety.ownerJids.length
       ? this.config.safety.ownerJids
       : this.defaultOwnerJid
@@ -68,11 +100,18 @@ export class Dispatcher {
     // Empty whitelist means "nobody". Failing closed is the only acceptable
     // default for commands that can send messages from your personal number.
     if (owners.length === 0) return false;
-    const bare = String(jid).split(':')[0].split('@')[0];
-    return owners.some((o) => {
-      const ob = String(o).split(':')[0].split('@')[0];
-      return o === jid || ob === bare;
-    });
+
+    // Do not equate unrelated `123@lid` and `123@s.whatsapp.net` values by
+    // local part alone. A PN/LID association is authoritative only when
+    // Baileys supplied both identities on this message; callers pass both
+    // primary and alternate values above.
+    const identity = (value) => {
+      const text = String(value || '').trim();
+      if (!text) return '';
+      return text.includes('@') ? normalizeJid(text) : text.replace(/\D/g, '');
+    };
+    const candidates = identities.map(identity).filter(Boolean);
+    return owners.some((owner) => candidates.includes(identity(owner)));
   }
 
   /** Attach echo suppression to the shared outbound queue before it can send. */
@@ -88,9 +127,18 @@ export class Dispatcher {
     return `${normalizeJid(jid)}\u0000${String(text || '').normalize('NFKC').replace(/\r\n/g, '\n').trim()}`;
   }
 
+  /**
+   * Is this chat the account's own "You" chat? WhatsApp addresses it by phone
+   * number or by LID depending on the device, so both must match.
+   */
+  #isSelfChatJid(socket, jid) {
+    const target = normalizeJid(jid);
+    if (!target) return false;
+    return [socket?.user?.id, socket?.user?.lid].some((id) => normalizeJid(id) === target);
+  }
+
   #rememberSelfEcho(socket, jid, content) {
-    const selfJid = normalizeJid(socket?.user?.id);
-    if (!selfJid || normalizeJid(jid) !== selfJid) return;
+    if (!this.#isSelfChatJid(socket, jid)) return;
     const text = typeof content === 'string' ? content : content?.text ?? content?.caption ?? '';
     if (!String(text).trim()) return;
     const now = Date.now();
@@ -99,7 +147,7 @@ export class Dispatcher {
       if (live.length) this.selfEchoes.set(key, live);
       else this.selfEchoes.delete(key);
     }
-    const key = this.#echoKey(selfJid, text);
+    const key = this.#echoKey(jid, text);
     const expiries = this.selfEchoes.get(key) || [];
     expiries.push(now + SELF_ECHO_TTL_MS);
     this.selfEchoes.set(key, expiries);
@@ -109,9 +157,8 @@ export class Dispatcher {
   }
 
   #consumeSelfEcho(socket, msg) {
-    const selfJid = normalizeJid(socket?.user?.id);
-    if (!selfJid || normalizeJid(msg.jid) !== selfJid || !msg.text) return false;
-    const key = this.#echoKey(selfJid, msg.text);
+    if (!this.#isSelfChatJid(socket, msg.jid) || !msg.text) return false;
+    const key = this.#echoKey(msg.jid, msg.text);
     const expiries = (this.selfEchoes.get(key) || []).filter((expires) => expires > Date.now());
     if (!expiries.length) {
       this.selfEchoes.delete(key);
@@ -120,6 +167,22 @@ export class Dispatcher {
     expiries.shift();
     if (expiries.length) this.selfEchoes.set(key, expiries);
     else this.selfEchoes.delete(key);
+    return true;
+  }
+
+  /** Claim one deliberately phone-sent AI command; false means a replay. */
+  #claimSelfAiCommand(messageId) {
+    const id = String(messageId || '');
+    if (!id) return true; // Baileys normally supplies one; do not reject a valid live message if it does not.
+    const now = Date.now();
+    for (const [key, expiresAt] of this.selfAiCommands) {
+      if (expiresAt <= now) this.selfAiCommands.delete(key);
+    }
+    if (this.selfAiCommands.has(id)) return false;
+    this.selfAiCommands.set(id, now + SELF_AI_COMMAND_TTL_MS);
+    while (this.selfAiCommands.size > SELF_ECHO_MAX_KEYS) {
+      this.selfAiCommands.delete(this.selfAiCommands.keys().next().value);
+    }
     return true;
   }
 
@@ -132,23 +195,45 @@ export class Dispatcher {
     try {
       this.trackSocket(socket);
       if (!msg.text) return; // media-only handling arrives in Phase 3
+      // Status broadcasts are captured by statusFeed, never answered or read.
+      if (normalizeJid(msg.jid) === 'status@broadcast') return;
 
-      const selfJid = normalizeJid(socket?.user?.id);
-      const isSelfChat = Boolean(selfJid && normalizeJid(msg.jid) === selfJid);
+      const isSelfChat = this.#isSelfChatJid(socket, msg.jid);
       const isFromSelfChat = Boolean(msg.isBot && isSelfChat);
 
       // Our own queued messages (including prompts) can arrive as fromMe
       // upserts in the “You” chat. Drop the exact outbound echo before looking
       // for a command or a pending free-text answer.
       if (isFromSelfChat && this.#consumeSelfEcho(socket, msg)) return;
-      if (msg.isBot && !isSelfChat) return; // ignore every outgoing message to other chats
+
+      const parsed = parseCommand(msg, this.config.prefix);
+      const candidate = parsed.isCommand ? this.plugins.resolve(parsed.command) : null;
+      const firstArg = String(parsed.args?.[0] || '').toLowerCase();
+      // Outgoing messages normally remain inert: that is the loop-prevention
+      // boundary. The narrow built-in exception is a newly sent `.ai`/`.gpt`
+      // question (including deliberate `.ai <n>` context), `.calc`, or one
+      // explicit `.imagine` prompt from the linked account. Owner-only AI
+      // administration remains controller-only.
+      const selfIssuedAi = Boolean(
+        msg.isBot &&
+        !isSelfChat &&
+        this.config.isLive &&
+        parsed.args.length &&
+        ((candidate?.name === 'ai' && !['-check-', '-blist-', '-wlist-'].includes(firstArg)) ||
+          candidate?.name === 'calc' ||
+          candidate?.name === 'imagine')
+      );
+      if (msg.isBot && !isSelfChat) {
+        if (!selfIssuedAi) return;
+        // Only accept the immediate live upsert, never a history replay.
+        if (msg.upsertType && msg.upsertType !== 'notify') return;
+        if (!this.#claimSelfAiCommand(msg.id)) return;
+      }
       // Baileys marks history replays and emitted local-send echoes as append.
       // Never execute these as phone-entered self-chat commands.
       if (isFromSelfChat && msg.upsertType && msg.upsertType !== 'notify') return;
 
-      const parsed = parseCommand(msg, this.config.prefix);
-      const isOwner = this.isOwner(msg.sender);
-      const candidate = parsed.isCommand ? this.plugins.resolve(parsed.command) : null;
+      const isOwner = this.isOwner(msg.sender, msg.senderAlt);
       // Any explicitly owner-only command may be used in the owner's own
       // “You” chat. Echo tracking and the notify-vs-append guard above still
       // prevent our replies/history from replaying as commands.
@@ -158,9 +243,30 @@ export class Dispatcher {
         Boolean(candidate?.ownerOnly);
       const wizard = this.bot?.scheduleWizard;
       const pendingDraft = isOwner && wizard?.hasPending?.(msg.sender, msg.jid);
+      // A question the bot is waiting on (missing argument, status number).
+      const prompt = this.bot?.prompts?.peek?.(msg.jid) || null;
+      const promptIsMine = Boolean(prompt) &&
+        (prompt.ownerOnly ? isOwner : sameJid(prompt.sender, msg.sender));
 
       if (isFromSelfChat && parsed.isCommand && !selfChatCommand) return;
-      if (isFromSelfChat && !selfChatCommand && !pendingDraft) return;
+      if (isFromSelfChat && !selfChatCommand && !pendingDraft && !promptIsMine) return;
+
+      if (promptIsMine && !candidate) {
+        if (this.config.isObserve && !(isOwner && this.config.safety.observeAllowReplyToOwner)) {
+          this.stats.rejected++;
+          return;
+        }
+        const entry = this.bot.prompts.take(msg.jid);
+        if (entry) {
+          this.stats.handled++;
+          await entry.onReply({
+            text: msg.text.trim(),
+            socket,
+            reply: (text, options) => this.#reply(socket, msg, text, options),
+          });
+          return;
+        }
+      }
 
       if (!parsed.isCommand) {
         if (!pendingDraft || !wizard?.handleReply) return;
@@ -218,11 +324,13 @@ export class Dispatcher {
         return;
       }
 
-      this.stats.handled++;
-      const ctx = this.#buildContext(socket, msg, parsed, isOwner, plugin);
+      // ── Missing or invalid arguments: ask for them, then carry on ──
+      const missing = firstMissingArg(plugin, parsed.args);
+      if (missing && this.bot?.prompts) {
+        return this.#askForArg(socket, msg, parsed, isOwner, plugin, missing);
+      }
 
-      this.logger.debug(`exec .${plugin.name} (owner=${isOwner})`);
-      await plugin.execute(ctx);
+      await this.#execute(socket, msg, parsed, isOwner, plugin, selfIssuedAi);
     } catch (err) {
       this.stats.errors++;
       this.logger.error(`plugin error: ${err.stack || err.message}`);
@@ -234,7 +342,49 @@ export class Dispatcher {
     }
   }
 
-  #buildContext(socket, msg, parsed, isOwner, plugin) {
+  async #execute(socket, msg, parsed, isOwner, plugin, isSelfIssued = false) {
+    this.stats.handled++;
+    const ctx = this.#buildContext(socket, msg, parsed, isOwner, plugin, isSelfIssued);
+    this.logger.debug(`exec .${plugin.name} (owner=${isOwner})`);
+    await plugin.execute(ctx);
+  }
+
+  /** Ask for one missing argument. The answer comes back through #collectArg. */
+  #askForArg(socket, msg, parsed, isOwner, plugin, missing, note = '') {
+    this.bot.prompts.set(msg.jid, {
+      kind: 'arg',
+      ownerOnly: Boolean(plugin.ownerOnly),
+      sender: msg.sender,
+      onReply: ({ text, reply }) =>
+        this.#collectArg(socket, msg, parsed, isOwner, plugin, missing, text, reply),
+    });
+    const body = note ? `${note}\n${missing.prompt}` : missing.prompt;
+    return this.#reply(socket, msg, body);
+  }
+
+  async #collectArg(socket, msg, parsed, isOwner, plugin, missing, text, reply) {
+    const value = missing.validate(String(text || '').trim());
+    if (value === null || value === undefined) {
+      return this.#askForArg(socket, msg, parsed, isOwner, plugin, missing, 'That is not valid.');
+    }
+    const args = [...parsed.args];
+    args[missing.index] = value;
+    // Normalise every argument that is already valid, so the plugin gets the
+    // same types whether the user typed it up front or was asked for it.
+    for (const req of plugin.requires || []) {
+      if (args[req.index] === undefined) continue;
+      const normalised = req.validate(String(args[req.index]));
+      if (normalised !== null) args[req.index] = normalised;
+    }
+
+    const next = firstMissingArg(plugin, args);
+    if (next) return this.#askForArg(socket, msg, { ...parsed, args }, isOwner, plugin, next);
+
+    const filled = { ...parsed, args, argsRaw: args.join(' ') };
+    return this.#execute(socket, msg, filled, isOwner, plugin);
+  }
+
+  #buildContext(socket, msg, parsed, isOwner, plugin, isSelfIssued = false) {
     const self = this;
     return {
       socket,
@@ -244,9 +394,14 @@ export class Dispatcher {
       text: parsed.argsRaw,
       command: parsed.command,
       isOwner,
+      // True only for the narrowly allowed live `.ai` command sent from the
+      // linked main account to another chat.
+      isSelfIssued,
       isGroup: msg.isGroup,
       sender: msg.sender,
+      senderAlt: msg.senderAlt || null,
       jid: msg.jid,
+      jidAlt: msg.jidAlt || null,
       logger: self.logger.child({ scope: plugin.name }),
       config: self.config,
       db: self.db,

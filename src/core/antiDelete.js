@@ -18,6 +18,7 @@
  */
 
 import { normalizeJid, isGroupJid, describeChat } from './jid.js';
+import { chatTag, dateTime12, senderLine } from '../lib/display.js';
 import { captureAlertJid } from './alertRouting.js';
 import { getSetting, setSetting } from '../database/index.js';
 import { downloadWhatsAppMedia } from './mediaDownloader.js';
@@ -27,6 +28,19 @@ const PROTOCOL_REVOKE = 0;
 /** WAMessageStubType — verified against baileys 7.0.0-rc14. */
 const STUB_REVOKE = 1;
 const STUB_ADMIN_REVOKE = 132;
+
+function firstAddress(...values) {
+  return values.find((value) => typeof value === 'string' && value.trim()) || null;
+}
+
+/** Protocol revisions call the parallel phone/LID field either *Alt or *Pn. */
+function actorAlternate(key, isGroup) {
+  return key?.fromMe
+    ? firstAddress(key.remoteJidAlt, key.remoteJidPn, key.remoteJidPN)
+    : isGroup
+      ? firstAddress(key.participantAlt, key.participantPn, key.participantPN)
+      : firstAddress(key.remoteJidAlt, key.remoteJidPn, key.remoteJidPN);
+}
 
 /**
  * Pull the revoked stanza id out of any of the three shapes.
@@ -75,9 +89,6 @@ function describeMedia(record) {
   return MEDIA_LABEL[kind] || kind || 'message';
 }
 
-function clockTime(ms) {
-  return new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-}
 
 export class AntiDelete {
   /**
@@ -169,9 +180,11 @@ export class AntiDelete {
 
     const key = source?.key || {};
     const chatJid = normalizeJid(key.remoteJid);
+    const isGroup = isGroupJid(chatJid);
     const senderJid = normalizeJid(
-      key.fromMe ? this.selfJid() : isGroupJid(chatJid) ? key.participant || chatJid : chatJid
+      key.fromMe ? this.selfJid() : isGroup ? key.participant || chatJid : chatJid
     );
+    const senderAlt = actorAlternate(key, isGroup);
 
     // Don't report your own deletions back to you — you know you did it.
     const deletedByOther = !key.fromMe;
@@ -180,7 +193,10 @@ export class AntiDelete {
     if (!known) this.stats.unresolved++;
     else this.stats.resolved++;
 
-    const profile = this.contacts.profile(senderJid);
+    // If this revoke has both forms, profile() stores the observed relationship
+    // before rendering. Existing aliases still resolve when a revoke carries
+    // only an LID.
+    const profile = this.contacts.profile(senderJid, senderAlt);
     const chatLabel = describeChat(chatJid, {
       myJid: this.selfJid(),
       name: isGroupJid(chatJid) ? null : profile.name,
@@ -292,10 +308,7 @@ export function formatDeletion(d) {
 
   const lines = [`🗑️ *Deleted ${kindLabel}*`, ''];
 
-  const who = [p.name, p.phoneE164 && p.phoneE164 !== p.name ? p.phoneE164 : null]
-    .filter(Boolean)
-    .join(' · ');
-  lines.push(`👤 ${who || 'unknown sender'}`);
+  lines.push(`👤 ${senderLine(p)}`);
 
   if (p.localName && p.notifyName && p.localName !== p.notifyName) {
     lines.push(`   push name: ${p.notifyName}`);
@@ -304,8 +317,8 @@ export function formatDeletion(d) {
   const meta = [
     p.countryName,
     p.numberType ? String(p.numberType).toLowerCase() : null,
-    d.isGroup ? d.chatLabel : null,
-    clockTime(d.at),
+    chatTag(d.chatJid, d.chatLabel),
+    dateTime12(d.at),
   ].filter(Boolean);
   if (meta.length) lines.push(`ℹ️ ${meta.join(' · ')}`);
 

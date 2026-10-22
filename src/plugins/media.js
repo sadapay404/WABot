@@ -6,6 +6,7 @@ import path from 'node:path';
 import { formatBytes, timeAgo } from '../lib/format.js';
 import { describeMedia, mediaIcon } from '../lib/media.js';
 import { downloadWhatsAppMedia } from '../core/mediaDownloader.js';
+import { extractMediaType, extractQuotedRaw } from '../core/message.js';
 
 const run = promisify(execFile);
 
@@ -20,6 +21,14 @@ async function hasFfmpeg() {
     ffmpegAvailable = false;
   }
   return ffmpegAvailable;
+}
+
+/** Current caption media, or an explicitly replied-to media message. */
+function mediaSource(ctx, expectedType) {
+  if (ctx.msg?.media?.type === expectedType) return { raw: ctx.msg.raw, media: ctx.msg.media };
+  const quoted = extractQuotedRaw(ctx.msg?.raw);
+  const media = quoted ? extractMediaType(quoted.message) : null;
+  return media?.type === expectedType ? { raw: quoted, media } : null;
 }
 
 export default {
@@ -57,7 +66,7 @@ export default {
           // WhatsApp stickers: 512x512, transparent-capable WebP, ≤100 KB.
           await run('ffmpeg', [
             '-y', '-i', input,
-            '-vf', "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=none",
+            '-vf', "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black@0",
             '-c:v', 'libwebp', '-lossless', '0', '-compression_level', '6',
             '-q:v', '70', '-an', '-vsync', '0',
             output,
@@ -104,12 +113,12 @@ export default {
     {
       name: 'transcribe',
       aliases: ['stt'],
-      description: 'Transcribe an attached audio message with its command caption (needs an AI key)',
-      usage: '.transcribe (audio attachment caption)',
+      description: 'Transcribe audio in its caption or an audio message you reply to (needs an AI key)',
+      usage: '.transcribe (audio caption or reply to audio)',
       ownerOnly: true,
       async execute(ctx) {
-        const audio = ctx.msg.media && ctx.msg.media.type === 'audio';
-        if (!audio) return ctx.reply('Send an audio attachment with `.transcribe` in its caption.');
+        const source = mediaSource(ctx, 'audio');
+        if (!source) return ctx.reply('Put `.transcribe` in an audio caption, or reply to audio with `.transcribe`.');
 
         const ai = ctx.bot?.ai;
         if (!ai) return ctx.reply('The AI orchestrator is not active in this mode.');
@@ -122,14 +131,14 @@ export default {
 
         let buffer;
         try {
-          buffer = await downloadWhatsAppMedia(ctx.socket, ctx.msg.raw, ctx.logger);
+          buffer = await downloadWhatsAppMedia(ctx.socket, source.raw, ctx.logger);
         } catch (err) {
           return ctx.reply(`⚠️ Could not download the audio: ${err.message}`);
         }
 
         try {
           const base64 = buffer.toString('base64');
-          const mime = ctx.msg.media.mimetype || 'audio/ogg';
+          const mime = source.media.mimetype || 'audio/ogg';
           const text = await ai.transcribeAudio({ base64, mime });
           await ctx.reply(`🎤 *Transcript*\n\n${text}`);
         } catch (err) {

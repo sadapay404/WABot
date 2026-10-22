@@ -1,11 +1,11 @@
 import { formatUptime, timeAgo, formatBytes } from '../lib/format.js';
 
 export default {
-  name: 'status',
-  aliases: ['health', 'info'],
+  name: 'health',
+  aliases: ['info', 'runtime'],
   category: 'tools',
   description: 'Runtime health: mode, uptime, sessions, queue, anti-delete',
-  usage: '.status',
+  usage: '.health',
   ownerOnly: true,
 
   async execute(ctx) {

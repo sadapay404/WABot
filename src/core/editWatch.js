@@ -11,11 +11,24 @@
  */
 
 import { normalizeJid, isGroupJid, describeChat } from './jid.js';
+import { chatTag, dateTime12, senderLine } from '../lib/display.js';
 import { captureAlertJid } from './alertRouting.js';
 import { extractText } from './message.js';
 import { flag, setFlag } from '../database/index.js';
 
 const PROTOCOL_MESSAGE_EDIT = 14;
+
+function firstAddress(...values) {
+  return values.find((value) => typeof value === 'string' && value.trim()) || null;
+}
+
+function editorAlternate(key, isGroup) {
+  return key?.fromMe
+    ? firstAddress(key.remoteJidAlt, key.remoteJidPn, key.remoteJidPN)
+    : isGroup
+      ? firstAddress(key.participantAlt, key.participantPn, key.participantPN)
+      : firstAddress(key.remoteJidAlt, key.remoteJidPn, key.remoteJidPN);
+}
 
 /**
  * Pull an edit out of a Baileys update/upsert payload.
@@ -46,9 +59,6 @@ export function extractEdit(payload = {}) {
   return { stanzaId, newText };
 }
 
-function clockTime(ms) {
-  return new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-}
 
 export class EditWatch {
   constructor({ socket, db, cache, contacts, logger, config }) {
@@ -87,15 +97,17 @@ export class EditWatch {
 
     const key = source?.key || {};
     const chatJid = normalizeJid(key.remoteJid);
+    const isGroup = isGroupJid(chatJid);
     const senderJid = normalizeJid(
-      key.fromMe ? this.selfJid() : isGroupJid(chatJid) ? key.participant || chatJid : chatJid
+      key.fromMe ? this.selfJid() : isGroup ? key.participant || chatJid : chatJid
     );
+    const senderAlt = editorAlternate(key, isGroup);
 
     const record = this.cache?.getRecord?.(edit.stanzaId) || null;
     const rawOriginal = this.cache?.getRaw?.(edit.stanzaId) || null;
     const before = record?.text ?? (rawOriginal ? extractText(rawOriginal.message) || null : null);
     this.logger.info(`edit event detected${before === null ? ' (original not cached)' : ''}`);
-    const profile = this.contacts.profile(senderJid);
+    const profile = this.contacts.profile(senderJid, senderAlt);
     const at = Date.now();
 
     if (before) this.stats.withDiff++;
@@ -170,12 +182,9 @@ export class EditWatch {
 
 export function formatEdit(e) {
   const p = e.profile || {};
-  const who = [p.name, p.phoneE164 && p.phoneE164 !== p.name ? p.phoneE164 : null]
-    .filter(Boolean)
-    .join(' · ');
 
-  const lines = ['✏️ *Message edited*', '', `👤 ${who || 'unknown'}`];
-  const meta = [p.countryName, e.isGroup ? e.chatLabel : null, clockTime(e.at)].filter(Boolean);
+  const lines = ['✏️ *Message edited*', '', `👤 ${senderLine(p)}`];
+  const meta = [p.countryName, chatTag(e.chatJid, e.chatLabel), dateTime12(e.at)].filter(Boolean);
   if (meta.length) lines.push(`ℹ️ ${meta.join(' · ')}`);
   lines.push('');
 

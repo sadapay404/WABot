@@ -49,6 +49,33 @@ function normalizeMode(raw) {
   return m;
 }
 
+const AI_PROVIDER_NAMES = ['groq', 'gemini', 'openrouter', 'openai'];
+/** Order used when AI_PROVIDERS is not set. */
+const AI_DEFAULT_ORDER = ['gemini', 'groq', 'openrouter', 'openai'];
+
+/**
+ * Parse AI_PROVIDERS="gemini:1,groq:2,openrouter:3" (lower number = tried first).
+ * Unknown names and duplicates are dropped. Without AI_PROVIDERS, the legacy
+ * AI_PROVIDER becomes the first choice and the rest follow in the default order.
+ */
+export function parseAiProviders(list, legacy = '') {
+  let order;
+  const parts = String(list || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (parts.length) {
+    order = parts.map((part, i) => {
+      const [name, prio] = part.split(':');
+      return { provider: String(name || '').trim().toLowerCase(), priority: Number(prio) || i + 1 };
+    });
+  } else {
+    const first = String(legacy || '').trim().toLowerCase();
+    const names = [first, ...AI_DEFAULT_ORDER].filter((n, i, a) => AI_PROVIDER_NAMES.includes(n) && a.indexOf(n) === i);
+    order = names.map((provider, i) => ({ provider, priority: i + 1 }));
+  }
+  const valid = order.filter((e) => AI_PROVIDER_NAMES.includes(e.provider));
+  const unique = valid.filter((e, i) => valid.findIndex((x) => x.provider === e.provider) === i);
+  return unique.sort((a, b) => a.priority - b.priority);
+}
+
 export function buildConfig(overrides = {}) {
   const mode = normalizeMode(overrides.mode ?? process.env.NEXUS_MODE);
 
@@ -156,6 +183,9 @@ export function buildConfig(overrides = {}) {
       queueConcurrency: Math.max(1, int(process.env.QUEUE_CONCURRENCY, 1)),
       typingIndicator: bool(process.env.TYPING_INDICATOR, true),
       observeAllowReplyToOwner: bool(process.env.OBSERVE_ALLOW_REPLY_TO_OWNER, true),
+      // Live mode normally requires a Telegram control channel. A self-managed
+      // WhatsApp owner-control chat can explicitly accept that responsibility.
+      allowLiveWithoutTelegram: bool(process.env.ALLOW_LIVE_WITHOUT_TELEGRAM, false),
     },
 
     telegram: {
@@ -193,14 +223,28 @@ export function buildConfig(overrides = {}) {
 
     ai: {
       provider: (process.env.AI_PROVIDER || 'groq').toLowerCase(),
+      providers: parseAiProviders(process.env.AI_PROVIDERS, process.env.AI_PROVIDER),
       model: process.env.AI_MODEL || '',
+      senderCooldownSec: int(process.env.AI_SENDER_COOLDOWN_SEC, 15),
+      dailyLimit: int(process.env.AI_DAILY_LIMIT, 200),
+      // Public-AI behavior/caps live in core/aiAccess.js. There are no
+      // PUBLIC_AI_* or SELF_AI_COMMANDS panel variables in this configuration.
       maxHistory: int(process.env.AI_MAX_HISTORY, 12),
       askMaxChars: Math.max(4_000, Math.min(int(process.env.AI_ASK_MAX_CHARS, 60_000), 100_000)),
       keys: {
         groq: process.env.GROQ_API_KEY || '',
         gemini: process.env.GEMINI_API_KEY || '',
+        openrouter: process.env.OPENROUTER_API_KEY || '',
         openai: process.env.OPENAI_API_KEY || '',
       },
+    },
+
+    // Image output uses Cloudflare Workers AI rather than the text/vision
+    // provider chain above. Both values are required; no paid fallback or
+    // surprise provider is used when they are absent.
+    imageGen: {
+      accountId: String(process.env.CLOUDFLARE_ACCOUNT_ID || '').trim(),
+      apiToken: process.env.CLOUDFLARE_API_TOKEN || '',
     },
   };
 
@@ -233,8 +277,13 @@ export function validateConfig(cfg) {
   if (cfg.mode !== MODES.DRY_RUN && !cfg.telegram.enabled) {
     warnings.push('Telegram panel not configured — you will have no remote visibility.');
   }
-  if (cfg.mode === MODES.LIVE && !cfg.telegram.enabled) {
-    problems.push('Refusing NEXUS_MODE=live without a Telegram panel configured.');
+  if (cfg.mode === MODES.LIVE && !cfg.telegram.enabled && !cfg.safety.allowLiveWithoutTelegram) {
+    problems.push(
+      'Refusing NEXUS_MODE=live without a Telegram panel. Set ALLOW_LIVE_WITHOUT_TELEGRAM=true only when the configured WhatsApp owner chat is your deliberate control channel.'
+    );
+  }
+  if (cfg.mode === MODES.LIVE && !cfg.telegram.enabled && cfg.safety.allowLiveWithoutTelegram) {
+    warnings.push('Live mode without Telegram was explicitly enabled; use the configured WhatsApp owner chat and .panic as the control path.');
   }
   if (!cfg.isDryRun && cfg.dashboard.enabled && !cfg.dashboard.token) {
     problems.push(

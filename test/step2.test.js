@@ -158,6 +158,28 @@ test('contacts: falls back through verified → notify → phone → jid', async
   assert.equal(cs.displayName('120363000000000000@g.us').source, 'jid');
 });
 
+test('contacts: persistent owner names and observed PN/LID aliases override profiles in every identity form', async () => {
+  const db = await getMemoryDb();
+  const cs = new ContactStore(db, quiet);
+  const pn = '923001234567@s.whatsapp.net';
+  const lid = '123456789012345@lid';
+  cs.upsert({ id: pn, name: 'WhatsApp Saved Name', notify: 'Their Push Name' });
+  cs.setManualName(pn, 'Ayesha — Doctor');
+  cs.linkAliases(lid, pn);
+  cs.upsert({ id: lid, name: 'LID profile label', notify: 'Changed remote profile' });
+
+  const byLid = cs.profile(lid);
+  assert.equal(byLid.jid, pn, 'the observed PN remains the canonical stored identity');
+  assert.equal(byLid.name, 'Ayesha — Doctor');
+  assert.equal(byLid.nameSource, 'manual');
+  assert.equal(byLid.phoneE164, '+923001234567', 'an LID alert uses its explicit PN alias');
+  assert.equal(cs.displayName(lid).name, 'Ayesha — Doctor');
+  assert.equal(cs.displayName(lid).source, 'manual');
+
+  cs.clearManualName(lid);
+  assert.equal(cs.profile(pn).name, 'WhatsApp Saved Name', 'removal restores synced-name fallback only');
+});
+
 // ══════════════════════════════════════════════════════════════════
 function rawMsg(id, text, { jid = MOM, sender = MOM } = {}) {
   return {
@@ -562,7 +584,21 @@ test('queue: serialises sends and records typing presence', async () => {
   assert.deepEqual(socket.sentOrder, ['one', 'two'], 'sends must complete in order');
   assert.ok(socket.signals.some((s) => s.presence === 'composing'), 'typing indicator shown');
   assert.ok(socket.signals.some((s) => s.presence === 'paused'), 'presence cleared afterwards');
+  assert.equal(socket.signals.filter((s) => s.presence === 'unavailable').length, 2,
+    'each send restores offline presence so the linked primary phone can ring');
+  assert.equal(socket.signals.at(-1).presence, 'unavailable');
   assert.equal(q.stats.sent, 2);
+});
+
+test('queue: capture alerts sent to the linked account skip typing and leave it unavailable', async () => {
+  const socket = new MockWebSocket();
+  const config = rigConfig();
+  config.safety.typingIndicator = true;
+  new OutboundQueue(socket, config, quiet).attach();
+
+  await socket.sendMessage(SELF, { text: 'private capture alert' });
+  assert.ok(!socket.signals.some((s) => s.presence === 'composing'), 'self chats have no human to show typing to');
+  assert.deepEqual(socket.signals.map((s) => s.presence), ['unavailable']);
 });
 
 test('queue: holds sends past the per-chat budget instead of dropping them', async () => {

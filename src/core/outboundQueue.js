@@ -1,4 +1,25 @@
-import { normalizeJid } from './jid.js';
+import { isSelfJid, normalizeJid } from './jid.js';
+
+/**
+ * A send that never settles (a half-open socket can do this) would hold the
+ * only send slot forever, and every reply after it would wait behind it.
+ * Bounding each send frees the slot.
+ */
+export const SEND_TIMEOUT_MS = 60_000;
+
+export function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+  });
+  return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
+}
+
+/** A self-chat never needs a typing indicator; it can disturb primary-phone presence. */
+export function isSelfDestination(socket, jid) {
+  const self = socket?.user?.id;
+  return Boolean(self && (isSelfJid(jid, self) || normalizeJid(jid) === normalizeJid(self)));
+}
 
 const DEFAULT_LOOP_THRESHOLD = 5;
 const MAX_LOOP_THRESHOLD = 25;
@@ -122,6 +143,7 @@ export class OutboundQueue {
     this.beforeSendObservers = new Set();
     this.queue = [];
     this.active = 0;
+    this.lastSentAt = 0;
     this.stats = {
       sent: 0,
       throttledMs: 0,
@@ -298,7 +320,7 @@ export class OutboundQueue {
           `use ".panic" if this was unexpected.`,
       };
       this.#notifyBeforeSend(ownerJid, content);
-      await this.rawSendMessage(ownerJid, content);
+      await withTimeout(this.rawSendMessage(ownerJid, content), SEND_TIMEOUT_MS, 'volume alert');
     } catch (error) {
       this.logger.error(`outbound volume owner alert failed: ${error.message}`);
     }
@@ -324,13 +346,13 @@ export class OutboundQueue {
     this.allowOnce();
     const seconds = Math.ceil(this.loopWindowMs / 1_000);
     try {
-      await this.socket.sendMessage(ownerJid, {
+      await withTimeout(this.socket.sendMessage(ownerJid, {
         text:
           `🛑 Outbound loop breaker engaged.\n\n` +
           `Blocked similar message ${count} to ${destination} within ${seconds}s. ` +
           `Further sends are halted. Fix the source, then run ".panic resume" or restart Nexus-WA.\n` +
           `Message text is not included in this alert.`,
-      });
+      }), SEND_TIMEOUT_MS, 'loop-breaker alert');
     } catch (error) {
       this.logger.error(`loop breaker owner alert failed: ${error.message}`);
     }
@@ -377,14 +399,14 @@ export class OutboundQueue {
   }
 
   async #run(item) {
+    // Set on success only, so the heartbeat can show when replies last worked.
     try {
-      if (this.typing && item.jid) await this.#simulateTyping(item.jid);
-      this.#notifyBeforeSend(item.jid, item.content);
-      const res = await item.task();
+      const res = await withTimeout(this.#deliver(item), SEND_TIMEOUT_MS, 'send');
       if (item.jid) {
         this.windows.set(item.jid, [...(this.windows.get(item.jid) || []), Date.now()]);
       }
       this.stats.sent++;
+      this.lastSentAt = Date.now();
       if (!item.bypassSafetyMonitors) {
         const anomaly = this.#checkVolumeAnomaly();
         if (anomaly) await this.#alertVolumeAnomaly(anomaly);
@@ -393,6 +415,33 @@ export class OutboundQueue {
     } catch (err) {
       this.logger.error(`send failed: ${err.message}`);
       item.reject(err);
+    }
+  }
+
+  async #deliver(item) {
+    try {
+      // A self-chat is where capture alerts land when the linked account is
+      // also the owner. There is no human recipient to benefit from a typing
+      // signal, and avoiding it keeps the primary phone's notification state
+      // independent from the companion.
+      if (this.typing && item.jid && !isSelfDestination(this.socket, item.jid)) {
+        await this.#simulateTyping(item.jid);
+      }
+      this.#notifyBeforeSend(item.jid, item.content);
+      return await item.task();
+    } finally {
+      // A composing/paused presence can make WhatsApp consider this linked
+      // session active. Reassert unavailable after every send so the primary
+      // Android phone remains eligible for audible incoming notifications.
+      await this.#restorePrimaryPhonePresence();
+    }
+  }
+
+  async #restorePrimaryPhonePresence() {
+    try {
+      await this.socket.sendPresenceUpdate?.('unavailable');
+    } catch {
+      // Presence is advisory. Never hide a successful message send behind it.
     }
   }
 

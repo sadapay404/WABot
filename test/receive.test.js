@@ -6,6 +6,7 @@ import { createLogger } from '../src/core/logger.js';
 import { MessageCache } from '../src/core/messageCache.js';
 import { MessageInbox } from '../src/core/messageInbox.js';
 import { ContactStore } from '../src/core/contactStore.js';
+import { PendingPrompts } from '../src/core/pendingPrompts.js';
 import { normalize } from '../src/core/message.js';
 import receivePlugin from '../src/plugins/receive.js';
 
@@ -30,7 +31,7 @@ function store(cache, { id, chat = LID, alt = PN, text = '', media = null, viewO
   return raw;
 }
 
-function context({ args, db, inbox, contacts, replies, sent, config }) {
+function context({ args, db, inbox, contacts, replies, sent, config, prompts = null }) {
   let reads = 0;
   const socket = {
     async readMessages() { reads++; },
@@ -44,7 +45,7 @@ function context({ args, db, inbox, contacts, replies, sent, config }) {
     config,
     db,
     socket,
-    bot: { messageInbox: inbox, contacts, selfJid: SELF },
+    bot: { messageInbox: inbox, contacts, prompts, selfJid: SELF },
     reply: async (text) => replies.push(String(text)),
     send: async (jid, content) => sent.push({ jid, content }),
     readCount: () => reads,
@@ -97,14 +98,46 @@ test('.receive phone selector reports text, voice notes and view-once media only
   assert.match(report, /Ayesha/);
   assert.match(report, /Please bring the documents/);
   assert.match(report, /voice note/);
-  assert.match(report, /view-once photo/);
+  assert.match(report, /Unavailable because ViewOnce/);
   assert.match(report, /exceeds the 16 MB per-file limit/);
-  assert.equal(sent.length, 2, 'voice note and view-once photo are attached; large media is skipped');
+  assert.equal(sent.length, 1, 'only the voice note is attached; view-once and large media are skipped');
   assert.deepEqual(downloads, ['R-VOICE'], 'oversized media is rejected before download; archived view-once bytes use local storage');
   assert.ok(sent.every((item) => item.jid === OWNER), 'no message is sent to the source chat');
   assert.equal(sent.find((item) => item.content.audio)?.content.ptt, true);
-  assert.ok(sent.some((item) => item.content.image), 'archived view-once bytes can be inspected on request');
+  assert.ok(!sent.some((item) => item.content.image), 'view-once media is never forwarded by .receive');
   assert.equal(ctx.readCount(), 0, 'the receiver never invokes readMessages');
+});
+
+test('.receive accepts an exact multiword persistent name and requires an owner choice for partial names without read receipts', async () => {
+  const db = await getMemoryDb();
+  const cache = new MessageCache(db, quiet);
+  const contacts = new ContactStore(db, quiet);
+  const khan = '923001234561@s.whatsapp.net';
+  const noor = '923001234562@s.whatsapp.net';
+  contacts.upsertMany([{ id: khan, name: 'Ayesha Khan' }, { id: noor, name: 'Ayesha Noor' }]);
+  contacts.setManualName(khan, 'Ayesha Family');
+  store(cache, { id: 'FAMILY', chat: khan, alt: null, text: 'Exact persistent-name message.' });
+  store(cache, { id: 'NOOR', chat: noor, alt: null, text: 'Noor message.' });
+  const inbox = new MessageInbox({ db, cache, mediaStore: null, socket: {}, logger: quiet });
+  const replies = [];
+  const sent = [];
+
+  const exact = context({ args: ['Ayesha', 'Family', '5'], db, inbox, contacts, replies, sent, config: testConfig() });
+  await receivePlugin.execute(exact);
+  assert.match(replies.at(-1), /Exact persistent-name message/);
+  assert.equal(exact.readCount(), 0);
+
+  const prompts = new PendingPrompts();
+  const ambiguous = context({ args: ['Ayesha', '5'], db, inbox, contacts, replies, sent, config: testConfig(), prompts });
+  await receivePlugin.execute(ambiguous);
+  assert.match(replies.at(-1), /Saved contact matches/);
+  assert.ok(prompts.peek(OWNER), 'partial saved name must wait for an owner selection');
+  assert.equal(ambiguous.readCount(), 0);
+
+  const pending = prompts.take(OWNER);
+  await pending.onReply({ text: '2', reply: async (text) => replies.push(String(text)) });
+  assert.match(replies.at(-1), /Noor message/);
+  assert.equal(ambiguous.readCount(), 0, 'the choice flow never invokes readMessages');
 });
 
 test('.receive unread reports chat-level state without labeling cached previews as individually unread', async () => {
