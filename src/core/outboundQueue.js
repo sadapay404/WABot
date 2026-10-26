@@ -183,8 +183,18 @@ export class OutboundQueue {
     this.rawSendMessage = original;
     const self = this;
 
-    this.socket.sendMessage = function queuedSendMessage(jid, content, options) {
-      return self.#enqueue(() => original(jid, content, options), jid, content);
+    this.socket.sendMessage = function queuedSendMessage(jid, content, options = {}) {
+      // Internal capture alerts are driven by inbound WhatsApp events, not by
+      // arbitrary command text. They still obey the kill switch, pacing, and
+      // volume monitor, but must not look like an outbound reply loop merely
+      // because several distinct media events share the same notification text.
+      const { nexusSystemEvent = false, ...transportOptions } = options || {};
+      return self.#enqueue(
+        () => original(jid, content, transportOptions),
+        jid,
+        content,
+        { bypassLoopBreaker: Boolean(nexusSystemEvent) }
+      );
     };
 
     this.socket.__outboundQueue = this;
@@ -198,7 +208,7 @@ export class OutboundQueue {
     return win.length < this.limitPerMin;
   }
 
-  #enqueue(task, jid, content) {
+  #enqueue(task, jid, content, { bypassLoopBreaker = false } = {}) {
     return new Promise((resolve, reject) => {
       let bypassSafetyMonitors = false;
       if (this.halted) {
@@ -212,7 +222,7 @@ export class OutboundQueue {
           return reject(new Error(`outbound halted by ${this.haltReason}`));
         }
       }
-      this.queue.push({ task, jid, content, bypassSafetyMonitors, resolve, reject });
+      this.queue.push({ task, jid, content, bypassSafetyMonitors, bypassLoopBreaker, resolve, reject });
       this.#pump();
     });
   }
@@ -376,7 +386,7 @@ export class OutboundQueue {
         continue;
       }
 
-      if (!item.bypassSafetyMonitors) {
+      if (!item.bypassSafetyMonitors && !item.bypassLoopBreaker) {
         const trip = this.#checkLoop(item);
         if (trip) {
           await this.#tripLoopBreaker(item, trip);

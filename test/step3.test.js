@@ -432,6 +432,31 @@ test('loop breaker: similar sends halt queued traffic and alert the owner', asyn
   assert.equal(q.depth().halted, false);
 });
 
+test('loop breaker: trusted inbound-capture alerts stay paced but do not trip the reply-loop halt', async () => {
+  const socket = fakeSocket();
+  const config = rigConfig();
+  config.safety.typingIndicator = false;
+  config.safety.outboundLoopThreshold = 2;
+  const q = new OutboundQueue(socket, config, quiet);
+  q.attach();
+
+  await Promise.all(
+    Array.from({ length: 4 }, () =>
+      socket.sendMessage(MOM, { text: 'View-once media was unavailable on this linked device.' }, { nexusSystemEvent: 'view-once-capture' })
+    )
+  );
+
+  assert.equal(socket.sent.length, 4, 'all distinct inbound events are still delivered to the owner');
+  assert.equal(q.depth().loopBreakerTrips, 0, 'passive capture wording is not an outbound reply loop');
+  assert.equal(q.depth().halted, false);
+
+  q.halt();
+  await assert.rejects(
+    socket.sendMessage(MOM, { text: 'still blocked by the kill switch' }, { nexusSystemEvent: 'view-once-capture' }),
+    /halted/
+  );
+});
+
 test('loop breaker: thresholds are per destination and distinct messages still send', async () => {
   const socket = fakeSocket();
   const config = rigConfig();
@@ -784,6 +809,27 @@ test('view-once: Baileys unavailable marker is recorded and reported', async () 
   assert.equal(alert.jid, SELF);
   assert.match(alert.content.text, /linked device received no media/i);
   assert.match(alert.content.text, /reply with `\*`, 🤔, or 👀/);
+});
+
+test('view-once: a replayed unavailable marker is persisted and alerted exactly once', async () => {
+  const db = await getMemoryDb();
+  const socket = fakeSocket();
+  const capture = new ViewOnceCapture({
+    socket, db, contacts: new ContactStore(db, quiet), registry: null,
+    mediaStore: null, logger: quiet, config: rigConfig(),
+  });
+  const raw = {
+    key: { remoteJid: MOM, fromMe: false, id: 'VO-REPLAY', isViewOnce: true },
+    messageTimestamp: Math.floor(Date.now() / 1_000),
+  };
+  const { normalize } = await import('../src/core/message.js');
+  const msg = normalize(raw);
+
+  const results = await Promise.all([capture.onMessage(raw, msg), capture.onMessage(raw, msg)]);
+  assert.equal(results.filter(Boolean).length, 1, 'only the first copy is captured');
+  assert.equal(capture.stats.unavailable, 1);
+  assert.equal(socket.sent.filter((entry) => /View-once/i.test(entry.content.text || '')).length, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM view_once WHERE stanza_id = ?').get('VO-REPLAY').count, 1);
 });
 
 test('view-once: owner replies using *, 🤔 or 👀 recover quoted media after a marker-only event', async () => {
