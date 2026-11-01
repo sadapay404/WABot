@@ -17,7 +17,7 @@ const BOB = '15550002222@s.whatsapp.net';
 function setup(plugin) {
   const config = buildConfig({ mode: 'dry-run' });
   config.safety.ownerJids = [OWNER];
-  config.safety.typingIndicator = false;
+  config.safety.typingIndicator = true;
   const plugins = { resolve: (name) => (name === plugin.name ? plugin : null) };
   const socket = new MockWhatsAppSocket({ logger: quiet, ownerJid: OWNER, botJid: OWNER });
   const queue = new OutboundQueue(socket, config, quiet);
@@ -62,6 +62,15 @@ test('a command with no arguments runs as before (no question asked)', async () 
   const { send } = setup(pairPlugin(ran));
   await send('.pair');
   assert.deepEqual(ran, [[]]);
+});
+
+test('ordinary command replies skip the artificial typing delay but keep the queue', async () => {
+  const ran = [];
+  const { socket, send } = setup(pairPlugin(ran));
+  await send('.pair');
+  assert.deepEqual(ran, [[]]);
+  assert.ok(!socket.signals.some((signal) => signal.presence === 'composing'));
+  assert.equal(socket.outbox.length, 1);
 });
 
 test('a partly filled command asks for the missing argument and then runs', async () => {

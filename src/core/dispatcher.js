@@ -415,6 +415,11 @@ export class Dispatcher {
   async #reply(socket, msg, text, options = {}) {
     if (!text) return;
     this.trackSocket(socket);
+    // Command replies are interactive feedback, not simulated human typing.
+    // Keeping them immediate removes the deliberate 0.6–1.0s queue delay for
+    // AI errors, local calculator results, and every ordinary command while
+    // retaining rate limits, the loop breaker, and the outbound kill switch.
+    const replyOptions = { nexusSkipTyping: true, ...options };
     // Baileys' hard ceiling per message; split rather than truncate silently.
     const LIMIT = 4000;
     const chunks = [];
@@ -426,7 +431,7 @@ export class Dispatcher {
       if (!socket?.__outboundQueue?.onBeforeSend) {
         this.#rememberSelfEcho(socket, msg.jid, { text: chunk });
       }
-      last = await socket.sendMessage(msg.jid, { text: chunk }, options);
+      last = await socket.sendMessage(msg.jid, { text: chunk }, replyOptions);
     }
     return last;
   }

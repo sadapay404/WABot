@@ -352,7 +352,7 @@ async function askSelected(ctx, service, parsed, selection) {
   const ai = ctx.bot?.ai;
   if (!ai) return ctx.reply('The AI service is not active in this mode.');
   if (!ai.configured()) {
-    return ctx.reply('AI is not configured. Set a provider key with `.env set GROQ_API_KEY` (or `OPENAI_API_KEY` / `GEMINI_API_KEY` / `OPENROUTER_API_KEY`).');
+    return ctx.reply('AI is not configured. Set `GROQ_API_KEY` first; `OPENROUTER_API_KEY` is the fallback.');
   }
 
   const conversations = chats.map((chat) => {

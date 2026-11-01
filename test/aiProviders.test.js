@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { parseAiProviders } from '../src/config/index.js';
+import { buildConfig, parseAiProviders } from '../src/config/index.js';
 import { AiClient, AiError, AiNotConfigured, modelSupportsImages } from '../src/core/ai.js';
 import { createLogger } from '../src/core/logger.js';
 import { setEnvValue } from '../src/core/envFile.js';
@@ -18,32 +18,43 @@ function failure(status) {
   return { ok: false, status, text: async () => JSON.stringify({ error: { message: `boom ${status}` } }) };
 }
 
-function clientWith({ providers, keys, fetchImpl }) {
+function clientWith({ providers = parseAiProviders(), keys, fetchImpl, requestTimeoutMs }) {
   const config = {
     ai: { provider: 'groq', providers, keys, model: '', maxHistory: 12 },
   };
-  return new AiClient({ config, logger: quiet, fetchImpl });
+  return new AiClient({ config, logger: quiet, fetchImpl, requestTimeoutMs });
 }
 
-test('AI_PROVIDERS is sorted by priority, unknown and duplicate names dropped', () => {
-  const list = parseAiProviders('gemini:2,groq:1,bogus:3,openai:3,groq:9');
-  assert.deepEqual(list, [
+test('AI route is always Groq first then OpenRouter, regardless of an old provider list', () => {
+  assert.deepEqual(parseAiProviders('gemini:1,openrouter:2,groq:3,openai:4'), [
     { provider: 'groq', priority: 1 },
-    { provider: 'gemini', priority: 2 },
-    { provider: 'openai', priority: 3 },
+    { provider: 'openrouter', priority: 2 },
   ]);
+  assert.deepEqual(parseAiProviders('', 'gemini').map((entry) => entry.provider), ['groq', 'openrouter']);
+  assert.deepEqual(parseAiProviders('openrouter:1,groq:2').map((entry) => entry.provider), ['groq', 'openrouter']);
 });
 
-test('without AI_PROVIDERS the default order is gemini, groq, openrouter, openai', () => {
-  assert.deepEqual(parseAiProviders('').map((e) => e.provider), ['gemini', 'groq', 'openrouter', 'openai']);
-  assert.deepEqual(parseAiProviders('', 'openai').map((e) => e.provider), ['openai', 'gemini', 'groq', 'openrouter']);
+test('a stale Gemini provider/model setting falls back to Groq without reusing the Gemini model ID', () => {
+  const oldProvider = process.env.AI_PROVIDER;
+  const oldModel = process.env.AI_MODEL;
+  try {
+    process.env.AI_PROVIDER = 'gemini';
+    process.env.AI_MODEL = 'gemini-unavailable-model';
+    const config = buildConfig({ mode: 'dry-run' });
+    assert.equal(config.ai.provider, 'groq');
+    assert.equal(config.ai.model, '');
+  } finally {
+    if (oldProvider === undefined) delete process.env.AI_PROVIDER;
+    else process.env.AI_PROVIDER = oldProvider;
+    if (oldModel === undefined) delete process.env.AI_MODEL;
+    else process.env.AI_MODEL = oldModel;
+  }
 });
 
-test('openrouter uses the fixed free router model and its endpoint', async () => {
+test('OpenRouter uses the fixed free router model and its endpoint', async () => {
   const seen = [];
   const ai = clientWith({
-    providers: parseAiProviders('gemini:1,groq:2,openrouter:3'),
-    keys: { gemini: '', groq: '', openrouter: 'or-key' },
+    keys: { groq: '', openrouter: 'or-key' },
     fetchImpl: async (url, init) => {
       seen.push({ url, body: JSON.parse(init.body), auth: init.headers.authorization });
       return openAiReply('routed');
@@ -55,27 +66,44 @@ test('openrouter uses the fixed free router model and its endpoint', async () =>
   assert.equal(seen[0].auth, 'Bearer or-key');
 });
 
-test('gemini failing falls through groq to openrouter in priority order', async () => {
+test('Groq failure falls through directly to OpenRouter; Gemini is never contacted', async () => {
   const calls = [];
   const ai = clientWith({
-    providers: parseAiProviders('gemini:1,groq:2,openrouter:3'),
-    keys: { gemini: 'x', groq: 'g', openrouter: 'or' },
+    keys: { gemini: 'old-key', groq: 'g', openrouter: 'or' },
     fetchImpl: async (url) => {
       calls.push(url);
-      if (url.includes('generativelanguage')) return failure(429);
-      if (url.includes('groq.com')) return failure(500);
-      return openAiReply('third try');
+      if (url.includes('groq.com')) return failure(503);
+      return openAiReply('fallback answer');
     },
   });
-  assert.equal(await ai.complete({ prompt: 'hi' }), 'third try');
-  assert.equal(calls.length, 3);
-  assert.match(calls[2], /openrouter\.ai/);
+  assert.equal(await ai.complete({ prompt: 'hi' }), 'fallback answer');
+  assert.equal(calls.length, 2);
+  assert.match(calls[0], /groq\.com/);
+  assert.match(calls[1], /openrouter\.ai/);
+  assert.ok(!calls.some((url) => url.includes('generativelanguage')));
 });
 
-test('audio transcription never goes to openrouter', async () => {
+test('a text request has a hard deadline even when a fetch implementation ignores abort', async () => {
+  let signal;
   const ai = clientWith({
-    providers: parseAiProviders('openrouter:1'),
-    keys: { openrouter: 'or' },
+    keys: { groq: 'g', openrouter: '' },
+    requestTimeoutMs: 25,
+    fetchImpl: async (_url, init) => {
+      signal = init.signal;
+      return new Promise(() => {});
+    },
+  });
+  await assert.rejects(ai.complete({ prompt: 'hi' }), (error) => {
+    assert.ok(error instanceof AiError);
+    assert.match(error.message, /timed out after 1s/);
+    return true;
+  });
+  assert.equal(signal.aborted, true);
+});
+
+test('audio transcription never goes to OpenRouter', async () => {
+  const ai = clientWith({
+    keys: { groq: '', openrouter: 'or' },
     fetchImpl: async () => openAiReply('x'),
   });
   await assert.rejects(ai.transcribeAudio({ base64: 'AAAA' }), AiNotConfigured);
@@ -90,8 +118,7 @@ test('Groq Qwen and OpenRouter free router are recognised as vision-capable', ()
 test('an image request automatically uses Groq Qwen when Groq text model is not visual', async () => {
   const seen = [];
   const ai = clientWith({
-    providers: parseAiProviders('groq:1'),
-    keys: { groq: 'g' },
+    keys: { groq: 'g', openrouter: '' },
     fetchImpl: async (url, init) => {
       seen.push({ url, body: JSON.parse(init.body) });
       return openAiReply('image understood');
@@ -105,29 +132,10 @@ test('an image request automatically uses Groq Qwen when Groq text model is not 
   assert.match(seen[0].body.messages.at(-1).content[1].image_url.url, /^data:image\/jpeg;base64,aGVsbG8=/);
 });
 
-test('complete() falls back to the next provider when the first fails', async () => {
-  const calls = [];
-  const fetchImpl = async (url) => {
-    calls.push(url);
-    return url.includes('groq.com') ? failure(500) : openAiReply('from openai');
-  };
-  const ai = clientWith({
-    providers: parseAiProviders('groq:1,openai:2'),
-    keys: { groq: 'g', openai: 'o', gemini: '' },
-    fetchImpl,
-  });
-  const answer = await ai.complete({ prompt: 'hi' });
-  assert.equal(answer, 'from openai');
-  assert.equal(calls.length, 2);
-  assert.match(calls[0], /groq\.com/);
-  assert.match(calls[1], /openai\.com/);
-});
-
 test('providers without a key are skipped entirely', async () => {
   const calls = [];
   const ai = clientWith({
-    providers: parseAiProviders('groq:1,openai:2'),
-    keys: { groq: '', openai: 'o' },
+    keys: { groq: '', openrouter: 'or' },
     fetchImpl: async (url) => {
       calls.push(url);
       return openAiReply('ok');
@@ -135,25 +143,24 @@ test('providers without a key are skipped entirely', async () => {
   });
   await ai.complete({ prompt: 'hi' });
   assert.equal(calls.length, 1);
-  assert.match(calls[0], /openai\.com/);
+  assert.match(calls[0], /openrouter\.ai/);
 });
 
-test('when every provider fails the error names each one', async () => {
+test('when both active providers fail the error names each one', async () => {
   const ai = clientWith({
-    providers: parseAiProviders('groq:1,openai:2'),
-    keys: { groq: 'g', openai: 'o' },
+    keys: { groq: 'g', openrouter: 'or' },
     fetchImpl: async () => failure(503),
   });
   await assert.rejects(ai.complete({ prompt: 'hi' }), (err) => {
     assert.ok(err instanceof AiError);
     assert.match(err.message, /groq: provider 503/);
-    assert.match(err.message, /openai: provider 503/);
+    assert.match(err.message, /openrouter: provider 503/);
     return true;
   });
 });
 
-test('no keys at all reports not configured', async () => {
-  const ai = clientWith({ providers: parseAiProviders('groq:1'), keys: { groq: '' }, fetchImpl: async () => openAiReply('x') });
+test('no active keys at all reports not configured', async () => {
+  const ai = clientWith({ keys: { groq: '', openrouter: '' }, fetchImpl: async () => openAiReply('x') });
   assert.equal(ai.configured(), false);
   await assert.rejects(ai.complete({ prompt: 'hi' }), AiNotConfigured);
 });
@@ -161,10 +168,10 @@ test('no keys at all reports not configured', async () => {
 test('setEnvValue replaces the line in place and leaves the rest alone', () => {
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'envf-')), '.env');
   fs.writeFileSync(file, '# top\nGROQ_API_KEY=abc\nAI_PROVIDERS=groq:1\nAI_PROVIDERS=dup:9\nTAIL=1\n');
-  setEnvValue('AI_PROVIDERS', 'openai:1,groq:2', file);
+  setEnvValue('AI_PROVIDERS', 'groq:1,openrouter:2', file);
   assert.equal(
     fs.readFileSync(file, 'utf8'),
-    '# top\nGROQ_API_KEY=abc\nAI_PROVIDERS=openai:1,groq:2\nTAIL=1\n'
+    '# top\nGROQ_API_KEY=abc\nAI_PROVIDERS=groq:1,openrouter:2\nTAIL=1\n'
   );
   setEnvValue('NEW_KEY', 'x', file);
   assert.match(fs.readFileSync(file, 'utf8'), /\nNEW_KEY=x\n$/);

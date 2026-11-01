@@ -16,7 +16,6 @@ import {
   listAiBlocks,
   removeAiBlock,
 } from '../core/aiAccess.js';
-import { setEnvValue } from '../core/envFile.js';
 import { downloadWhatsAppMedia } from '../core/mediaDownloader.js';
 
 const SYSTEM_BASE =
@@ -48,7 +47,7 @@ async function run(ctx, build) {
 }
 
 
-const PROVIDER_NAMES = ['groq', 'gemini', 'openrouter', 'openai'];
+const PROVIDER_NAMES = ['groq', 'openrouter'];
 const MAX_CONTEXT = 50;
 const MAX_QUOTED_TEXT = 8_000;
 
@@ -83,7 +82,7 @@ function renderProviders(ctx) {
   const cfg = ctx.config?.ai || {};
   const keys = cfg.keys || {};
   const sorted = [...(cfg.providers || [])].sort((a, b) => a.priority - b.priority);
-  if (!sorted.length) return 'No AI providers configured. Set AI_PROVIDERS in .env, e.g. gemini:1,groq:2,openrouter:3.';
+  if (!sorted.length) return 'No AI providers configured. Restart with the bundled Groq → OpenRouter route.';
   const lines = sorted.map((e, i) =>
     `${i + 1}. ${e.provider} (priority ${e.priority}) ${keys[e.provider] ? '✓ key set' : '✗ no key, add ' + e.provider.toUpperCase() + '_API_KEY to .env'}`
   );
@@ -160,7 +159,7 @@ async function askAi(ctx) {
   });
 }
 
-const CHECK_PROVIDERS = ['gemini', 'groq', 'openrouter'];
+const CHECK_PROVIDERS = ['groq', 'openrouter'];
 const CHECK_TRIGGER = '-check-';
 const BLOCK_TRIGGER = '-blist-';
 const UNBLOCK_TRIGGER = '-wlist-';
@@ -192,7 +191,7 @@ async function manageAiBlocklist(ctx, action, args) {
 }
 
 /**
- * `.ai -check- [all|gemini|groq|openrouter|openai]`. Owner only.
+ * `.ai -check- [all|groq|openrouter]`. Owner only.
  * A plain word "check" is not the trigger: prompts may start with it.
  */
 async function aiCheck(ctx, rest) {
@@ -201,11 +200,9 @@ async function aiCheck(ctx, rest) {
   if (!ai) return ctx.reply('The AI orchestrator is not active in this mode.');
   const target = String(rest[0] || 'all').toLowerCase();
   if (target !== 'all' && !PROVIDER_NAMES.includes(target)) {
-    return ctx.reply('usage: .ai -check- [all|gemini|groq|openrouter|openai]');
+    return ctx.reply('usage: .ai -check- [all|groq|openrouter]');
   }
   const names = target === 'all' ? [...CHECK_PROVIDERS] : [target];
-  if (target === 'all' && ai.config.keys?.openai) names.push('openai');
-
   const results = await Promise.all(names.map((name) => ai.check(name)));
   const lines = results.map((r) =>
     r.ok
@@ -240,45 +237,14 @@ export default {
     {
       name: 'aiprovider',
       aliases: ['aiorder'],
-      description: 'Show or set AI provider priority (1 = tried first, the rest are fallbacks)',
-      usage: '.aiprovider  or  .aiprovider <groq|gemini|openrouter|openai> <priority>',
+      description: 'Show the fixed Groq → OpenRouter AI route',
+      usage: '.aiprovider',
       ownerOnly: true,
-      requires: [
-        {
-          index: 0,
-          name: 'provider',
-          prompt: 'Which provider? Reply with groq, gemini, openrouter or openai.',
-          validate: (v) => (PROVIDER_NAMES.includes(String(v).trim().toLowerCase()) ? String(v).trim().toLowerCase() : null),
-        },
-        {
-          index: 1,
-          name: 'priority',
-          prompt: 'What priority? 1 = tried first, 2 = tried if 1 fails, 3 = last. Reply with a number.',
-          validate: (v) => (/^[1-9]$/.test(String(v).trim()) ? Number(String(v).trim()) : null),
-        },
-      ],
       async execute(ctx) {
-        const cfg = ctx.config?.ai;
-        if (!cfg) return ctx.reply('AI config is not loaded.');
-
-        if (ctx.args?.length >= 2) {
-          const provider = String(ctx.args[0]).toLowerCase();
-          const priority = Number(ctx.args[1]);
-          if (!PROVIDER_NAMES.includes(provider) || !(priority >= 1)) {
-            return ctx.reply('usage: .aiprovider <groq|gemini|openrouter|openai> <priority>');
-          }
-          const next = (cfg.providers || []).filter((e) => e.provider !== provider);
-          next.push({ provider, priority });
-          next.sort((a, b) => a.priority - b.priority);
-          cfg.providers = next;
-          try {
-            setEnvValue('AI_PROVIDERS', next.map((e) => `${e.provider}:${e.priority}`).join(','));
-          } catch (err) {
-            return ctx.reply(`Priority changed for this run, but writing .env failed: ${err.message}`);
-          }
-          return ctx.reply(`${renderProviders(ctx)}\n\nApplied now and saved to .env.`);
-        }
-        return ctx.reply(renderProviders(ctx));
+        if (!ctx.config?.ai) return ctx.reply('AI config is not loaded.');
+        return ctx.reply(
+          `${renderProviders(ctx)}\n\nThe route is fixed: Groq is tried first and OpenRouter is used only if Groq fails. Gemini is disabled.`
+        );
       },
     },
     {

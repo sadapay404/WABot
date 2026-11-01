@@ -49,35 +49,28 @@ function normalizeMode(raw) {
   return m;
 }
 
-const AI_PROVIDER_NAMES = ['groq', 'gemini', 'openrouter', 'openai'];
+// Gemini is deliberately absent: it has proved persistently unavailable for
+// this deployment. Groq is the fast primary and OpenRouter's free router is
+// its only automatic fallback; no paid provider is selected automatically.
+const AI_PROVIDER_NAMES = ['groq', 'openrouter'];
 /** Order used when AI_PROVIDERS is not set. */
-const AI_DEFAULT_ORDER = ['gemini', 'groq', 'openrouter', 'openai'];
+const AI_DEFAULT_ORDER = ['groq', 'openrouter'];
 
 /**
- * Parse AI_PROVIDERS="gemini:1,groq:2,openrouter:3" (lower number = tried first).
- * Unknown names and duplicates are dropped. Without AI_PROVIDERS, the legacy
- * AI_PROVIDER becomes the first choice and the rest follow in the default order.
+ * Return the fixed no-cost provider route. AI_PROVIDERS is accepted only for
+ * backwards-compatible environments; it cannot alter the runtime route.
  */
-export function parseAiProviders(list, legacy = '') {
-  let order;
-  const parts = String(list || '').split(',').map((s) => s.trim()).filter(Boolean);
-  if (parts.length) {
-    order = parts.map((part, i) => {
-      const [name, prio] = part.split(':');
-      return { provider: String(name || '').trim().toLowerCase(), priority: Number(prio) || i + 1 };
-    });
-  } else {
-    const first = String(legacy || '').trim().toLowerCase();
-    const names = [first, ...AI_DEFAULT_ORDER].filter((n, i, a) => AI_PROVIDER_NAMES.includes(n) && a.indexOf(n) === i);
-    order = names.map((provider, i) => ({ provider, priority: i + 1 }));
-  }
-  const valid = order.filter((e) => AI_PROVIDER_NAMES.includes(e.provider));
-  const unique = valid.filter((e, i) => valid.findIndex((x) => x.provider === e.provider) === i);
-  return unique.sort((a, b) => a.priority - b.priority);
+export function parseAiProviders(_list, _legacy = '') {
+  // AI_PROVIDERS is intentionally ignored for routing. This preserves safe
+  // starts with old environments while guaranteeing that Gemini is never
+  // called and Groq always gets the first attempt.
+  return AI_DEFAULT_ORDER.map((provider, priority) => ({ provider, priority: priority + 1 }));
 }
 
 export function buildConfig(overrides = {}) {
   const mode = normalizeMode(overrides.mode ?? process.env.NEXUS_MODE);
+  const requestedAiProvider = String(process.env.AI_PROVIDER || '').toLowerCase();
+  const activeAiProvider = AI_PROVIDER_NAMES.includes(requestedAiProvider) ? requestedAiProvider : 'groq';
 
   const cfg = {
     root: ROOT,
@@ -181,7 +174,9 @@ export function buildConfig(overrides = {}) {
         Math.min(3_600_000, int(process.env.OUTBOUND_VOLUME_WINDOW_MS, 60_000))
       ),
       queueConcurrency: Math.max(1, int(process.env.QUEUE_CONCURRENCY, 1)),
-      typingIndicator: bool(process.env.TYPING_INDICATOR, true),
+      // Replies are immediate by default. Individual non-command sends can
+      // still opt in through the existing TYPING_INDICATOR setting.
+      typingIndicator: bool(process.env.TYPING_INDICATOR, false),
       observeAllowReplyToOwner: bool(process.env.OBSERVE_ALLOW_REPLY_TO_OWNER, true),
       // Live mode normally requires a Telegram control channel. A self-managed
       // WhatsApp owner-control chat can explicitly accept that responsibility.
@@ -222,9 +217,10 @@ export function buildConfig(overrides = {}) {
     },
 
     ai: {
-      provider: (process.env.AI_PROVIDER || 'groq').toLowerCase(),
-      providers: parseAiProviders(process.env.AI_PROVIDERS, process.env.AI_PROVIDER),
-      model: process.env.AI_MODEL || '',
+      provider: activeAiProvider,
+      providers: parseAiProviders(process.env.AI_PROVIDERS, requestedAiProvider),
+      // A stale AI_PROVIDER=gemini must not make Groq send a Gemini model ID.
+      model: !requestedAiProvider || requestedAiProvider === activeAiProvider ? process.env.AI_MODEL || '' : '',
       senderCooldownSec: int(process.env.AI_SENDER_COOLDOWN_SEC, 15),
       dailyLimit: int(process.env.AI_DAILY_LIMIT, 200),
       // Public-AI behavior/caps live in core/aiAccess.js. There are no

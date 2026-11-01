@@ -6,13 +6,9 @@ import { createLogger } from '../src/core/logger.js';
 
 const quiet = createLogger('fatal');
 
-// The two real messages from the phone's log, verbatim.
-const GEMINI_RETIRED =
-  'This model models/gemini-2.0-flash is no longer available. Please update your code to use models/gemini-3.8-flash.';
 const GROQ_RETIRED = 'The model `llama-3.3-70b-versatile` does not exist or you do not have access to it.';
 
 test('explainProviderError names a retired model in plain words', () => {
-  assert.match(explainProviderError(GEMINI_RETIRED, 404), /model name is retired/);
   assert.match(explainProviderError(GROQ_RETIRED, 404), /model name is retired/);
 });
 
@@ -32,11 +28,10 @@ test('explainProviderError never returns an empty reason', () => {
 function clientWith(keys, fetchImpl) {
   const config = {
     ai: {
-      provider: 'gemini',
+      provider: 'groq',
       providers: [
-        { provider: 'gemini', priority: 1 },
-        { provider: 'groq', priority: 2 },
-        { provider: 'openrouter', priority: 3 },
+        { provider: 'groq', priority: 1 },
+        { provider: 'openrouter', priority: 2 },
       ],
       keys,
       model: '',
@@ -58,17 +53,15 @@ test('check reports a working provider with its reply', async () => {
   assert.equal(r.model, 'openai/gpt-oss-120b');
 });
 
-test('check reports a retired Gemini model with the reason, not a silent failure', async () => {
-  const fetchImpl = async () => ({
-    ok: false,
-    status: 404,
-    text: async () => JSON.stringify({ error: { message: GEMINI_RETIRED } }),
-  });
-  const r = await clientWith({ gemini: 'AIzaSECRET123' }, fetchImpl).check('gemini');
+test('check refuses disabled Gemini without contacting it', async () => {
+  let calls = 0;
+  const r = await clientWith({ gemini: 'old-key' }, async () => {
+    calls++;
+    throw new Error('should not be called');
+  }).check('gemini');
   assert.equal(r.ok, false);
-  assert.equal(r.model, 'gemini-3.8-flash');
-  assert.match(r.problem, /model name is retired/);
-  assert.ok(r.raw.includes('no longer available'));
+  assert.match(r.problem, /disabled/);
+  assert.equal(calls, 0);
 });
 
 test('check says plainly when a provider has no key', async () => {
@@ -104,14 +97,10 @@ test('.ai check is owner only; a stranger gets a plain refusal', async () => {
   assert.match(replies[0], /Only the owner/);
 });
 
-test('.ai check replies for every provider, even when some fail', async () => {
-  const fetchImpl = async (url) => {
-    if (String(url).includes('generativelanguage')) {
-      return { ok: false, status: 404, text: async () => JSON.stringify({ error: { message: GEMINI_RETIRED } }) };
-    }
-    return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: 'OK' } }] }) };
-  };
-  const ai = clientWith({ gemini: 'g-key', groq: 'q-key' }, fetchImpl);
+test('.ai check reports Groq and OpenRouter only', async () => {
+  const fetchImpl = async () =>
+    ({ ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: 'OK' } }] }) });
+  const ai = clientWith({ gemini: 'old-key', groq: 'q-key', openrouter: 'or-key' }, fetchImpl);
   const replies = [];
   await checkCommand().execute({
     args: ['-check-'], isOwner: true, reply: async (t) => replies.push(t),
@@ -119,10 +108,9 @@ test('.ai check replies for every provider, even when some fail', async () => {
   });
   const report = replies[0];
   assert.match(report, /AI check/);
-  assert.match(report, /❌ \*gemini\*/);
-  assert.match(report, /model name is retired/);
   assert.match(report, /✅ \*groq\*/);
-  assert.match(report, /❌ \*openrouter\*[\s\S]*OPENROUTER_API_KEY/);
+  assert.match(report, /✅ \*openrouter\*/);
+  assert.doesNotMatch(report, /gemini/i);
 });
 
 test('an empty reply is explained, not shown as raw JSON', () => {

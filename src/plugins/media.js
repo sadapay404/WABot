@@ -125,7 +125,7 @@ export default {
         if (!ai.configured()) {
           return ctx.reply(
             '🎤 _Transcription needs an AI provider with audio support._\n\n' +
-              'Set `GROQ_API_KEY` (Whisper) or `OPENAI_API_KEY` in `.env`.'
+              'Set `GROQ_API_KEY` (Whisper) in `.env`. OpenRouter does not provide the audio endpoint.'
           );
         }
 

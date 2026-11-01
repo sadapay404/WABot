@@ -20,7 +20,7 @@ category in WhatsApp, use `.help` followed by `admin`, `ai`, `automation`, `medi
 | `.agenda` | — | Owner | View pending sends or decide missed jobs |
 | `.ai` | `.gpt` | Anyone in live mode | Ask AI, analyse one replied-to text/image, or use linked-main `.ai <n>` context; controller can manage the AI blocklist |
 | `.ai -check-` | — | Owner | Test each AI provider and explain any that does not work |
-| `.aiprovider` | `.aiorder` | Owner | Show or set AI provider priority (1 = tried first, the rest are fallbacks) |
+| `.aiprovider` | `.aiorder` | Owner | Show the fixed Groq → OpenRouter AI route |
 | `.antidelete` | `.ad`, `.deleted`, `.deletes` | Owner | Toggle deletion capture/alerts and review history |
 | `.archive` | `.media` | Owner | List locally archived media |
 | `.ask` | — | Owner | Ask about explicitly selected direct-chat history |
@@ -152,11 +152,13 @@ stored in the local database, not `.env`.
 
 ```text
 .ai -check-
-.ai -check- gemini
 .ai -check- groq
 .ai -check- openrouter
+```
 
-A normal question that starts with the word check still goes to the AI, for example
+A normal question that starts with the word check still goes to the AI, for example:
+
+```text
 .ai check my essay for spelling mistakes
 ```
 
@@ -170,17 +172,12 @@ a model, or when `.ai` answers from a fallback.
 
 ```text
 .aiprovider
-.aiprovider gemini 1
-.aiprovider groq 2
-.aiprovider openrouter 3
 ```
 
-With no arguments it lists the providers in the order they are tried, and shows
-whether each one has an API key set. With a provider and a priority it moves that
-provider to that position (1 is tried first) and saves the order to `AI_PROVIDERS`
-in `.env`. If a provider fails, the next one is tried. Providers without a key are
-skipped. Keys are never shown. If the bot asks for the provider or the priority,
-just reply with it.
+Lists the fixed route and whether its keys are set: **Groq is always tried
+first**, then the free **OpenRouter** router only if Groq fails. Gemini is
+disabled because it has proved persistently unavailable. Providers without a key
+are skipped; keys are never shown.
 
 ### `.antidelete` — deletion alerts and history
 **Aliases:** `.ad`, `.deleted`, `.deletes` · **Access:** Owner · **Category:** Privacy
@@ -378,8 +375,7 @@ text marked “Draft (not sent)”; copy/edit/send it yourself.
 .env
 .env status
 .env set AI_PROVIDER groq
-.env set AI_PROVIDER openai
-.env set AI_PROVIDER gemini
+.env set AI_PROVIDER openrouter
 .env set AI_MODEL <provider-model-id>
 .env set AI_MAX_HISTORY 12
 .env set AI_ASK_MAX_CHARS 60000
@@ -387,9 +383,8 @@ text marked “Draft (not sent)”; copy/edit/send it yourself.
 .env set CLOUDFLARE_API_TOKEN
 .env set CAPTURE_ALERT_JID 15551234567
 .env set GROQ_API_KEY
-.env set OPENAI_API_KEY
-.env set GEMINI_API_KEY
-.env unset OPENAI_API_KEY
+.env set OPENROUTER_API_KEY
+.env unset OPENROUTER_API_KEY
 .env unset CLOUDFLARE_API_TOKEN
 .env unset CLOUDFLARE_ACCOUNT_ID
 .env unset AI_PROVIDER
@@ -400,7 +395,7 @@ text marked “Draft (not sent)”; copy/edit/send it yourself.
 .env owner remove 15551234567
 ```
 
-Only approved settings can be changed. `AI_MAX_HISTORY` accepts 2–40 and
+Only approved settings can be changed. The Groq → OpenRouter request route is fixed; `AI_PROVIDER` only selects which supported provider an optional `AI_MODEL` override belongs to. `AI_MAX_HISTORY` accepts 2–40 and
 `AI_ASK_MAX_CHARS` accepts 4,000–100,000. Public AI, quoted-message AI,
 linked-main `.ai <n>`, and `.imagine` safeguards are source-controlled live-mode
 behavior; their limits are not panel variables. `CAPTURE_ALERT_JID` must be a
@@ -802,8 +797,7 @@ preserved when they are on persistent storage.
 .env
 .env status
 .env set AI_PROVIDER groq
-.env set AI_PROVIDER openai
-.env set AI_PROVIDER gemini
+.env set AI_PROVIDER openrouter
 .env set AI_MODEL <provider-model-id>
 .env set AI_MAX_HISTORY 12
 .env set AI_ASK_MAX_CHARS 60000
@@ -811,9 +805,8 @@ preserved when they are on persistent storage.
 .env set CLOUDFLARE_API_TOKEN
 .env set CAPTURE_ALERT_JID 15551234567
 .env set GROQ_API_KEY
-.env set OPENAI_API_KEY
-.env set GEMINI_API_KEY
-.env unset OPENAI_API_KEY
+.env set OPENROUTER_API_KEY
+.env unset OPENROUTER_API_KEY
 .env unset CLOUDFLARE_API_TOKEN
 .env unset CLOUDFLARE_ACCOUNT_ID
 .env unset AI_PROVIDER
@@ -824,7 +817,7 @@ preserved when they are on persistent storage.
 .env owner remove 15551234567
 ```
 
-Only approved settings can be changed. `AI_MAX_HISTORY` accepts 2–40 and
+Only approved settings can be changed. The Groq → OpenRouter request route is fixed; `AI_PROVIDER` only selects which supported provider an optional `AI_MODEL` override belongs to. `AI_MAX_HISTORY` accepts 2–40 and
 `AI_ASK_MAX_CHARS` accepts 4,000–100,000. Public AI, quoted-message AI,
 linked-main `.ai <n>`, and `.imagine` safeguards are source-controlled live-mode
 behavior; their limits are not panel variables. `CAPTURE_ALERT_JID` must be a

@@ -7,8 +7,6 @@ function ownerLabel(jid) {
 
 const API_KEYS = new Set([
   'GROQ_API_KEY',
-  'OPENAI_API_KEY',
-  'GEMINI_API_KEY',
   'OPENROUTER_API_KEY',
   'CLOUDFLARE_API_TOKEN',
 ]);
@@ -82,7 +80,7 @@ export default {
         }
       }
       if (!value) {
-        return ctx.reply('Usage: `.env set AI_PROVIDER groq` | `.env set AI_MODEL <model-id>` | `.env set AI_MAX_HISTORY 12` | `.env set CLOUDFLARE_ACCOUNT_ID <id>` | `.env set CAPTURE_ALERT_JID <number>`');
+        return ctx.reply('Usage: `.env set AI_PROVIDER groq|openrouter` | `.env set AI_MODEL <model-id>` | `.env set AI_MAX_HISTORY 12` | `.env set CLOUDFLARE_ACCOUNT_ID <id>` | `.env set CAPTURE_ALERT_JID <number>`');
       }
       try {
         const key = editor.setValue(rawKey, value);
@@ -104,7 +102,7 @@ export default {
     return ctx.reply([
       '*Remote configuration*',
       '`.env status` — show approved settings; secrets remain hidden.',
-      '`.env set AI_PROVIDER groq|openai|gemini`',
+      '`.env set AI_PROVIDER groq|openrouter`',
       '`.env set GROQ_API_KEY` — then send the key as the next private message.',
       '`.env set CLOUDFLARE_ACCOUNT_ID <id>` — enable the account half of `.imagine`.',
       '`.env set CLOUDFLARE_API_TOKEN` — then send the Workers AI token as the next private message.',

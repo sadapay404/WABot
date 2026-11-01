@@ -7,8 +7,6 @@ import { captureAlertJid } from './alertRouting.js';
 
 const SECRET_KEYS = new Set([
   'GROQ_API_KEY',
-  'OPENAI_API_KEY',
-  'GEMINI_API_KEY',
   'OPENROUTER_API_KEY',
   'CLOUDFLARE_API_TOKEN',
 ]);
@@ -220,13 +218,13 @@ export class EnvEditor {
 
   status() {
     const ai = this.config.ai || {};
-    const keys = ['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY']
+    const keys = ['GROQ_API_KEY', 'OPENROUTER_API_KEY']
       .map((name) => `${name}: ${ai.keys?.[name.toLowerCase().replace('_api_key', '')] ? 'set (hidden)' : 'not set'}`);
     const imageGen = this.config.imageGen || {};
     const alert = captureAlertJid(this.config, this.selfJid) || 'linked account self-chat';
     return [
-      `AI provider: ${ai.provider || 'groq'}`,
-      `AI model: ${ai.model || '(provider default)'}`,
+      'AI route: Groq → OpenRouter (Gemini disabled)',
+      `AI model override: ${ai.model || '(provider default)'}`,
       `AI history window: ${ai.maxHistory || 12}`,
       'Public AI: built into live mode for DMs and groups (20s per sender, 10 per sender/day, 100 total/day).',
       'Linked-account AI: built into live mode, including `.ai <n>` cached history.',
@@ -245,7 +243,7 @@ export class EnvEditor {
     if (/[\0\r\n]/.test(text)) throw new Error('values must fit on one line');
     if (key === 'AI_PROVIDER') {
       const provider = text.toLowerCase();
-      if (!['groq', 'openai', 'gemini', 'openrouter'].includes(provider)) throw new Error('provider must be groq, gemini, openrouter, or openai');
+      if (!['groq', 'openrouter'].includes(provider)) throw new Error('provider must be groq or openrouter');
       return provider;
     }
     if (key === 'AI_MODEL') {
@@ -277,7 +275,7 @@ export class EnvEditor {
   }
 
   #applyValue(key, value) {
-    if (['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY', 'OPENROUTER_API_KEY'].includes(key)) {
+    if (['GROQ_API_KEY', 'OPENROUTER_API_KEY'].includes(key)) {
       const provider = key.replace('_API_KEY', '').toLowerCase();
       this.config.ai.keys[provider] = value;
       process.env[key] = value;

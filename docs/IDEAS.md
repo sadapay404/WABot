@@ -46,7 +46,7 @@ Passive delete/edit/view-once capture is independent of `OWNER_JIDS`: it observe
 
 | Idea | Effort | Risk | Status | Notes |
 |---|---|---|---|---|
-| **`.ai` with context** | M | none | 🟡 | groq / openai / gemini behind one interface. Per-chat AI memory is capped at `AI_MAX_HISTORY`. |
+| **`.ai` with context** | M | none | 🟡 | Groq with OpenRouter free fallback. Per-chat AI memory is capped at `AI_MAX_HISTORY`. |
 | **Selected-chat `.ask`** | M | medium | 🟡 | `.ask chats` lists cached one-to-one conversations; explicitly selects chats by menu number or direct phone, and a message count, `all`, or local-date filters. Optional phone/email/phrase redaction is applied locally to the transcript and question before provider transmission. Never replies to participants; group selection is deferred. |
 | **`.summarize`** | M | none | 🟡 | Summarise the last N messages of the current chat. |
 | **`.vision`** | M | none | 🟡 | Describe/OCR an image. |
