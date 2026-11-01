@@ -123,6 +123,9 @@ export class AntiDelete {
     this.config = config;
     this.downloader = downloader;
     this.selfOverride = selfJid;
+    // A revoke can be emitted in both messages.upsert and messages.update;
+    // protect the short overlap before its durable row is written.
+    this.inFlight = new Set();
     this.stats = { detected: 0, resolved: 0, unresolved: 0, mediaForwarded: 0, failed: 0 };
   }
 
@@ -175,52 +178,69 @@ export class AntiDelete {
 
   /** The heart of it: resolve a revoke and notify. */
   async onRevoke(source, stanzaId) {
-    if (!this.enabled()) return;
-    this.stats.detected++;
+    if (!this.enabled()) return null;
 
     const key = source?.key || {};
     const chatJid = normalizeJid(key.remoteJid);
-    const isGroup = isGroupJid(chatJid);
-    const senderJid = normalizeJid(
-      key.fromMe ? this.selfJid() : isGroup ? key.participant || chatJid : chatJid
+    const sessionJid = this.selfJid() || '';
+    const id = String(stanzaId || '').trim();
+    if (!id || !chatJid) return null;
+    const dedupeKey = `${sessionJid}\u0000${chatJid}\u0000${id}`;
+    if (this.inFlight.has(dedupeKey) || this.#alreadyRecorded(id, sessionJid, chatJid)) return null;
+
+    this.inFlight.add(dedupeKey);
+    try {
+      this.stats.detected++;
+      const isGroup = isGroupJid(chatJid);
+      const senderJid = normalizeJid(
+        key.fromMe ? this.selfJid() : isGroup ? key.participant || chatJid : chatJid
+      );
+      const senderAlt = actorAlternate(key, isGroup);
+
+      // Don't report your own deletions back to you — you know you did it.
+      const deletedByOther = !key.fromMe;
+      const { known, record, raw, mediaAvailable } = this.cache.resolveDeleted(stanzaId);
+      if (!known) this.stats.unresolved++;
+      else this.stats.resolved++;
+
+      // If this revoke has both forms, profile() stores the observed relationship
+      // before rendering. Existing aliases still resolve when a revoke carries
+      // only an LID.
+      const profile = this.contacts.profile(senderJid, senderAlt);
+      const chatLabel = describeChat(chatJid, {
+        myJid: this.selfJid(),
+        name: isGroupJid(chatJid) ? null : profile.name,
+      });
+
+      const deletion = {
+        stanzaId,
+        chatJid,
+        chatLabel,
+        isGroup: isGroupJid(chatJid),
+        senderJid,
+        profile,
+        record,
+        known,
+        mediaAvailable,
+        deletedByOther,
+        at: Date.now(),
+      };
+
+      this.#persist(deletion);
+      const text = formatDeletion(deletion);
+      await this.#deliver(text, deletion, raw);
+      return deletion;
+    } finally {
+      this.inFlight.delete(dedupeKey);
+    }
+  }
+
+  #alreadyRecorded(stanzaId, sessionJid, chatJid) {
+    return Boolean(
+      this.db
+        .prepare('SELECT 1 FROM deleted_messages WHERE stanza_id = ? AND session_jid = ? AND chat_jid = ? LIMIT 1')
+        .get(stanzaId, sessionJid, chatJid)
     );
-    const senderAlt = actorAlternate(key, isGroup);
-
-    // Don't report your own deletions back to you — you know you did it.
-    const deletedByOther = !key.fromMe;
-
-    const { known, record, raw, mediaAvailable } = this.cache.resolveDeleted(stanzaId);
-    if (!known) this.stats.unresolved++;
-    else this.stats.resolved++;
-
-    // If this revoke has both forms, profile() stores the observed relationship
-    // before rendering. Existing aliases still resolve when a revoke carries
-    // only an LID.
-    const profile = this.contacts.profile(senderJid, senderAlt);
-    const chatLabel = describeChat(chatJid, {
-      myJid: this.selfJid(),
-      name: isGroupJid(chatJid) ? null : profile.name,
-    });
-
-    const deletion = {
-      stanzaId,
-      chatJid,
-      chatLabel,
-      isGroup: isGroupJid(chatJid),
-      senderJid,
-      profile,
-      record,
-      known,
-      mediaAvailable,
-      deletedByOther,
-      at: Date.now(),
-    };
-
-    this.#persist(deletion);
-
-    const text = formatDeletion(deletion);
-    await this.#deliver(text, deletion, raw);
-    return deletion;
   }
 
   #persist(d) {

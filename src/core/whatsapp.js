@@ -14,6 +14,7 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import { OutboundQueue } from './outboundQueue.js';
 import { normalizeJid } from './jid.js';
 
@@ -21,6 +22,32 @@ let lib = null;
 async function baileys() {
   if (!lib) lib = await import('@whiskeysockets/baileys');
   return lib;
+}
+
+/** Extract the version safely from Baileys' public Defaults source. */
+export function parseBaileysVersionSource(source) {
+  const match = String(source || '').match(/const\s+version\s*=\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
+  if (!match) throw new Error('GitHub Defaults source did not contain a WhatsApp version');
+  return match.slice(1).map(Number);
+}
+
+/**
+ * The upstream helper uses raw.githubusercontent.com, which is often blocked
+ * or slow on PaaS hosts. The GitHub REST API is more consistently reachable
+ * there and returns the same public Defaults source as base64 JSON.
+ */
+export async function fetchBaileysVersionFromGitHub({ fetchImpl = globalThis.fetch, signal } = {}) {
+  const response = await fetchImpl(BAILEYS_DEFAULTS_API, {
+    headers: {
+      accept: 'application/vnd.github+json',
+      'user-agent': 'Nexus-WA version check',
+    },
+    signal,
+  });
+  if (!response?.ok) throw new Error(`GitHub version request failed (${response?.status || 'no response'})`);
+  const body = await response.json();
+  const source = Buffer.from(String(body?.content || '').replace(/\s/g, ''), 'base64').toString('utf8');
+  return parseBaileysVersionSource(source);
 }
 
 /**
@@ -39,6 +66,8 @@ export const EXIT_DO_NOT_RESTART = 3;
  * a socket that never reports `close`.
  */
 export const VERSION_TIMEOUT_MS = 10_000;
+export const VERSION_CACHE_MS = 24 * 60 * 60 * 1000;
+const BAILEYS_DEFAULTS_API = 'https://api.github.com/repos/WhiskeySockets/Baileys/contents/src/Defaults/index.ts';
 export const CONNECT_STALL_MS = 120_000;
 export const SILENCE_MS = 180_000;
 export const HEALTH_TICK_MS = 30_000;
@@ -190,9 +219,15 @@ export class WhatsAppConnection {
   #emit(event, payload) {
     for (const fn of this.listeners.get(event) || []) {
       try {
-        fn(payload);
-      } catch (err) {
-        this.logger.error(`listener ${event}: ${err.message}`);
+        // EventEmitter does not await async listeners. Attach a rejection
+        // handler here so an optional watcher cannot become an unhandled
+        // rejection that kills the whole live process.
+        const result = fn(payload);
+        if (result && typeof result.catch === 'function') {
+          result.catch((error) => this.logger.error(`listener ${event}: ${error.message}`));
+        }
+      } catch (error) {
+        this.logger.error(`listener ${event}: ${error.message}`);
       }
     }
   }
@@ -218,7 +253,7 @@ export class WhatsAppConnection {
       throw err;
     }
 
-    const version = await this.#version(B);
+    const version = await this.#version();
     if (generation !== this.generation) return null; // superseded while awaiting
     const browser = connectionBrowser({ Browsers }, this.config);
 
@@ -277,20 +312,60 @@ export class WhatsAppConnection {
     return socket;
   }
 
-  async #version(B) {
-    // fetchLatestBaileysVersion has no timeout of its own. On a dead network it
-    // can hang indefinitely, and connect() would never create a socket.
-    let timer;
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('timed out')), VERSION_TIMEOUT_MS);
-      timer.unref?.();
-    });
+  #versionCachePath() {
+    // Keep the non-secret cache beside, not inside, the Baileys auth directory:
+    // its presence must never make an empty credential directory look linked
+    // and prevent a legitimate remote-vault restore.
+    return path.join(path.dirname(this.config.wa.sessionDir), 'wa-web-version.json');
+  }
+
+  #readVersionCache() {
     try {
-      const { version, isLatest } = await Promise.race([B.fetchLatestBaileysVersion(), timeout]);
-      this.logger.info(`wa web version ${version.join('.')} (latest=${isLatest})`);
+      const value = JSON.parse(fs.readFileSync(this.#versionCachePath(), 'utf8'));
+      const version = Array.isArray(value?.version) ? value.version.map(Number) : [];
+      const fetchedAt = Number(value?.fetchedAt);
+      if (version.length !== 3 || version.some((part) => !Number.isInteger(part) || part < 0) || !fetchedAt) return null;
+      return { version, fetchedAt };
+    } catch {
+      return null;
+    }
+  }
+
+  #writeVersionCache(version) {
+    try {
+      const target = this.#versionCachePath();
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      const tmp = `${target}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ version, fetchedAt: Date.now() }));
+      fs.renameSync(tmp, target);
+    } catch (error) {
+      // A fresh connection is more important than a performance cache.
+      this.logger.warn(`could not cache WhatsApp web version: ${error.message}`);
+    }
+  }
+
+  async #version() {
+    const cached = this.#readVersionCache();
+    const age = cached ? Date.now() - cached.fetchedAt : Infinity;
+    if (cached && age >= 0 && age < VERSION_CACHE_MS) {
+      this.logger.info(`wa web version ${cached.version.join('.')} (cached)`);
+      return cached.version;
+    }
+
+    const controller = new AbortController();
+    let timer;
+    try {
+      timer = setTimeout(() => controller.abort(), VERSION_TIMEOUT_MS);
+      const version = await fetchBaileysVersionFromGitHub({ signal: controller.signal });
+      this.#writeVersionCache(version);
+      this.logger.info(`wa web version ${version.join('.')} (GitHub API)`);
       return version;
-    } catch (err) {
-      this.logger.warn(`could not fetch latest version (${err.message}); using library default`);
+    } catch (error) {
+      if (cached) {
+        this.logger.warn(`could not refresh WhatsApp web version; using cached version`);
+        return cached.version;
+      }
+      this.logger.warn(`could not fetch WhatsApp web version; using library default`);
       return undefined;
     } finally {
       clearTimeout(timer);
@@ -395,13 +470,18 @@ export class WhatsAppConnection {
   }
 
   #wire(socket, DisconnectReason) {
-    socket.ev.on('creds.update', () => this.saveCreds?.());
+    socket.ev.on('creds.update', () => {
+      Promise.resolve(this.saveCreds?.()).catch((error) =>
+        this.logger.error(`could not persist WhatsApp credentials: ${error.message}`)
+      );
+    });
     let pairingRequested = false;
 
     socket.ev.on('connection.update', async (update) => {
       // A socket we already replaced (forced reconnect) can still emit events.
       // Acting on them would start a second connection beside the live one.
       if (socket !== this.socket) return;
+      this.lastFrameAt = Date.now();
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
@@ -470,20 +550,27 @@ export class WhatsAppConnection {
       }
     });
 
-    socket.ev.on('messages.upsert', (p) => {
+    const forward = (event) => (payload) => {
+      // Some Baileys transports do not surface the low-level websocket `frame`
+      // event consistently. Any decoded protocol event is equally good proof
+      // that the link is alive and avoids a needless health-tick recycle.
+      this.lastFrameAt = Date.now();
+      this.#emit(event, payload);
+    };
+    socket.ev.on('messages.upsert', (payload) => {
       this.lastInboundAt = Date.now();
-      this.#emit('messages.upsert', p);
+      forward('messages.upsert')(payload);
     });
-    socket.ev.on('messages.update', (p) => this.#emit('messages.update', p));
-    socket.ev.on('contacts.update', (p) => this.#emit('contacts.update', p));
-    socket.ev.on('contacts.upsert', (p) => this.#emit('contacts.upsert', p));
+    socket.ev.on('messages.update', forward('messages.update'));
+    socket.ev.on('contacts.update', forward('contacts.update'));
+    socket.ev.on('contacts.upsert', forward('contacts.upsert'));
     // Baileys emits authoritative PN↔LID associations separately from contact
     // labels. Forward them so the durable contact store can preserve numbers.
-    socket.ev.on('lid-mapping.update', (p) => this.#emit('lid-mapping.update', p));
-    socket.ev.on('chats.update', (p) => this.#emit('chats.update', p));
-    socket.ev.on('chats.upsert', (p) => this.#emit('chats.upsert', p));
-    socket.ev.on('messaging-history.set', (p) => this.#emit('messaging-history.set', p));
-    socket.ev.on('presence.update', (p) => this.#emit('presence.update', p));
+    socket.ev.on('lid-mapping.update', forward('lid-mapping.update'));
+    socket.ev.on('chats.update', forward('chats.update'));
+    socket.ev.on('chats.upsert', forward('chats.upsert'));
+    socket.ev.on('messaging-history.set', forward('messaging-history.set'));
+    socket.ev.on('presence.update', forward('presence.update'));
   }
 
   async #requestPairingCode(socket) {

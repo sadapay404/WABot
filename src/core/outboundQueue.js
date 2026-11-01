@@ -188,12 +188,12 @@ export class OutboundQueue {
       // arbitrary command text. They still obey the kill switch, pacing, and
       // volume monitor, but must not look like an outbound reply loop merely
       // because several distinct media events share the same notification text.
-      const { nexusSystemEvent = false, ...transportOptions } = options || {};
+      const { nexusSystemEvent = false, nexusSkipTyping = false, ...transportOptions } = options || {};
       return self.#enqueue(
         () => original(jid, content, transportOptions),
         jid,
         content,
-        { bypassLoopBreaker: Boolean(nexusSystemEvent) }
+        { bypassLoopBreaker: Boolean(nexusSystemEvent), skipTyping: Boolean(nexusSkipTyping) }
       );
     };
 
@@ -208,7 +208,7 @@ export class OutboundQueue {
     return win.length < this.limitPerMin;
   }
 
-  #enqueue(task, jid, content, { bypassLoopBreaker = false } = {}) {
+  #enqueue(task, jid, content, { bypassLoopBreaker = false, skipTyping = false } = {}) {
     return new Promise((resolve, reject) => {
       let bypassSafetyMonitors = false;
       if (this.halted) {
@@ -222,7 +222,7 @@ export class OutboundQueue {
           return reject(new Error(`outbound halted by ${this.haltReason}`));
         }
       }
-      this.queue.push({ task, jid, content, bypassSafetyMonitors, bypassLoopBreaker, resolve, reject });
+      this.queue.push({ task, jid, content, bypassSafetyMonitors, bypassLoopBreaker, skipTyping, resolve, reject });
       this.#pump();
     });
   }
@@ -434,7 +434,7 @@ export class OutboundQueue {
       // also the owner. There is no human recipient to benefit from a typing
       // signal, and avoiding it keeps the primary phone's notification state
       // independent from the companion.
-      if (this.typing && item.jid && !isSelfDestination(this.socket, item.jid)) {
+      if (this.typing && !item.skipTyping && item.jid && !isSelfDestination(this.socket, item.jid)) {
         await this.#simulateTyping(item.jid);
       }
       this.#notifyBeforeSend(item.jid, item.content);

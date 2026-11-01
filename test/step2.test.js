@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 import { getMemoryDb, getSetting, setSetting } from '../src/database/index.js';
 import { buildConfig } from '../src/config/index.js';
-import { createLogger } from '../src/core/logger.js';
+import { createLogger, summarizeBaileysFailure } from '../src/core/logger.js';
 import { LogBuffer } from '../src/core/logBuffer.js';
 import {
   normalizeJid,
@@ -508,6 +508,25 @@ test('anti-delete: end-to-end — message deleted, alert lands in your own chat'
   assert.match(sent.text, /the code is 4417/);
 });
 
+test('anti-delete: duplicate revoke events notify only once', async () => {
+  const { socket, ad } = await antiDeleteRig();
+  const raw = rawMsg('DEL-DUPLICATE', 'one original');
+  ad.onMessage(raw, normMsg('DEL-DUPLICATE', 'one original'));
+  const revoke = {
+    key: { remoteJid: MOM, fromMe: false, id: 'RV-DUPLICATE' },
+    update: { message: { protocolMessage: { type: 0, stanzaId: 'DEL-DUPLICATE' } } },
+  };
+
+  const results = await Promise.all([ad.onUpdate(revoke), ad.onUpdate(revoke)]);
+  assert.equal(results.filter(Boolean).length, 1);
+  assert.equal(socket.outbox.length, 1, 'upsert/update replay must not duplicate the owner alert');
+  assert.equal(ad.stats.detected, 1);
+  assert.equal(
+    ad.db.prepare('SELECT COUNT(*) AS count FROM deleted_messages WHERE stanza_id = ?').get('DEL-DUPLICATE').count,
+    1
+  );
+});
+
 test('anti-delete: forwards the actual deleted media', async () => {
   const { socket, ad } = await antiDeleteRig();
   const raw = rawMsg('DEL2', 'caption here');
@@ -634,6 +653,21 @@ test('queue: capture alerts sent to the linked account skip typing and leave it 
   await socket.sendMessage(SELF, { text: 'private capture alert' });
   assert.ok(!socket.signals.some((s) => s.presence === 'composing'), 'self chats have no human to show typing to');
   assert.deepEqual(socket.signals.map((s) => s.presence), ['unavailable']);
+});
+
+test('queue: a health response can skip typing without bypassing outbound safety', async () => {
+  const socket = new MockWebSocket();
+  const config = rigConfig();
+  config.safety.typingIndicator = true;
+  const q = new OutboundQueue(socket, config, quiet);
+  q.attach();
+
+  await socket.sendMessage(MOM, { text: 'Pong' }, { nexusSkipTyping: true });
+  assert.ok(!socket.signals.some((signal) => signal.presence === 'composing'));
+  assert.equal(q.depth().sent, 1);
+
+  q.halt();
+  await assert.rejects(socket.sendMessage(MOM, { text: 'Pong' }, { nexusSkipTyping: true }), /halted/);
 });
 
 test('queue: holds sends past the per-chat budget instead of dropping them', async () => {
@@ -875,6 +909,14 @@ test('dashboard: rejects an unauthorised request in a connected mode', async () 
 });
 
 // ══════════════════════════════════════════════════════════════════
+test('logger: Baileys failure summaries retain status class without exposing error text', () => {
+  const sensitive = new Error('could not decrypt account or session 15550001234');
+  sensitive.output = { statusCode: 401 };
+  assert.equal(summarizeBaileysFailure({ err: sensitive }), '[Baileys failure: status 401]');
+  assert.equal(summarizeBaileysFailure(new Error('socket timeout while connecting')), '[Baileys failure: timeout]');
+  assert.equal(summarizeBaileysFailure({ err: new Error('session record rejected') }), '[Baileys failure: encrypted session]');
+});
+
 test('logBuffer: captures lines from any child logger', () => {
   const buf = new LogBuffer(3).attach();
   const log = createLogger('info');

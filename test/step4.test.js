@@ -20,7 +20,7 @@ const quiet = createLogger('fatal');
 const PASS = 'correct horse battery';
 
 /** A rig: real SessionBackup against a temp dir, plus a fake remote store. */
-function rig({ kind = 'http', fetchImpl = null, extra = {} } = {}) {
+function rig({ kind = 'http', fetchImpl = null, extra = {}, requestTimeoutMs } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nwb-vault-'));
   const sessionDir = path.join(tmp, 'auth');
   fs.mkdirSync(sessionDir, { recursive: true });
@@ -66,6 +66,7 @@ function rig({ kind = 'http', fetchImpl = null, extra = {} } = {}) {
       ...extra,
     },
     fetchImpl: fakeFetch,
+    requestTimeoutMs,
   });
 
   return { tmp, sessionDir, dbPath, backup, vault, store, calls };
@@ -184,6 +185,15 @@ test('vault: a failing upload never throws out of the timer', async () => {
   const { vault } = rig({ fetchImpl: boom });
   const res = await vault.push();
   assert.equal(res, false);
+  assert.equal(vault.stats.failed, 1);
+});
+
+test('vault: an unresponsive remote is bounded so boot cannot hang forever', async () => {
+  const never = () => new Promise(() => {});
+  const { vault } = rig({ fetchImpl: never, requestTimeoutMs: 25 });
+  const started = Date.now();
+  assert.equal(await vault.restoreIfEmpty(false), false);
+  assert.ok(Date.now() - started < 500, 'the restore attempt must fail promptly');
   assert.equal(vault.stats.failed, 1);
 });
 

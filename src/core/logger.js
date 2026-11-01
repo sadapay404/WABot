@@ -31,6 +31,25 @@ export function addLogSink(fn) {
   return () => sinks.delete(fn);
 }
 
+/**
+ * Keep Baileys diagnostics useful without serialising protocol/session data.
+ * Upstream usually passes `{ err }`, not an Error directly, so merely checking
+ * `instanceof Error` hid the status class that operators need to troubleshoot.
+ */
+export function summarizeBaileysFailure(value) {
+  const error = value instanceof Error
+    ? value
+    : value?.err || value?.error || value?.e || value?.uploadError || null;
+  const code = Number(error?.output?.statusCode || error?.statusCode || value?.statusCode || 0);
+  if (Number.isInteger(code) && code >= 100 && code <= 599) return `[Baileys failure: status ${code}]`;
+
+  const message = String(error?.message || '').toLowerCase();
+  if (/timeout|timed out|abort/.test(message)) return '[Baileys failure: timeout]';
+  if (/decrypt|session|pre.?key/.test(message)) return '[Baileys failure: encrypted session]';
+  if (/network|socket|websocket|connection|econn|enotfound/.test(message)) return '[Baileys failure: network connection]';
+  return '[Baileys details redacted]';
+}
+
 function makeLogger(level = 'info', scope = 'nexus', bindings = {}) {
   const threshold = LEVELS[level] ?? LEVELS.info;
 
@@ -43,11 +62,7 @@ function makeLogger(level = 'info', scope = 'nexus', bindings = {}) {
     const isBaileys = scope.split(':').includes('baileys');
     if (isBaileys && LEVELS[lvl] < LEVELS.warn) return;
     const safeArgs = isBaileys
-      ? args.map((arg) => {
-          if (arg instanceof Error) return `Baileys error: ${arg.message}`;
-          if (typeof arg === 'object' && arg !== null) return '[Baileys details redacted]';
-          return arg;
-        })
+      ? args.map((arg) => (typeof arg === 'object' && arg !== null ? summarizeBaileysFailure(arg) : arg))
       : args;
 
     const ts = new Date().toISOString().slice(11, 23);

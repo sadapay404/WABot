@@ -22,6 +22,7 @@ import { getDb } from './database/index.js';
 import { PluginLoader } from './core/pluginLoader.js';
 import { Dispatcher } from './core/dispatcher.js';
 import { normalize } from './core/message.js';
+import { prioritizeInboundBatch } from './core/inboundBatch.js';
 import { MockWhatsAppSocket, MOCK_OWNER_JID } from './core/mockSocket.js';
 import { SessionRegistry } from './core/sessionRegistry.js';
 import { ContactStore } from './core/contactStore.js';
@@ -99,7 +100,10 @@ function wireEvents(socket, app) {
   const selfJid = () => (socket.user?.id ? normalizeJid(socket.user.id) : '');
 
   on('messages.upsert', async ({ messages = [], type = null } = {}) => {
-    for (const raw of messages) {
+    // Baileys may flush several buffered messages together after a transport
+    // stall. Handle `.ping` first so a slow earlier item cannot make the bot
+    // look dead; all ordinary messages keep their received order.
+    for (const raw of prioritizeInboundBatch(messages, app.config.prefix)) {
       try {
         // Group membership stubs carry no `message` — handle them first.
         groupWatch?.onMessage(raw);

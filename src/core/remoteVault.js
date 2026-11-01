@@ -24,6 +24,8 @@
  */
 
 const GITHUB_API = 'https://api.github.com';
+/** A dead vault endpoint must never hold boot/recovery hostage indefinitely. */
+export const VAULT_REQUEST_TIMEOUT_MS = 15_000;
 
 export class RemoteVault {
   /**
@@ -33,12 +35,14 @@ export class RemoteVault {
    * @param {object} deps.cfg      { kind, url, token, passphrase, path, intervalMin }
    * @param {Function} [deps.fetchImpl]
    * @param {Function} [deps.onAlert]  called with a message when pushes are failing
+   * @param {number} [deps.requestTimeoutMs] bounded network wait; injectable for tests
    */
-  constructor({ logger, backup, cfg, fetchImpl = null, onAlert = null, alertAfter = 3 }) {
+  constructor({ logger, backup, cfg, fetchImpl = null, onAlert = null, alertAfter = 3, requestTimeoutMs = VAULT_REQUEST_TIMEOUT_MS }) {
     this.logger = logger.child({ scope: 'vault' });
     this.backup = backup;
     this.cfg = cfg;
     this.fetch = fetchImpl || globalThis.fetch;
+    this.requestTimeoutMs = Math.max(10, Number(requestTimeoutMs) || VAULT_REQUEST_TIMEOUT_MS);
     this.timer = null;
     this.stats = { pushed: 0, pulled: 0, failed: 0, restored: 0, skipped: 0 };
     this.onAlert = onAlert;
@@ -205,6 +209,28 @@ export class RemoteVault {
   }
 
   // ── backends ──────────────────────────────────────────────────────
+  async #request(url, init = {}) {
+    const controller = new AbortController();
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error(`remote vault request timed out after ${Math.round(this.requestTimeoutMs / 1000)}s`));
+      }, this.requestTimeoutMs);
+    });
+    try {
+      // A Promise.race is required even with AbortController: test doubles and
+      // some nonstandard fetch implementations may ignore an abort signal.
+      return await Promise.race([
+        Promise.resolve(this.fetch(url, { ...init, signal: init.signal || controller.signal })),
+        timeout,
+      ]);
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
+    }
+  }
+
   async #upload(blob) {
     if (this.cfg.kind === 'github') return this.#githubPut(blob);
     return this.#httpPut(blob);
@@ -226,7 +252,7 @@ export class RemoteVault {
 
   async #githubGet() {
     const { owner, repo, path } = this.#githubParts();
-    const res = await this.fetch(
+    const res = await this.#request(
       `${GITHUB_API}/repos/${owner}/${repo}/contents/${path}`,
       {
         headers: {
@@ -256,13 +282,13 @@ export class RemoteVault {
     // Updating an existing file needs its current sha, or GitHub rejects it.
     let sha;
     try {
-      const cur = await this.fetch(url, { headers });
+      const cur = await this.#request(url, { headers });
       if (cur.ok) sha = (await cur.json()).sha;
     } catch {
       /* first upload — nothing to update */
     }
 
-    const res = await this.fetch(url, {
+    const res = await this.#request(url, {
       method: 'PUT',
       headers,
       body: JSON.stringify({
@@ -275,7 +301,7 @@ export class RemoteVault {
   }
 
   async #httpGet() {
-    const res = await this.fetch(this.cfg.url, {
+    const res = await this.#request(this.cfg.url, {
       headers: { authorization: `Bearer ${this.cfg.token}` },
     });
     if (res.status === 404) throw new Error('404 not found');
@@ -284,7 +310,7 @@ export class RemoteVault {
   }
 
   async #httpPut(blob) {
-    const res = await this.fetch(this.cfg.url, {
+    const res = await this.#request(this.cfg.url, {
       method: 'PUT',
       headers: {
         authorization: `Bearer ${this.cfg.token}`,

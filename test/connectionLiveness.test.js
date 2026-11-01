@@ -1,13 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  WhatsAppConnection, livenessAction, preservePrimaryPhoneNotifications, SILENCE_MS, CONNECT_STALL_MS,
+  WhatsAppConnection, livenessAction, preservePrimaryPhoneNotifications, parseBaileysVersionSource,
+  fetchBaileysVersionFromGitHub, SILENCE_MS, CONNECT_STALL_MS,
 } from '../src/core/whatsapp.js';
 import { createLogger } from '../src/core/logger.js';
 
 const quiet = createLogger('fatal');
 const cfg = { wa: { sessionDir: '/tmp/nexus-liveness-unused' }, telegram: { enabled: false } };
 const NOW = 1_000_000_000_000;
+
+test('GitHub version source parser accepts public Baileys Defaults and rejects malformed input', () => {
+  assert.deepEqual(parseBaileysVersionSource('const version = [2, 3000, 1234567890];'), [2, 3000, 1234567890]);
+  assert.throws(() => parseBaileysVersionSource('const version = unknown;'), /did not contain/);
+});
+
+test('version check uses the GitHub API rather than raw.githubusercontent.com', async () => {
+  let seen = null;
+  const controller = new AbortController();
+  const version = await fetchBaileysVersionFromGitHub({
+    signal: controller.signal,
+    fetchImpl: async (url, init) => {
+      seen = { url, init };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ content: Buffer.from('const version = [2, 3000, 1234567890];').toString('base64') }),
+      };
+    },
+  });
+  assert.deepEqual(version, [2, 3000, 1234567890]);
+  assert.match(seen.url, /^https:\/\/api\.github\.com\/repos\/WhiskeySockets\/Baileys\/contents\//);
+  assert.ok(seen.init.signal, 'the version check is abortable');
+});
 
 test('the companion explicitly becomes unavailable so the primary phone remains notifiable', async () => {
   const calls = [];

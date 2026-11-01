@@ -1,9 +1,7 @@
 /**
- * Plugin template — copy this file to build a new command.
- *
- * Drop it into src/plugins/, restart, done. Nothing else to register.
- *
- * The full `ctx` contract is documented at the top of core/dispatcher.js.
+ * Fast, low-impact liveness response. A health command must not add two queue
+ * entries (or a simulated typing delay) when the connection is already under
+ * pressure, otherwise it stops being a useful diagnostic.
  */
 
 import { formatUptime } from '../lib/format.js';
@@ -12,7 +10,7 @@ export default {
   name: 'ping',
   aliases: ['p', 'latency'],
   category: 'tools',
-  description: 'Round-trip latency check. Safe for everyone.',
+  description: 'Fast liveness response. Safe for everyone.',
   usage: '.ping',
   ownerOnly: false,
   cooldownMs: 1000,
@@ -21,26 +19,24 @@ export default {
    * @param {object} ctx
    */
   async execute(ctx) {
-    const t0 = Date.now();
-
-    await ctx.reply('🏓 …');
-
-    const ms = Date.now() - t0;
+    const started = Date.now();
     const mode = ctx.config.mode.toUpperCase();
     const plugins = ctx.plugins.commands.size;
     const uptime = formatUptime(process.uptime());
 
+    // One immediate queue entry. This is the bot's processing/queue response
+    // time, not a fabricated WhatsApp network round-trip.
     await ctx.reply(
       [
-        `🏓 *Pong* — ${ms}ms`,
+        `🏓 *Pong* — ${Date.now() - started}ms`,
         ``,
         `• mode: \`${mode}\``,
         `• plugins: \`${plugins}\``,
         `• uptime: \`${uptime}\``,
         ctx.isGroup ? `• chat: \`group\`` : `• chat: \`dm\``,
         ctx.isOwner ? `• you: \`owner\`` : `• you: \`guest\``,
-      ].join('\n')
+      ].join('\n'),
+      { nexusSkipTyping: true }
     );
   },
 };
-
