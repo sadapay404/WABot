@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { clock12, dateTime12, chatKind, chatTag, senderLine } from '../src/lib/display.js';
+import { clock12, dateOnly, dateTime12, chatKind, chatTag, senderLine } from '../src/lib/display.js';
 import { formatViewOnce } from '../src/core/viewOnce.js';
 import { formatEdit } from '../src/core/editWatch.js';
 import { formatDeletion } from '../src/core/antiDelete.js';
@@ -14,7 +14,8 @@ test('clock12 renders 12-hour time in the configured zone', () => {
   assert.equal(clock12(Date.UTC(2026, 9, 10, 19, 0), 'Asia/Karachi'), '12:00 AM');
 });
 
-test('dateTime12 includes the date and a 12-hour clock', () => {
+test('date helpers render separate date and 12-hour time values', () => {
+  assert.equal(dateOnly(AFTERNOON, 'Asia/Karachi'), 'Oct 10, 2026');
   assert.equal(dateTime12(AFTERNOON, 'Asia/Karachi'), 'Oct 10, 2026, 3:05 PM');
 });
 
@@ -69,6 +70,26 @@ test('alerts show sender with number, chat type and 12-hour time', () => {
   });
   assert.match(deletion, /Group: Family/);
   assert.match(deletion, /3:05 PM/);
+});
+
+test('alerts use one fact per emoji line and never expose a fallback group-id fragment', () => {
+  const text = formatViewOnce({
+    profile: { name: 'Me 6 🔥', phoneE164: '+923001234567', notifyName: 'ghallu', countryName: 'Pakistan' },
+    chatJid: '120363000000592125@g.us',
+    chatLabel: 'group 592125…',
+    at: AFTERNOON,
+    kind: 'unknown',
+    status: 'unavailable',
+    mediaBytes: 0,
+  });
+
+  assert.match(text, /📎 \*View-once media\*/);
+  assert.match(text, /👤 Me 6 🔥 \(\+923001234567\)/);
+  assert.match(text, /🏷️ WhatsApp name: ghallu/);
+  assert.match(text, /👥 Group chat/);
+  assert.match(text, /📅 Date: Oct 10, 2026/);
+  assert.match(text, /🕒 Time: 3:05 PM/);
+  assert.doesNotMatch(text, /Pakistan|group 592125|·/);
 });
 
 test('chatTag combines the type and label', () => {

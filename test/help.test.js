@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import helpPlugin from '../src/plugins/help.js';
 
 const commands = [
-  { name: 'ping', usage: '.ping', description: 'Confirm liveness', ownerOnly: false },
+  { name: 'ping', usage: '.ping', description: 'Show estimated response time', ownerOnly: false },
   { name: 'contact', usage: '.contact list', description: 'Manage contact labels', ownerOnly: true },
   { name: 'ai', usage: '.ai <question>', description: 'Ask AI', ownerOnly: false },
 ];

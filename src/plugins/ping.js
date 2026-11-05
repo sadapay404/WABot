@@ -6,37 +6,42 @@
 
 import { formatUptime } from '../lib/format.js';
 
+function estimatedPingMs(timestamp) {
+  const sentAt = Number(timestamp) * 1_000;
+  if (!Number.isFinite(sentAt) || sentAt <= 0) return null;
+  // WhatsApp supplies inbound timestamps at second precision, so this is an
+  // honest estimate—not a fabricated synchronous “0 ms” measurement.
+  return Math.max(1, Date.now() - sentAt);
+}
+
 export default {
   name: 'ping',
   aliases: ['p', 'latency'],
   category: 'tools',
-  description: 'Confirm bot liveness and show concise runtime state',
+  description: 'Estimated response latency and concise runtime state',
   usage: '.ping',
   ownerOnly: false,
   cooldownMs: 1000,
 
-  /**
-   * WhatsApp does not expose a reliable end-to-end round-trip acknowledgement
-   * for this command. Reporting the time needed to construct a JavaScript
-   * string as “latency” created the meaningless 0 ms value, so this is an
-   * honest liveness response rather than a fabricated network measurement.
-   */
   async execute(ctx) {
     const mode = String(ctx.config?.mode || 'unknown').toUpperCase();
     const commandCount = ctx.plugins?.commands?.size ?? 0;
     const uptime = formatUptime(process.uptime());
+    const estimate = estimatedPingMs(ctx.msg?.timestamp);
+    const ping = estimate === null ? 'estimating…' : `~${estimate.toLocaleString()} ms`;
 
     await ctx.reply(
       [
-        '🏓 *Nexus is online*',
+        `🎾 *Pong!* — ${ping}`,
         '',
-        `• mode: \`${mode}\``,
-        `• process uptime: \`${uptime}\``,
-        `• commands loaded: \`${commandCount}\``,
-        `• chat: \`${ctx.isGroup ? 'group' : 'direct'}\``,
-        `• access: \`${ctx.isOwner ? 'owner' : 'standard'}\``,
+        `🟢 Status: \`online\``,
+        `⚙️ Mode: \`${mode}\``,
+        `⏱️ Uptime: \`${uptime}\``,
+        `🧩 Commands: \`${commandCount}\``,
+        `💬 Chat: \`${ctx.isGroup ? 'group' : 'direct'}\``,
+        `🔐 Access: \`${ctx.isOwner ? 'owner' : 'standard'}\``,
         '',
-        '_This confirms the bot received your command. WhatsApp does not provide a trustworthy round-trip ms value here._',
+        '_Estimated from WhatsApp’s inbound timestamp._',
       ].join('\n'),
       { nexusSkipTyping: true }
     );

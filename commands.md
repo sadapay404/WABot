@@ -40,7 +40,7 @@ This is the compact reference for the **56-command** Nexus-WA build. Commands us
 | `.md` | `.metadata`, `.xray` | Anyone | Reveal embedded media metadata; add `full` for a text attachment |
 | `.note` | `.n` | Owner | Save/list/delete notes |
 | `.panic` | `.stop`, `.halt` | Owner | Halt or resume all outbound messages |
-| `.ping` | `.p`, `.latency` | Anyone | Confirm liveness and show concise runtime state |
+| `.ping` | `.p`, `.latency` | Anyone | Show estimated response time and concise runtime state |
 | `.presence` | `.lastseen`, `.online` | Owner | Review recorded presence |
 | `.qr` | `.decodeqr` | Anyone | Decode QR from a replied image/sticker |
 | `.receive` | `.recieve` | Owner | Inspect cached inbound messages in the current owner chat |

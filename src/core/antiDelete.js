@@ -346,15 +346,15 @@ export function formatDeletion(d) {
   lines.push('');
 
   if (!d.known || (!d.record?.text && !d.record?.has_media)) {
-    lines.push('_No recoverable content was retained for this message._');
+    lines.push('📭 _No recoverable content was retained for this message._');
   } else if (d.record?.text) {
-    lines.push('*Deleted content*');
+    lines.push('📝 *Deleted content*');
     // Quote each line so it reads as the deleted message, not our own words.
     for (const line of String(d.record.text).split('\n')) lines.push(`> ${line}`);
   } else if (d.mediaAvailable) {
-    lines.push(`_A recovered ${describeMedia(d.record)} is attached in reply to this alert._`);
+    lines.push(`📎 _A recovered ${describeMedia(d.record)} is attached in reply to this alert._`);
   } else {
-    lines.push(`_The deleted ${describeMedia(d.record)} is no longer available to recover._`);
+    lines.push(`⚠️ _The deleted ${describeMedia(d.record)} is no longer available to recover._`);
   }
 
   return lines.join('\n');

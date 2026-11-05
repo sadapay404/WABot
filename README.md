@@ -93,7 +93,7 @@ unless the sender is in `OWNER_JIDS`.
 
 | Command | Access | What |
 |---|---|---|
-| `.ping` | anyone | confirm liveness and show concise runtime state |
+| `.ping` | anyone | estimated response time and concise runtime state |
 | `.help [category]` | anyone | sorted command menu; owner-only entries stay hidden from guests |
 | `.health` | owner | mode, uptime, sessions, queue, watcher stats |
 | `.status` | owner | statuses received while the bot was online |

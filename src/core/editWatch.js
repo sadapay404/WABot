@@ -194,14 +194,14 @@ export function formatEdit(e) {
   lines.push('');
 
   if (e.before === null) {
-    lines.push('*Updated content*');
+    lines.push('📝 *Updated content*');
     for (const line of String(e.after || '(empty)').split('\n')) lines.push(`> ${line}`);
   } else if (e.before === e.after) {
-    lines.push('_The message changed, but its text is unchanged._');
+    lines.push('📝 _The message changed, but its text is unchanged._');
   } else {
-    lines.push('*Before*');
+    lines.push('📝 *Before*');
     for (const line of String(e.before).split('\n')) lines.push(`> ${line}`);
-    lines.push('', '*After*');
+    lines.push('', '📝 *After*');
     for (const line of String(e.after || '(empty)').split('\n')) lines.push(`> ${line}`);
   }
 

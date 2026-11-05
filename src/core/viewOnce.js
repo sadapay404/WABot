@@ -379,7 +379,9 @@ export class ViewOnceCapture {
  * a socket, a database or a WhatsApp account.
  */
 export function formatViewOnce(r) {
-  const lines = [`${mediaIcon(r.kind)} *View-once ${describeMedia(r)}*`, ''];
+  const label = describeMedia(r);
+  const kindLabel = label === 'unknown' ? 'media' : label;
+  const lines = [`${mediaIcon(r.kind)} *View-once ${kindLabel}*`, ''];
 
   lines.push(...alertContext(r.profile, {
     chatJid: r.chatJid,
@@ -391,18 +393,18 @@ export function formatViewOnce(r) {
 
   if (r.status === 'captured' && r.mediaBytes) {
     if (r.caption) {
-      lines.push('*Caption*');
+      lines.push('📝 *Caption*');
       for (const line of String(r.caption).split('\n')) lines.push(`> ${line}`);
     }
-    lines.push('_The captured media is attached in reply to this alert._');
+    lines.push('📎 _The captured media is attached in reply to this alert._');
   } else if (r.status === 'expired' || r.status === 'unavailable') {
     lines.push('⚠️ _Media was unavailable on this linked session._');
     if (r.caption) {
-      lines.push('', '*Caption*');
+      lines.push('', '📝 *Caption*');
       for (const line of String(r.caption).split('\n')) lines.push(`> ${line}`);
     }
   } else {
-    lines.push('_No media bytes were available to save._');
+    lines.push('📭 _No media bytes were available to save._');
   }
 
   return lines.join('\n');

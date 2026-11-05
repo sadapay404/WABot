@@ -23,6 +23,11 @@ export function clock12(ms, tz = DEFAULT_TZ) {
   return format(ms, tz, { hour: 'numeric', minute: '2-digit' });
 }
 
+/** "Nov 5, 2026" */
+export function dateOnly(ms, tz = DEFAULT_TZ) {
+  return format(ms, tz, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 /** "Oct 10, 2026, 3:05 PM" */
 export function dateTime12(ms, tz = DEFAULT_TZ) {
   return format(ms, tz, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -64,26 +69,42 @@ export function senderLine(profile = {}) {
   return 'unknown sender (number not known)';
 }
 
+function groupLine(label) {
+  const name = String(label || '').trim();
+  // A trailing group-JID fragment is an implementation fallback, not a useful
+  // name. Never make an alert look technical when WhatsApp did not provide a
+  // real group subject.
+  if (!name || /^group\s+\d+…$/i.test(name)) return '👥 Group chat';
+  return `👥 Group: ${name}`;
+}
+
+function conversationLine(chatJid, chatLabel) {
+  const kind = chatKind(chatJid);
+  if (kind === 'Status') return '📣 Status';
+  if (kind === 'Group') return groupLine(chatLabel);
+  if (kind === 'Channel') return `📢 Channel: ${chatLabel || 'Unknown channel'}`;
+  return `💬 Chat: ${chatLabel || 'Direct chat'}`;
+}
+
 /**
- * Shared identity/context block for capture alerts. Keeping this in one place
- * ensures deleted-message, edit, and view-once alerts present the same facts
- * in the same order instead of three slightly different mini-reports.
+ * Shared identity/context block for capture alerts. Facts are deliberately
+ * one-per-line, in the same order: person, WhatsApp name, conversation, date,
+ * then time. Country and raw JIDs are not useful in a fast WhatsApp alert.
  */
 export function alertContext(profile = {}, { chatJid, chatLabel, at, extras = [] } = {}) {
   const p = profile || {};
   const lines = [`👤 ${senderLine(p)}`];
-  // A saved/manual contact label is useful to the owner, while the remote
-  // profile name explains how that person currently presents themselves.
-  if (p.notifyName && p.notifyName !== p.name) lines.push(`   WhatsApp name: ${p.notifyName}`);
 
-  const kind = chatKind(chatJid);
-  const chat = kind === 'Status' ? 'Status' : chatTag(chatJid, chatLabel);
-  const meta = [
-    p.countryName,
-    chat,
-    at ? dateTime12(at) : null,
-    ...extras,
-  ].filter(Boolean);
-  if (meta.length) lines.push(`ℹ️ ${meta.join(' · ')}`);
+  // An owner-entered/local name remains the primary identity. A differing
+  // remote push name is labelled separately instead of crowding the same line.
+  if (p.notifyName && p.notifyName !== p.name) lines.push('', `🏷️ WhatsApp name: ${p.notifyName}`);
+
+  lines.push('', conversationLine(chatJid, chatLabel));
+
+  if (at) {
+    lines.push('', `📅 Date: ${dateOnly(at)}`, '', `🕒 Time: ${clock12(at)}`);
+  }
+
+  for (const extra of extras.filter(Boolean)) lines.push('', `📦 ${extra}`);
   return lines;
 }

@@ -374,7 +374,7 @@ test('end-to-end: the real entry point runs .ping under dry-run', () => {
   assert.equal(res.status, 0, `entry point exited ${res.status}\n${res.stderr}`);
   assert.match(out, /Nexus-WA/);
   assert.match(out, /ban risk: NONE/, 'banner must state there is no ban risk');
-  assert.match(out, /Nexus is online/, '.ping must reply through the fake socket');
+  assert.match(out, /🎾 \*Pong!\*/, '.ping must reply through the fake socket');
   assert.match(out, /0 real WhatsApp calls/, 'must confirm no network transport was used');
   assert.match(out, /"kind": "text"/, '/out must show the recorded outbox');
   assert.match(out, /"handled": 1/, 'dispatcher must report exactly one handled command');
@@ -405,7 +405,7 @@ test('end-to-end: a public command still answers a stranger (no over-blocking)',
   const out = stripAnsi(res.stdout);
   assert.equal(res.status, 0, res.stderr);
   // .ping is ownerOnly:false, so the gate must NOT swallow it.
-  assert.match(out, /Nexus is online/);
+  assert.match(out, /🎾 \*Pong!\*/);
   assert.match(out, /you: `guest`/, 'a stranger must not be misidentified as the owner');
 });
 
@@ -471,7 +471,7 @@ test('end-to-end: /as targets the given JID and still runs the command', () => {
   });
   const out = stripAnsi(res.stdout);
   assert.equal(res.status, 0, res.stderr);
-  assert.match(out, /Nexus is online/, 'the injected command must actually execute');
+  assert.match(out, /🎾 \*Pong!\*/, 'the injected command must actually execute');
   assert.match(out, /you: `guest`/, 'an injected stranger must not be treated as the owner');
   assert.doesNotMatch(out, /you: `owner`/);
 });

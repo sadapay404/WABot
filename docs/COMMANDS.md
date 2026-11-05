@@ -53,7 +53,7 @@ category in WhatsApp, use `.help` followed by `admin`, `ai`, `automation`, `medi
 | `.jobs` | `.schedules` | Owner | List, edit, or cancel schedules |
 | `.note` | `.n` | Owner | Save/list/delete notes |
 | `.panic` | `.stop`, `.halt` | Owner | Halt or resume all outbound messages |
-| `.ping` | `.p`, `.latency` | Anyone | Confirm liveness and show concise runtime state |
+| `.ping` | `.p`, `.latency` | Anyone | Show estimated response time and concise runtime state |
 | `.presence` | `.lastseen`, `.online` | Owner | Review recorded presence |
 | `.receive` | `.recieve` | Owner | Privately inspect cached inbound messages |
 | `.remind` | `.reminder` | Owner | Schedule a recipient-specific reminder |
@@ -543,9 +543,9 @@ rate limits; use this only when you intend to stop/resume all bot sends.
 .ping
 ```
 
-Shows that the bot received the command plus concise runtime state. WhatsApp does
-not expose a trustworthy round-trip latency for this command, so it intentionally
-does not report a fabricated millisecond value.
+Shows an estimated response time plus concise runtime state. The estimate uses
+WhatsApp’s inbound timestamp; it is intentionally labelled as an estimate because
+WhatsApp does not expose a round-trip acknowledgement to the bot.
 
 ### `.presence` — recorded online/last-seen transitions
 **Aliases:** `.lastseen`, `.online` · **Access:** Owner · **Category:** Privacy
@@ -971,9 +971,9 @@ rate limits; use this only when you intend to stop/resume all bot sends.
 .ping
 ```
 
-Shows that the bot received the command plus concise runtime state. WhatsApp does
-not expose a trustworthy round-trip latency for this command, so it intentionally
-does not report a fabricated millisecond value.
+Shows an estimated response time plus concise runtime state. The estimate uses
+WhatsApp’s inbound timestamp; it is intentionally labelled as an estimate because
+WhatsApp does not expose a round-trip acknowledgement to the bot.
 
 ### `.presence` — recorded online/last-seen transitions
 **Aliases:** `.lastseen`, `.online` · **Access:** Owner · **Category:** Privacy
