@@ -49,8 +49,28 @@ function normalizeMode(raw) {
   return m;
 }
 
+// Gemini is deliberately absent: it has proved persistently unavailable for
+// this deployment. Groq is the fast primary and OpenRouter's free router is
+// its only automatic fallback; no paid provider is selected automatically.
+const AI_PROVIDER_NAMES = ['groq', 'openrouter'];
+/** Order used when AI_PROVIDERS is not set. */
+const AI_DEFAULT_ORDER = ['groq', 'openrouter'];
+
+/**
+ * Return the fixed no-cost provider route. AI_PROVIDERS is accepted only for
+ * backwards-compatible environments; it cannot alter the runtime route.
+ */
+export function parseAiProviders(_list, _legacy = '') {
+  // AI_PROVIDERS is intentionally ignored for routing. This preserves safe
+  // starts with old environments while guaranteeing that Gemini is never
+  // called and Groq always gets the first attempt.
+  return AI_DEFAULT_ORDER.map((provider, priority) => ({ provider, priority: priority + 1 }));
+}
+
 export function buildConfig(overrides = {}) {
   const mode = normalizeMode(overrides.mode ?? process.env.NEXUS_MODE);
+  const requestedAiProvider = String(process.env.AI_PROVIDER || '').toLowerCase();
+  const activeAiProvider = AI_PROVIDER_NAMES.includes(requestedAiProvider) ? requestedAiProvider : 'groq';
 
   const cfg = {
     root: ROOT,
@@ -154,8 +174,13 @@ export function buildConfig(overrides = {}) {
         Math.min(3_600_000, int(process.env.OUTBOUND_VOLUME_WINDOW_MS, 60_000))
       ),
       queueConcurrency: Math.max(1, int(process.env.QUEUE_CONCURRENCY, 1)),
-      typingIndicator: bool(process.env.TYPING_INDICATOR, true),
+      // Replies are immediate by default. Individual non-command sends can
+      // still opt in through the existing TYPING_INDICATOR setting.
+      typingIndicator: bool(process.env.TYPING_INDICATOR, false),
       observeAllowReplyToOwner: bool(process.env.OBSERVE_ALLOW_REPLY_TO_OWNER, true),
+      // Live mode normally requires a Telegram control channel. A self-managed
+      // WhatsApp owner-control chat can explicitly accept that responsibility.
+      allowLiveWithoutTelegram: bool(process.env.ALLOW_LIVE_WITHOUT_TELEGRAM, false),
     },
 
     telegram: {
@@ -192,15 +217,30 @@ export function buildConfig(overrides = {}) {
     },
 
     ai: {
-      provider: (process.env.AI_PROVIDER || 'groq').toLowerCase(),
-      model: process.env.AI_MODEL || '',
+      provider: activeAiProvider,
+      providers: parseAiProviders(process.env.AI_PROVIDERS, requestedAiProvider),
+      // A stale AI_PROVIDER=gemini must not make Groq send a Gemini model ID.
+      model: !requestedAiProvider || requestedAiProvider === activeAiProvider ? process.env.AI_MODEL || '' : '',
+      senderCooldownSec: int(process.env.AI_SENDER_COOLDOWN_SEC, 15),
+      dailyLimit: int(process.env.AI_DAILY_LIMIT, 200),
+      // Public-AI behavior/caps live in core/aiAccess.js. There are no
+      // PUBLIC_AI_* or SELF_AI_COMMANDS panel variables in this configuration.
       maxHistory: int(process.env.AI_MAX_HISTORY, 12),
       askMaxChars: Math.max(4_000, Math.min(int(process.env.AI_ASK_MAX_CHARS, 60_000), 100_000)),
       keys: {
         groq: process.env.GROQ_API_KEY || '',
         gemini: process.env.GEMINI_API_KEY || '',
+        openrouter: process.env.OPENROUTER_API_KEY || '',
         openai: process.env.OPENAI_API_KEY || '',
       },
+    },
+
+    // Image output uses Cloudflare Workers AI rather than the text/vision
+    // provider chain above. Both values are required; no paid fallback or
+    // surprise provider is used when they are absent.
+    imageGen: {
+      accountId: String(process.env.CLOUDFLARE_ACCOUNT_ID || '').trim(),
+      apiToken: process.env.CLOUDFLARE_API_TOKEN || '',
     },
   };
 
@@ -233,8 +273,13 @@ export function validateConfig(cfg) {
   if (cfg.mode !== MODES.DRY_RUN && !cfg.telegram.enabled) {
     warnings.push('Telegram panel not configured — you will have no remote visibility.');
   }
-  if (cfg.mode === MODES.LIVE && !cfg.telegram.enabled) {
-    problems.push('Refusing NEXUS_MODE=live without a Telegram panel configured.');
+  if (cfg.mode === MODES.LIVE && !cfg.telegram.enabled && !cfg.safety.allowLiveWithoutTelegram) {
+    problems.push(
+      'Refusing NEXUS_MODE=live without a Telegram panel. Set ALLOW_LIVE_WITHOUT_TELEGRAM=true only when the configured WhatsApp owner chat is your deliberate control channel.'
+    );
+  }
+  if (cfg.mode === MODES.LIVE && !cfg.telegram.enabled && cfg.safety.allowLiveWithoutTelegram) {
+    warnings.push('Live mode without Telegram was explicitly enabled; use the configured WhatsApp owner chat and .panic as the control path.');
   }
   if (!cfg.isDryRun && cfg.dashboard.enabled && !cfg.dashboard.token) {
     problems.push(

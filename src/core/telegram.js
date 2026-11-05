@@ -28,6 +28,7 @@ export class TelegramPanel {
     this.bot = null;
     this.pendingQr = null;
     this.started = false;
+    this.pollingTask = null;
   }
 
   async start() {
@@ -72,9 +73,18 @@ export class TelegramPanel {
       this.app.shutdown?.('telegram /kill');
     });
 
-    await bot.startPolling({ dropPendingUpdates: true });
+    // Telegraf's startPolling() promise is the polling lifetime, not a
+    // readiness signal. Starting it without awaiting lets the main lifecycle
+    // continue to scheduler/vault/shutdown setup. drop_pending_updates belongs
+    // to deleteWebhook, not startPolling's allowedUpdates array.
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
     this.started = true;
-    this.logger.info(`panel online for owner ${ownerId}`);
+    this.pollingTask = Promise.resolve(bot.startPolling([])).catch((error) => {
+      this.started = false;
+      this.logger.error(`panel polling stopped: ${error.message}`);
+      return null;
+    });
+    this.logger.info('panel polling started');
     return bot;
   }
 
@@ -129,7 +139,7 @@ export class TelegramPanel {
       '/deletes [n] — recently deleted messages',
       '/plugins — loaded command plugins',
       '/qr — resend the current pairing QR',
-      '/mode <dry-run|observe|live> — switch mode',
+      '/mode <dry-run|observe|live> — show the safe restart-required mode path',
       '/antidelete <on|off|media on|media off>',
       '/kill — graceful shutdown',
     ].join('\n');
@@ -226,18 +236,10 @@ export class TelegramPanel {
   async #mode(ctx) {
     const target = String(ctx.message.text).split(/\s+/)[1];
     const allowed = ['dry-run', 'observe', 'live'];
-    if (!allowed.includes(target)) {
-      return ctx.reply(`usage: /mode <${allowed.join('|')}>`);
-    }
-    if (target === 'live' && !this.config.safety.ownerJids.length) {
-      return ctx.reply('Refusing: OWNER_JIDS is empty, so live mode would be unguarded.');
-    }
-    this.config.mode = target;
-    this.config.isDryRun = target === 'dry-run';
-    this.config.isObserve = target === 'observe';
-    this.config.isLive = target === 'live';
-    this.config.risk = { 'dry-run': 0, observe: 1, live: 2 }[target];
-    await ctx.reply(`🔀 mode is now \`${target}\`\n(restart to change the transport)`);
+    if (!allowed.includes(target)) return ctx.reply(`usage: /mode <${allowed.join('|')}>`);
+    // A mode determines transport, storage provenance, and dashboard auth at
+    // boot. Mutating it in place previously made a real DB appear synthetic.
+    return ctx.reply(`Mode remains \`${this.config.mode}\`. Changing to \`${target}\` requires a controlled restart with MODE set before boot.`);
   }
 
   async stop() {
@@ -247,6 +249,7 @@ export class TelegramPanel {
       /* already stopped */
     }
     this.started = false;
+    this.pollingTask = null;
   }
 }
 

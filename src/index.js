@@ -22,12 +22,16 @@ import { getDb } from './database/index.js';
 import { PluginLoader } from './core/pluginLoader.js';
 import { Dispatcher } from './core/dispatcher.js';
 import { normalize } from './core/message.js';
+import { prioritizeInboundBatch } from './core/inboundBatch.js';
 import { MockWhatsAppSocket, MOCK_OWNER_JID } from './core/mockSocket.js';
 import { SessionRegistry } from './core/sessionRegistry.js';
 import { ContactStore } from './core/contactStore.js';
 import { MessageCache } from './core/messageCache.js';
 import { MessageInbox } from './core/messageInbox.js';
 import { AskContext } from './core/askContext.js';
+import { PendingPrompts } from './core/pendingPrompts.js';
+import { ChatContext } from './core/chatContext.js';
+import { StatusFeed } from './core/statusFeed.js';
 import { EnvEditor } from './core/envEditor.js';
 import { MediaStore } from './core/mediaStore.js';
 import { AntiDelete } from './core/antiDelete.js';
@@ -46,11 +50,13 @@ import { SessionBackup } from './core/backup.js';
 import { RemoteVault } from './core/remoteVault.js';
 import { NoteStore } from './core/notes.js';
 import { AiClient } from './core/ai.js';
+import { ImageGenerationClient } from './core/imageGeneration.js';
 import { OutboundQueue } from './core/outboundQueue.js';
 import { LogBuffer } from './core/logBuffer.js';
-import { TermuxControl } from './core/termuxControl.js';
+import { HostControl } from './core/hostControl.js';
 import { Dashboard } from './web/dashboard.js';
 import { normalizeJid } from './core/jid.js';
+import { createLiveSocket } from './core/socketForwarder.js';
 import { formatUptime } from './lib/format.js';
 
 // ── CLI ──────────────────────────────────────────────────────────────
@@ -90,30 +96,50 @@ function banner() {
 function wireEvents(socket, app) {
   // The mock is a plain EventEmitter; Baileys emits through `socket.ev`.
   const on = socket.ev ? (e, f) => socket.ev.on(e, f) : (e, f) => socket.on(e, f);
-  const { dispatcher, cache, antiDelete, viewOnce, editWatch, registry, contacts, presenceLog, profileWatch, groupWatch, messageInbox, webhooks, logger: log } = app;
+  const { dispatcher, cache, chatContext, statusFeed, antiDelete, viewOnce, editWatch, registry, contacts, presenceLog, profileWatch, groupWatch, messageInbox, webhooks, logger: log } = app;
   const selfJid = () => (socket.user?.id ? normalizeJid(socket.user.id) : '');
 
   on('messages.upsert', async ({ messages = [], type = null } = {}) => {
-    for (const raw of messages) {
+    // Baileys may flush several buffered messages together after a transport
+    // stall. Handle `.ping` first so a slow earlier item cannot make the bot
+    // look dead; all ordinary messages keep their received order.
+    for (const raw of prioritizeInboundBatch(messages, app.config.prefix)) {
       try {
         // Group membership stubs carry no `message` — handle them first.
         groupWatch?.onMessage(raw);
 
         const msg = normalize(raw);
+        // Capture WhatsApp's explicit PN↔LID alternates before any watcher or
+        // cache path can format this sender. Do not combine group and sender
+        // IDs: only each protocol-supplied primary/alternate pair is safe.
+        if (msg.jidAlt) contacts.linkAliases(msg.jid, msg.jidAlt);
+        if (msg.senderAlt) contacts.linkAliases(msg.sender, msg.senderAlt);
+        // A message's push name is a useful fallback when history/contact sync
+        // has not delivered that contact yet. It never overrides an owner-set
+        // or locally saved name, but lets an immediate alert name its sender.
+        if (!msg.isBot && msg.sender && msg.pushName) contacts.upsert({ id: msg.sender, notify: msg.pushName });
         // Needed to ignore replayed self-chat commands from Baileys' history
         // (`append`) while still accepting a fresh command typed on the phone (`notify`).
         msg.upsertType = type || 'unknown';
         if (selfJid()) registry.countIn(selfJid());
 
-        // A pending owner API key is consumed before any cache, watcher, or
-        // command handler can persist the plaintext. The confirmation is sent
-        // directly and the secret message never enters ordinary dispatch.
-        if (await app.envEditor?.consumePending({
-          msg,
-          socket,
-          isOwner: dispatcher.isOwner(msg.sender),
-        })) continue;
+        // Classify/consume sensitive ingress before *any* content-bearing
+        // cache, watcher, webhook, provider, or dispatcher path. This includes
+        // a pending secret reply and inline backup/configuration commands.
+        const isOwner = dispatcher.isOwner(msg.sender, msg.senderAlt);
+        if (await app.envEditor?.consumePending({ msg, socket, isOwner })) continue;
         if (app.envEditor?.shouldSkipMessage(msg)) msg.sensitive = true;
+
+        // Only non-sensitive content may enter the status or AI transcript.
+        // Identity/counter handling above has no message body and is retained.
+        if (!msg.sensitive) {
+          try {
+            statusFeed?.record(raw, msg);
+            chatContext?.record(msg);
+          } catch (err) {
+            log?.warn?.({ err: err.message }, 'context capture failed');
+          }
+        }
 
         // View-once FIRST: the media blob is invalidated once the message is
         // seen, so this must run before anything else can touch it.
@@ -160,7 +186,7 @@ function wireEvents(socket, app) {
     }
   });
 
-  on('contacts.update', (list = []) => {
+  const captureContacts = (list = [], event = 'contacts.update') => {
     try {
       contacts.upsertMany(list);
       for (const c of list) {
@@ -171,12 +197,29 @@ function wireEvents(socket, app) {
         });
       }
     } catch (err) {
-      log.error(`contacts.update handler: ${err.message}`);
+      log.error(`${event} handler: ${err.message}`);
+    }
+  };
+  on('contacts.update', (list = []) => captureContacts(list, 'contacts.update'));
+  // Baileys emits locally synced LID contacts as an upsert rather than update.
+  on('contacts.upsert', (list = []) => captureContacts(list, 'contacts.upsert'));
+
+  // This is Baileys' authoritative identity-map event (it also arrives with
+  // history sync). Persist it independently of contact labels so a later
+  // delete/edit that only names the LID still has its supplied phone identity.
+  on('lid-mapping.update', ({ lid, pn } = {}) => {
+    try {
+      if (lid && pn) contacts.linkAliases(lid, pn);
+    } catch (err) {
+      log.error(`lid-mapping.update handler: ${err.message}`);
     }
   });
 
   on('messaging-history.set', (payload = {}) => {
     try {
+      for (const mapping of payload.lidPnMappings || []) {
+        if (mapping?.lid && mapping?.pn) contacts.linkAliases(mapping.lid, mapping.pn);
+      }
       if (payload.contacts?.length) {
         contacts.upsertMany(payload.contacts);
         log.info(`history sync: cached ${payload.contacts.length} contacts`);
@@ -242,8 +285,11 @@ async function main() {
     const sessionFiles = fs.existsSync(config.wa.sessionDir)
       ? fs.readdirSync(config.wa.sessionDir).filter((f) => f !== '.gitkeep')
       : [];
-    if (sessionFiles.length === 0) {
-      const restored = await vault.restoreIfEmpty(false);
+    const localDatabaseExists = (() => {
+      try { return fs.statSync(config.db.path).isFile() && fs.statSync(config.db.path).size > 0; } catch { return false; }
+    })();
+    if (sessionFiles.length === 0 && !localDatabaseExists) {
+      const restored = await vault.restoreIfEmpty(false, false);
       if (restored) {
         logger.warn(
           'restored session and database from the remote vault — ' +
@@ -251,12 +297,14 @@ async function main() {
         );
       }
     } else {
-      logger.info(`local session present (${sessionFiles.length} file(s)) — not restoring from the vault`);
+      logger.info(`local state present (session files=${sessionFiles.length}, database=${localDatabaseExists ? 'yes' : 'no'}) — not restoring from the vault`);
     }
   }
 
   // Storage. Opened only after the vault has had its chance to replace the file.
   const db = await getDb(config, logger);
+  // Runtime backups checkpoint through this open handle before reading bytes.
+  backup.db = db;
 
   // Stores.
   const registry = new SessionRegistry(db, logger);
@@ -269,6 +317,7 @@ async function main() {
   const triggers = new Triggers({ db, logger });
   const presenceLog = new PresenceLog({ db, logger });
   const ai = new AiClient({ config, logger });
+  const imageGenerator = new ImageGenerationClient({ config, logger });
 
   // Plugins.
   const plugins = new PluginLoader({ dir: path.join(config.root, 'src', 'plugins'), logger });
@@ -306,13 +355,21 @@ async function main() {
     };
     connection.on('open', (payload) => dispatchConnectionEvent('open', payload));
     connection.on('close', (payload) => dispatchConnectionEvent('close', payload));
-    socket = await connection.connect();
+    await connection.connect();
+    // Baileys replaces its socket on every reconnect. Services hold this
+    // forwarder, not the first socket, so sends always go to the live one.
+    socket = createLiveSocket(connection);
   }
 
-  // Structural rate limiting, applied to both transports so dry-run pacing
-  // matches production. attach() wraps the socket in place and returns it.
-  const queue = new OutboundQueue(socket, config, logger);
-  queue.attach();
+  // The kill switch (halt/resume) lives on this queue. The real connection
+  // owns one queue and re-attaches it to every new socket.
+  let queue;
+  if (config.isDryRun) {
+    queue = new OutboundQueue(socket, config, logger);
+    queue.attach();
+  } else {
+    queue = connection.queue;
+  }
 
   // Dispatcher.
   const dispatcher = new Dispatcher({
@@ -325,8 +382,11 @@ async function main() {
   });
 
   const selfJid = normalizeJid(socket.user?.id || '');
-  const termuxControl = new TermuxControl({ root: config.root, logger });
+  const hostControl = new HostControl({ root: config.root, logger });
   const askContext = new AskContext({ db });
+  const chatContext = new ChatContext({ db });
+  const statusFeed = new StatusFeed({ db });
+  const prompts = new PendingPrompts();
   const messageInbox = new MessageInbox({
     db,
     cache,
@@ -374,7 +434,7 @@ async function main() {
     config, logger, db, startedAt,
     registry, contacts, cache, mediaStore, messageInbox, notes, audit, webhooks, triggers,
     presenceLog, profileWatch, groupWatch, editWatch, antiDelete, viewOnce,
-    scheduler, scheduleWizard, reconnectCatchup, ai, askContext, envEditor, backup, vault, termuxControl, plugins, dispatcher, queue, logs, connection,
+    scheduler, scheduleWizard, reconnectCatchup, ai, imageGenerator, askContext, chatContext, statusFeed, prompts, envEditor, backup, vault, hostControl, plugins, dispatcher, queue, logs, connection,
     selfJid,
     // Kill-switch: the only thing that can stop outbound instantly.
     safety: {
@@ -388,6 +448,9 @@ async function main() {
     shutdown: (why) => shutdown(why),
   };
   dispatcher.bot = app;
+  // Signals can arrive while an optional dashboard/panel is starting. Install
+  // lifecycle handling before any long-lived optional service awaits.
+  installShutdownHandlers(app, null);
   // Install before-send echo tracking before jobs or watcher alerts can target
   // the account's own “You” chat.
   dispatcher.trackSocket(socket);
@@ -414,7 +477,7 @@ async function main() {
       await dash.listen(config.dashboard.host);
       app.dashboard = dash;
       app.dashboardUrl = dash.url();
-      logger.info(`dashboard → ${dash.url()}`);
+      logger.info('dashboard listening (access URL is intentionally not logged)');
     } catch (err) {
       logger.error(
         `dashboard unavailable: ${err.message} — continuing without it ` +
@@ -439,17 +502,28 @@ async function main() {
     const { TelegramPanel } = await import('./core/telegram.js');
     telegram = new TelegramPanel({ config, logger, app });
     app.telegram = telegram;
-    await telegram.start();
-    if (connection) {
-      connection
-        .on('qr', (qr) => telegram.sendQr(qr))
-        .on('pairing-code', (code) => telegram.sendPairingCode(code))
-        .on('relogin', () =>
-          telegram.sendAlert('WhatsApp session invalidated', 'Restart the bot and scan a fresh QR.')
-        )
-        .on('close', ({ reason, action }) =>
-          telegram.sendAlert('WhatsApp disconnected', `code ${reason ?? 'none'} → ${action}`)
-        );
+    try {
+      await telegram.start();
+      if (connection) {
+        connection
+          .on('qr', (qr) => telegram.sendQr(qr))
+          .on('pairing-code', (code) => telegram.sendPairingCode(code))
+          .on('relogin', () =>
+            telegram.sendAlert('WhatsApp session invalidated', 'Restart the bot and scan a fresh QR.')
+          )
+          .on('close', ({ reason, action, source }) => {
+            // Brief transport flaps are aggregated by ReconnectCatchup. Keep
+            // Telegram for terminal/operator-actionable conditions only.
+            if (action === 'replaced') {
+              return telegram.sendAlert('WhatsApp requires owner action', `code ${reason ?? 'none'} → ${action} (${source || 'transport-close'})`);
+            }
+            return undefined;
+          });
+      }
+    } catch (error) {
+      logger.error(`Telegram panel unavailable; continuing without it: ${error.message}`);
+      telegram = null;
+      app.telegram = null;
     }
   }
 
@@ -462,7 +536,7 @@ async function main() {
       `${scheduler.pending().length} pending job(s) · up ${formatUptime(process.uptime())}\n`
   );
 
-  installShutdownHandlers(app, telegram);
+  if (appRef) appRef.telegram = telegram;
 
   if (config.isDryRun && !has('--serve')) {
     await runPreviewConsole(socket, dispatcher, plugins, app);
@@ -480,22 +554,27 @@ async function shutdown(why = 'signal') {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info(`shutting down (${why})…`);
-  try {
-    appRef?.scheduler?.stop();
-    // One final push, so a restart does not roll the session back by half an hour.
-    await appRef?.vault?.push?.();
-    appRef?.vault?.stop?.();
-    await appRef?.telegram?.stop?.();
-    await appRef?.dashboard?.stop?.();
-    await appRef?.connection?.stop?.();
-  } catch (err) {
-    logger.warn(`shutdown error: ${err.message}`);
+  const app = appRef;
+  app?.scheduler?.stop?.();
+  app?.reconnectCatchup?.stop?.();
+  app?.vault?.stop?.();
+  const tasks = [
+    // Best-effort final push; RemoteVault owns its bounded request deadline.
+    Promise.resolve(app?.vault?.push?.()),
+    Promise.resolve(app?.telegram?.stop?.()),
+    Promise.resolve(app?.dashboard?.stop?.()),
+    Promise.resolve(app?.connection?.stop?.()),
+  ];
+  const results = await Promise.allSettled(tasks);
+  for (const result of results) {
+    if (result.status === 'rejected') logger.warn(`shutdown cleanup error: ${result.reason?.message || result.reason}`);
   }
   process.exit(0);
 }
 
 function installShutdownHandlers(app, telegram) {
-  appRef = { ...app, telegram };
+  appRef = app;
+  appRef.telegram = telegram;
   for (const sig of ['SIGINT', 'SIGTERM']) {
     process.on(sig, () => shutdown(sig));
   }
@@ -629,6 +708,7 @@ function allStats(app, dispatcher) {
     media: app.mediaStore?.stats(),
     notes: app.notes?.summary(),
     ai: { provider: app.ai?.provider, configured: app.ai?.configured(), ...app.ai?.stats },
+    imageGeneration: { configured: app.imageGenerator?.configured(), ...app.imageGenerator?.stats },
   };
 }
 

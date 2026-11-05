@@ -17,7 +17,8 @@
  * `extractRevoke()` handles all three and is unit-tested on its own.
  */
 
-import { normalizeJid, isGroupJid, describeChat } from './jid.js';
+import { normalizeJid, isGroupJid, isStatusBroadcast, describeChat } from './jid.js';
+import { alertContext } from '../lib/display.js';
 import { captureAlertJid } from './alertRouting.js';
 import { getSetting, setSetting } from '../database/index.js';
 import { downloadWhatsAppMedia } from './mediaDownloader.js';
@@ -27,6 +28,19 @@ const PROTOCOL_REVOKE = 0;
 /** WAMessageStubType — verified against baileys 7.0.0-rc14. */
 const STUB_REVOKE = 1;
 const STUB_ADMIN_REVOKE = 132;
+
+function firstAddress(...values) {
+  return values.find((value) => typeof value === 'string' && value.trim()) || null;
+}
+
+/** Protocol revisions call the parallel phone/LID field either *Alt or *Pn. */
+function actorAlternate(key, hasParticipant) {
+  return key?.fromMe
+    ? firstAddress(key.remoteJidAlt, key.remoteJidPn, key.remoteJidPN)
+    : hasParticipant
+      ? firstAddress(key.participantAlt, key.participantPn, key.participantPN)
+      : firstAddress(key.remoteJidAlt, key.remoteJidPn, key.remoteJidPN);
+}
 
 /**
  * Pull the revoked stanza id out of any of the three shapes.
@@ -75,9 +89,6 @@ function describeMedia(record) {
   return MEDIA_LABEL[kind] || kind || 'message';
 }
 
-function clockTime(ms) {
-  return new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-}
 
 export class AntiDelete {
   /**
@@ -112,6 +123,9 @@ export class AntiDelete {
     this.config = config;
     this.downloader = downloader;
     this.selfOverride = selfJid;
+    // A revoke can be emitted in both messages.upsert and messages.update;
+    // protect the short overlap before its durable row is written.
+    this.inFlight = new Set();
     this.stats = { detected: 0, resolved: 0, unresolved: 0, mediaForwarded: 0, failed: 0 };
   }
 
@@ -164,47 +178,78 @@ export class AntiDelete {
 
   /** The heart of it: resolve a revoke and notify. */
   async onRevoke(source, stanzaId) {
-    if (!this.enabled()) return;
-    this.stats.detected++;
+    if (!this.enabled()) return null;
 
     const key = source?.key || {};
     const chatJid = normalizeJid(key.remoteJid);
-    const senderJid = normalizeJid(
-      key.fromMe ? this.selfJid() : isGroupJid(chatJid) ? key.participant || chatJid : chatJid
+    const sessionJid = this.selfJid() || '';
+    const id = String(stanzaId || '').trim();
+    if (!id || !chatJid) return null;
+    const dedupeKey = `${sessionJid}\u0000${chatJid}\u0000${id}`;
+    if (this.inFlight.has(dedupeKey) || this.#alreadyRecorded(id, sessionJid, chatJid)) return null;
+
+    this.inFlight.add(dedupeKey);
+    try {
+      this.stats.detected++;
+      const isGroup = isGroupJid(chatJid);
+      const isStatus = isStatusBroadcast(chatJid);
+      const { known, record, raw, mediaAvailable } = this.cache.resolveDeleted(stanzaId);
+      if (!known) this.stats.unresolved++;
+      else this.stats.resolved++;
+
+      // Revoke stanzas are sparse. For a status broadcast (and for an older
+      // group revoke without participant) the cached original is the reliable
+      // source of the human sender, never the status/group address itself.
+      const senderJid = normalizeJid(
+        key.fromMe
+          ? this.selfJid()
+          : (isGroup || isStatus)
+            ? key.participant || raw?.key?.participant || record?.sender_jid || chatJid
+            : record?.sender_jid || chatJid
+      );
+      const senderAlt = actorAlternate(key, isGroup || isStatus);
+
+      // Don't report your own deletions back to you — you know you did it.
+      const deletedByOther = !key.fromMe;
+
+      // If this revoke has both forms, profile() stores the observed relationship
+      // before rendering. Existing aliases still resolve when a revoke carries
+      // only an LID.
+      const profile = this.contacts.profile(senderJid, senderAlt);
+      const chatLabel = describeChat(chatJid, {
+        myJid: this.selfJid(),
+        name: isGroupJid(chatJid) ? null : profile.name,
+      });
+
+      const deletion = {
+        stanzaId,
+        chatJid,
+        chatLabel,
+        isGroup: isGroupJid(chatJid),
+        senderJid,
+        profile,
+        record,
+        known,
+        mediaAvailable,
+        deletedByOther,
+        at: Date.now(),
+      };
+
+      this.#persist(deletion);
+      const text = formatDeletion(deletion);
+      await this.#deliver(text, deletion, raw);
+      return deletion;
+    } finally {
+      this.inFlight.delete(dedupeKey);
+    }
+  }
+
+  #alreadyRecorded(stanzaId, sessionJid, chatJid) {
+    return Boolean(
+      this.db
+        .prepare('SELECT 1 FROM deleted_messages WHERE stanza_id = ? AND session_jid = ? AND chat_jid = ? LIMIT 1')
+        .get(stanzaId, sessionJid, chatJid)
     );
-
-    // Don't report your own deletions back to you — you know you did it.
-    const deletedByOther = !key.fromMe;
-
-    const { known, record, raw, mediaAvailable } = this.cache.resolveDeleted(stanzaId);
-    if (!known) this.stats.unresolved++;
-    else this.stats.resolved++;
-
-    const profile = this.contacts.profile(senderJid);
-    const chatLabel = describeChat(chatJid, {
-      myJid: this.selfJid(),
-      name: isGroupJid(chatJid) ? null : profile.name,
-    });
-
-    const deletion = {
-      stanzaId,
-      chatJid,
-      chatLabel,
-      isGroup: isGroupJid(chatJid),
-      senderJid,
-      profile,
-      record,
-      known,
-      mediaAvailable,
-      deletedByOther,
-      at: Date.now(),
-    };
-
-    this.#persist(deletion);
-
-    const text = formatDeletion(deletion);
-    await this.#deliver(text, deletion, raw);
-    return deletion;
   }
 
   #persist(d) {
@@ -241,10 +286,13 @@ export class AntiDelete {
       return;
     }
 
-    await this.socket.sendMessage(destination, { text });
+    const alert = await this.socket.sendMessage(destination, { text });
 
     // Forward the actual deleted media when we still hold the original object.
+    // Quote the alert itself, not the unrelated revoke, so WhatsApp renders a
+    // clean alert → recovered-media thread in the owner's capture chat.
     if (!deletion.mediaAvailable || !this.forwardMedia()) return;
+    const replyOptions = alert?.key ? { quoted: alert } : {};
     try {
       const buffer = this.downloader
         ? await this.downloader(raw)
@@ -253,18 +301,18 @@ export class AntiDelete {
 
       const kind = deletion.record?.kind;
       const mime = deletion.record?.media_mimetype || 'application/octet-stream';
-      const caption = `⤴️ the deleted ${describeMedia(deletion.record)}`;
+      const caption = `↳ Recovered deleted ${describeMedia(deletion.record)}`;
 
-      if (kind === 'image') await this.socket.sendMessage(destination, { image: buffer, caption });
-      else if (kind === 'video') await this.socket.sendMessage(destination, { video: buffer, caption });
-      else if (kind === 'sticker') await this.socket.sendMessage(destination, { sticker: buffer });
+      if (kind === 'image') await this.socket.sendMessage(destination, { image: buffer, caption }, replyOptions);
+      else if (kind === 'video') await this.socket.sendMessage(destination, { video: buffer, caption }, replyOptions);
+      else if (kind === 'sticker') await this.socket.sendMessage(destination, { sticker: buffer }, replyOptions);
       else if (kind === 'audio')
         await this.socket.sendMessage(destination, {
           audio: buffer,
           mimetype: mime,
           ptt: /ogg|opus/i.test(mime),
-        });
-      else await this.socket.sendMessage(destination, { document: buffer, mimetype: mime, fileName: 'deleted' });
+        }, replyOptions);
+      else await this.socket.sendMessage(destination, { document: buffer, mimetype: mime, fileName: 'deleted' }, replyOptions);
 
       this.stats.mediaForwarded++;
     } catch (err) {
@@ -287,44 +335,26 @@ export class AntiDelete {
  * without a socket, a database or a WhatsApp account.
  */
 export function formatDeletion(d) {
-  const p = d.profile || {};
   const kindLabel = d.record?.has_media ? describeMedia(d.record) : 'message';
-
   const lines = [`🗑️ *Deleted ${kindLabel}*`, ''];
 
-  const who = [p.name, p.phoneE164 && p.phoneE164 !== p.name ? p.phoneE164 : null]
-    .filter(Boolean)
-    .join(' · ');
-  lines.push(`👤 ${who || 'unknown sender'}`);
-
-  if (p.localName && p.notifyName && p.localName !== p.notifyName) {
-    lines.push(`   push name: ${p.notifyName}`);
-  }
-
-  const meta = [
-    p.countryName,
-    p.numberType ? String(p.numberType).toLowerCase() : null,
-    d.isGroup ? d.chatLabel : null,
-    clockTime(d.at),
-  ].filter(Boolean);
-  if (meta.length) lines.push(`ℹ️ ${meta.join(' · ')}`);
-
+  lines.push(...alertContext(d.profile, {
+    chatJid: d.chatJid,
+    chatLabel: d.chatLabel,
+    at: d.at,
+  }));
   lines.push('');
 
   if (!d.known || (!d.record?.text && !d.record?.has_media)) {
-    lines.push(
-      '_Content not captured_ — it arrived before this bot started, or the cache',
-      'entry has already been pruned.'
-    );
+    lines.push('_No recoverable content was retained for this message._');
   } else if (d.record?.text) {
+    lines.push('*Deleted content*');
     // Quote each line so it reads as the deleted message, not our own words.
-    for (const l of String(d.record.text).split('\n')) lines.push(`> ${l}`);
+    for (const line of String(d.record.text).split('\n')) lines.push(`> ${line}`);
+  } else if (d.mediaAvailable) {
+    lines.push(`_A recovered ${describeMedia(d.record)} is attached in reply to this alert._`);
   } else {
-    lines.push(
-      d.mediaAvailable
-        ? `_Forwarding the ${describeMedia(d.record)} below._`
-        : `_(no recoverable text; media no longer available)_`
-    );
+    lines.push(`_The deleted ${describeMedia(d.record)} is no longer available to recover._`);
   }
 
   return lines.join('\n');

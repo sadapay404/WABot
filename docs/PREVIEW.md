@@ -53,14 +53,18 @@ a process that never connects.
 
 you› .ping
 ← Owner: .ping
-→ you: 🏓 *Pong* — 1ms
+→ you: 🏓 *Nexus is online*
      • mode: `DRY-RUN`
-     • you: `owner`
+     • process uptime: `…`
+     • commands loaded: `56`
+     • access: `owner`
+     This confirms the bot received your command; WhatsApp does not expose a
+     trustworthy round-trip millisecond value here.
 
 you› /as 15550002222@s.whatsapp.net .ping
 ← Stranger: .ping
-→ 15550002222: 🏓 *Pong* — 0ms
-     • you: `guest`          ← correctly NOT the owner
+→ 15550002222: 🏓 *Nexus is online*
+     • access: `standard`     ← correctly NOT the owner
 
 you› /group .ping
 ← Stranger: .ping

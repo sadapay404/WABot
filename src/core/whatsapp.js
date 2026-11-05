@@ -14,6 +14,7 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import { OutboundQueue } from './outboundQueue.js';
 import { normalizeJid } from './jid.js';
 
@@ -23,54 +24,94 @@ async function baileys() {
   return lib;
 }
 
+/** Extract the version safely from Baileys' public Defaults source. */
+export function parseBaileysVersionSource(source) {
+  const match = String(source || '').match(/const\s+version\s*=\s*\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/);
+  if (!match) throw new Error('GitHub Defaults source did not contain a WhatsApp version');
+  return match.slice(1).map(Number);
+}
+
+/**
+ * The upstream helper uses raw.githubusercontent.com, which is often blocked
+ * or slow on PaaS hosts. The GitHub REST API is more consistently reachable
+ * there and returns the same public Defaults source as base64 JSON.
+ */
+export async function fetchBaileysVersionFromGitHub({ fetchImpl = globalThis.fetch, signal } = {}) {
+  const response = await fetchImpl(BAILEYS_DEFAULTS_API, {
+    headers: {
+      accept: 'application/vnd.github+json',
+      'user-agent': 'Nexus-WA version check',
+    },
+    signal,
+  });
+  if (!response?.ok) throw new Error(`GitHub version request failed (${response?.status || 'no response'})`);
+  const body = await response.json();
+  const source = Buffer.from(String(body?.content || '').replace(/\s/g, ''), 'base64').toString('utf8');
+  return parseBaileysVersionSource(source);
+}
+
 /**
  * Classify a disconnect into an action. Pure and exported for testing — this
  * is the logic that decides whether a drop is worth panicking about.
  *
  * @returns {'restart'|'relogin'|'backoff'|'ignore'}
  */
-export function classifyDisconnect(reason, DisconnectReason) {
-  const D = DisconnectReason || {};
-  // Guard first. Without it, `case D.loggedOut` degrades to `case undefined`
-  // when the enum isn't supplied — which would classify a plain network drop
-  // (no status code) as a logout and wipe the stored credentials.
-  if (reason === undefined || reason === null) return 'backoff';
+/** Exit code meaning "do not restart me": the supervisor stops, a human must act. */
+export const EXIT_DO_NOT_RESTART = 3;
 
-  switch (reason) {
-    case D.loggedOut:
-    case 401:
-      // Session revoked (logged out from the phone). Retrying is pointless and
-      // looks like an attacker; wipe credentials and ask for a fresh link.
-      return 'relogin';
-    case D.restartRequired:
-    case 515:
-    case D.timedOut:
-    case 408:
-      return 'restart';
-    case D.multideviceMismatch:
-    case 411:
-      return 'relogin';
-    case D.badSession:
-    case 500:
-    case D.connectionClosed:
-    case D.connectionLost:
-    case D.connectionReplaced:
-    case 503:
-    case D.unavailableService:
-      return 'restart';
-    case D.forbidden:
-    case 403:
-    case 440:
-    case 428:
-      // Possible restriction. Stop rather than hammering.
-      return 'relogin';
-    default:
-      return 'backoff';
+/**
+ * Liveness limits. Baileys pings the server about every 30s and the server
+ * answers, so inbound frames keep arriving on a healthy link. These limits only
+ * trip when the link is dead, which is what a Wi-Fi drop usually leaves behind:
+ * a socket that never reports `close`.
+ */
+export const VERSION_TIMEOUT_MS = 10_000;
+export const VERSION_CACHE_MS = 24 * 60 * 60 * 1000;
+const BAILEYS_DEFAULTS_API = 'https://api.github.com/repos/WhiskeySockets/Baileys/contents/src/Defaults/index.ts';
+export const CONNECT_STALL_MS = 120_000;
+// Baileys' decoded protocol keepalive is the authoritative open-link signal.
+// Keep this exported for compatibility, but do not recycle an open socket only
+// because application traffic is quiet.
+export const SILENCE_MS = 180_000;
+export const STABLE_OPEN_MS = 60_000;
+export const HEALTH_TICK_MS = 30_000;
+
+/**
+ * Decide whether the connection needs a nudge. Pure, so it can be tested.
+ * @returns {null|{action:'reconnect'|'schedule', reason:string}}
+ */
+export function livenessAction({ state, now, lastFrameAt, stateSince, awaitingLink = false, reconnectPending = false }) {
+  // `frame` is useful telemetry, but Baileys owns protocol keepalive. A quiet
+  // conversation must not make us tear down an authenticated socket.
+  if (state === 'connecting' && !awaitingLink && now - stateSince > CONNECT_STALL_MS) {
+    return { action: 'reconnect', reason: `connection attempt stalled for ${Math.round((now - stateSince) / 1000)}s` };
   }
+  if (state === 'closed' && !reconnectPending) {
+    return { action: 'schedule', reason: 'no reconnect was pending' };
+  }
+  return null;
+}
+
+export function classifyDisconnect(reason, DisconnectReason = null) {
+  // Baileys' enum values are numeric. Keep the public enum argument for
+  // callers/tests, but do not let missing or aliased enum properties change a
+  // numeric disconnect policy (notably 428 = connectionClosed).
+  const code = Number(reason);
+  if (!Number.isFinite(code)) return 'backoff';
+  if (code === 440) return 'replaced';
+  if (code === 401 || code === 403 || code === 411) return 'relogin';
+  if ([408, 428, 500, 503, 515].includes(code)) return 'restart';
+  return 'backoff';
 }
 
 /** Exponential backoff with jitter, capped. Pure, for testing. */
-export function backoffDelay(attempt, { baseMs = 3000, maxMs = 60000 } = {}) {
+// A transport outage can last hours. Cap the reconnect *rate* at five minutes,
+// not one minute: repeatedly making fresh WebSocket handshakes while the route
+// is unhealthy is noisy, wastes a constrained host, and makes session-state
+// errors harder to diagnose. A stable open still resets the streak after 60s.
+export const RECONNECT_MAX_DELAY_MS = 5 * 60_000;
+
+export function backoffDelay(attempt, { baseMs = 3000, maxMs = RECONNECT_MAX_DELAY_MS } = {}) {
   const exp = Math.min(maxMs, baseMs * 2 ** Math.max(0, attempt - 1));
   return Math.round(exp / 2 + Math.random() * (exp / 2));
 }
@@ -92,16 +133,90 @@ export function formatPairingCode(code) {
   return value.match(/.{1,4}/g)?.join('-') || value;
 }
 
+/**
+ * Keep the companion explicitly offline after every (re)connect. WhatsApp
+ * suppresses audible notifications on the primary phone while another linked
+ * device is considered active; reconnects can otherwise leave that state
+ * behind even though `markOnlineOnConnect` is false. This is presence-only:
+ * it neither reads messages nor changes phone notification settings.
+ */
+export async function preservePrimaryPhoneNotifications(socket, logger = null) {
+  if (typeof socket?.sendPresenceUpdate !== 'function') return false;
+  try {
+    await socket.sendPresenceUpdate('unavailable');
+    return true;
+  } catch (error) {
+    logger?.warn?.(`could not mark companion unavailable: ${error.message}`);
+    return false;
+  }
+}
+
 export class WhatsAppConnection {
   constructor({ config, logger, cache = null }) {
     this.config = config;
     this.cache = cache;
     this.logger = logger.child({ scope: 'whatsapp' });
     this.socket = null;
-    this.saveCreds = null;
+    this.socketGeneration = 0;
     this.attempt = 0;
     this.stopped = false;
     this.listeners = new Map();
+    // 'idle' | 'connecting' | 'open' | 'closed'
+    this.state = 'idle';
+    this.stateSince = Date.now();
+    this.lastFrameAt = 0;
+    // Last incoming message. Starts at boot, so a quiet fresh start is not "deaf".
+    this.lastInboundAt = Date.now();
+    // Bumped whenever an attempt is abandoned, so a late-finishing connect()
+    // cannot create a second socket beside the one that replaced it.
+    this.generation = 0;
+    this.reconnectTimer = null;
+    this.healthTimer = null;
+    this.stableOpenTimer = null;
+    this.retryTicket = 0;
+    // True after a non-retryable failure. The health tick must not revive it.
+    this.halted = false;
+    // True while a fresh link is waiting for the user to scan or enter a code.
+    // That can take minutes, so the connect-stall check must not fire then.
+    this.awaitingLink = false;
+    // Optional. The health tick writes a small key=value file here so the
+    // Termux watchdog can notice a bot whose event loop has wedged.
+    this.heartbeatFile = process.env.NEXUS_HEARTBEAT_FILE || null;
+  }
+
+  #setState(state) {
+    this.state = state;
+    this.stateSince = Date.now();
+  }
+
+  #owns(socket, generation) {
+    return !this.stopped && !this.halted && this.generation === generation && this.socket === socket;
+  }
+
+  #cancelStableOpen() {
+    clearTimeout(this.stableOpenTimer);
+    this.stableOpenTimer = null;
+  }
+
+  #markTerminal(kind, reason) {
+    if (this.halted) return;
+    this.halted = true;
+    this.generation++;
+    this.retryTicket++;
+    this.awaitingLink = false;
+    this.#cancelStableOpen();
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.logger.error(`terminal-stop kind=${kind} code=${reason ?? 'none'}`);
+  }
+
+  #scheduleStableOpen(socket, generation) {
+    this.#cancelStableOpen();
+    this.stableOpenTimer = setTimeout(() => {
+      if (!this.#owns(socket, generation) || this.state !== 'open') return;
+      this.attempt = 0;
+      this.logger.info(`connection stable generation=${generation}; reconnect backoff reset`);
+    }, STABLE_OPEN_MS);
   }
 
   on(event, fn) {
@@ -113,30 +228,38 @@ export class WhatsAppConnection {
   #emit(event, payload) {
     for (const fn of this.listeners.get(event) || []) {
       try {
-        fn(payload);
-      } catch (err) {
-        this.logger.error(`listener ${event}: ${err.message}`);
+        // EventEmitter does not await async listeners. Attach a rejection
+        // handler here so an optional watcher cannot become an unhandled
+        // rejection that kills the whole live process.
+        const result = fn(payload);
+        if (result && typeof result.catch === 'function') {
+          result.catch((error) => this.logger.error(`listener ${event}: ${error.message}`));
+        }
+      } catch (error) {
+        this.logger.error(`listener ${event}: ${error.message}`);
       }
     }
   }
 
   async connect() {
+    if (this.stopped || this.halted) return null;
+    const generation = ++this.generation;
+    this.#setState('connecting');
+    this.#startHealthTick();
+
     const B = await baileys();
+    if (this.stopped || this.halted || generation !== this.generation) return null;
     const { useMultiFileAuthState, makeWASocket, DisconnectReason, Browsers } = B;
 
     fs.mkdirSync(this.config.wa.sessionDir, { recursive: true });
     const { state, saveCreds } = await useMultiFileAuthState(this.config.wa.sessionDir);
-    this.saveCreds = saveCreds;
+    if (this.stopped || this.halted || generation !== this.generation) return null;
 
     const companionProfile = this.config.wa.companionProfile || 'web';
-    if (companionProfile === 'smb_android' && state.creds?.me) {
-      throw new Error(
-        'WA_COMPANION_PROFILE=smb_android only applies during a fresh link. ' +
-          'Use a new WA_SESSION_DIR for the Business companion; the existing auth directory was not changed.'
-      );
-    }
-
-    const version = await this.#version(B);
+    // A linked SMB_ANDROID companion must be allowed to resume after a normal
+    // restartRequired reconnect. We do not migrate or overwrite credentials.
+    const version = await this.#version();
+    if (this.stopped || this.halted || generation !== this.generation) return null;
     const browser = connectionBrowser({ Browsers }, this.config);
 
     const socket = makeWASocket({
@@ -144,15 +267,8 @@ export class WhatsAppConnection {
       version,
       logger: this.logger.child({ scope: 'baileys' }),
       browser,
-      // Baileys rc14 needs a small local patch for the Business-only SMB_ANDROID
-      // UserAgent/webInfo/CHROME registration combination.
       nexusCompanionProfile: companionProfile,
-      ...(companionProfile === 'smb_android'
-        ? { nexusCompanionPlatformDisplay: 'Chrome (Ubuntu)' }
-        : {}),
-      // The phone-number flow does not need a QR printed into the log. Keep
-      // Baileys' legacy QR printer only as a fallback when neither pairing
-      // number nor Telegram delivery is configured.
+      ...(companionProfile === 'smb_android' ? { nexusCompanionPlatformDisplay: 'Chrome (Ubuntu)' } : {}),
       printQRInTerminal: !this.config.wa.pairingNumber && !this.config.telegram.enabled,
       markOnlineOnConnect: false,
       emitOwnEvents: false,
@@ -162,51 +278,203 @@ export class WhatsAppConnection {
       qrTimeout: 60_000,
       retryRequestDelayMs: 5000,
       maxMsgRetryCount: 5,
-      // Keep original protobufs in the bounded in-memory cache so Baileys can
-      // decrypt secret-encrypted MESSAGE_EDIT envelopes. Cache lookups verify
-      // the message ID, conversation, and direction before returning content.
       getMessage: async (key) => this.cache?.getMessage?.(key),
     });
+    if (this.stopped || this.halted || generation !== this.generation) {
+      try { socket.end?.(new Error('superseded connection attempt')); } catch { /* ignored */ }
+      return null;
+    }
 
-    // Structural rate limiting — nothing can send around this.
-    new OutboundQueue(socket, this.config, this.logger).attach();
-
+    if (!this.queue) this.queue = new OutboundQueue(socket, this.config, this.logger);
+    this.queue.attach(socket);
     this.socket = socket;
-    this.#wire(socket, DisconnectReason);
-    this.logger.info(
-      `connecting… (account platform: ${state.creds?.platform || 'not recorded'}; ` +
-        `requested companion: ${companionProfile} (${browser[0]}/${browser[1]}); ` +
-        `session: ${this.config.wa.sessionDir}` +
-        `${state.creds?.me ? ', resuming as ' + state.creds.me.id : ', fresh link'})`
-    );
+    this.socketGeneration = generation;
+    this.lastFrameAt = Date.now();
+    socket.ws?.on?.('frame', () => {
+      if (this.#owns(socket, generation)) this.lastFrameAt = Date.now();
+    });
+    this.#wire(socket, DisconnectReason, generation, saveCreds);
+    this.logger.info(`connection attempt ready generation=${generation} profile=${companionProfile}`);
     return socket;
   }
 
-  async #version(B) {
+  #versionCachePath() {
+    // Keep the non-secret cache beside, not inside, the Baileys auth directory:
+    // its presence must never make an empty credential directory look linked
+    // and prevent a legitimate remote-vault restore.
+    return path.join(path.dirname(this.config.wa.sessionDir), 'wa-web-version.json');
+  }
+
+  #readVersionCache() {
     try {
-      const { version, isLatest } = await B.fetchLatestBaileysVersion();
-      this.logger.info(`wa web version ${version.join('.')} (latest=${isLatest})`);
-      return version;
-    } catch (err) {
-      this.logger.warn(`could not fetch latest version (${err.message}); using library default`);
-      return undefined;
+      const value = JSON.parse(fs.readFileSync(this.#versionCachePath(), 'utf8'));
+      const version = Array.isArray(value?.version) ? value.version.map(Number) : [];
+      const fetchedAt = Number(value?.fetchedAt);
+      if (version.length !== 3 || version.some((part) => !Number.isInteger(part) || part < 0) || !fetchedAt) return null;
+      return { version, fetchedAt };
+    } catch {
+      return null;
     }
   }
 
-  #wire(socket, DisconnectReason) {
-    socket.ev.on('creds.update', () => this.saveCreds?.());
+  #writeVersionCache(version) {
+    try {
+      const target = this.#versionCachePath();
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      const tmp = `${target}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ version, fetchedAt: Date.now() }));
+      fs.renameSync(tmp, target);
+    } catch (error) {
+      // A fresh connection is more important than a performance cache.
+      this.logger.warn(`could not cache WhatsApp web version: ${error.message}`);
+    }
+  }
+
+  async #version() {
+    const cached = this.#readVersionCache();
+    const age = cached ? Date.now() - cached.fetchedAt : Infinity;
+    if (cached && age >= 0 && age < VERSION_CACHE_MS) {
+      this.logger.info(`wa web version ${cached.version.join('.')} (cached)`);
+      return cached.version;
+    }
+
+    const controller = new AbortController();
+    let timer;
+    try {
+      timer = setTimeout(() => controller.abort(), VERSION_TIMEOUT_MS);
+      const version = await fetchBaileysVersionFromGitHub({ signal: controller.signal });
+      this.#writeVersionCache(version);
+      this.logger.info(`wa web version ${version.join('.')} (GitHub API)`);
+      return version;
+    } catch (error) {
+      if (cached) {
+        this.logger.warn(`could not refresh WhatsApp web version; using cached version`);
+        return cached.version;
+      }
+      this.logger.warn(`could not fetch WhatsApp web version; using library default`);
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * The only place that schedules a reconnect. A single timer means two drops
+   * can never create two sockets, and a failed connect() schedules another try
+   * instead of leaving the bot silently offline.
+   */
+  #scheduleReconnect(reason, { source = 'transport-close', immediate = false } = {}) {
+    if (this.stopped || this.halted || this.reconnectTimer) return;
+    const ticket = ++this.retryTicket;
+    this.attempt++;
+    const delay = immediate ? 0 : backoffDelay(this.attempt);
+    const reconnectLog =
+      delay >= 60_000 && this.attempt >= 6 ? this.logger.warn.bind(this.logger) : this.logger.info.bind(this.logger);
+    reconnectLog(
+      `reconnecting source=${source} attempt=${this.attempt} in=${Math.round(delay / 1000)}s${reason ? ` reason=${reason}` : ''}`
+    );
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.stopped || this.halted || ticket !== this.retryTicket) return;
+      this.connect().catch((err) => {
+        if (this.stopped || this.halted || ticket !== this.retryTicket) return;
+        this.logger.error(`connect-failure attempt=${this.attempt}: ${err.message}`);
+        this.#setState('closed');
+        if (err.fatal) this.#markTerminal('connect-failure', 'fatal');
+        else this.#scheduleReconnect('connect failed', { source: 'connect-failure' });
+      });
+    }, delay);
+  }
+
+  /** Abandon a genuinely stalled attempt and schedule a paced replacement. */
+  forceReconnect(reason, { source = 'watchdog', immediate = false } = {}) {
+    if (this.stopped || this.halted) return;
+    const socket = this.socket;
+    const previousGeneration = this.generation;
+    this.logger.warn(`forcing reconnect source=${source} generation=${previousGeneration} reason=${reason}`);
+    this.generation++;
+    this.retryTicket++;
+    this.#cancelStableOpen();
+    this.awaitingLink = false;
+    this.#setState('closed');
+    // The old socket is intentionally made stale before end(). Report this
+    // watchdog-originated outage once ourselves; its late close event is then
+    // harmlessly ignored by the ownership guard.
+    this.#emit('close', { reason: null, action: 'restart', generation: previousGeneration, source });
+    if (socket) {
+      this.queue?.detach?.(socket);
+      this.socket = null;
+      try { socket.end(new Error(reason)); } catch { /* already gone */ }
+    }
+    this.#scheduleReconnect(reason, { source, immediate });
+  }
+
+  #startHealthTick() {
+    if (this.healthTimer || this.stopped) return;
+    // Keep the daemon alive even when a broken websocket has dropped every
+    // other event-loop handle. stop() always clears this during intentional
+    // shutdown, logout, or session replacement.
+    this.healthTimer = setInterval(() => this.#healthTick(), HEALTH_TICK_MS);
+  }
+
+  #healthTick() {
+    if (this.stopped) return;
+    const now = Date.now();
+    this.#writeHeartbeat(now);
+    if (this.halted) return;
+    const verdict = livenessAction({
+      state: this.state,
+      now,
+      lastFrameAt: this.lastFrameAt,
+      stateSince: this.stateSince,
+      awaitingLink: this.awaitingLink,
+      reconnectPending: Boolean(this.reconnectTimer),
+    });
+    if (!verdict) return;
+    if (verdict.action === 'reconnect') this.forceReconnect(verdict.reason, { source: 'watchdog' });
+    else this.#scheduleReconnect(verdict.reason, { source: 'watchdog' });
+  }
+
+  #writeHeartbeat(now) {
+    if (!this.heartbeatFile) return;
+    try {
+      const body = [
+        `ts=${Math.floor(now / 1000)}`,
+        `state=${this.state}`,
+        `state_since=${Math.floor(this.stateSince / 1000)}`,
+        `last_frame=${Math.floor(this.lastFrameAt / 1000)}`,
+        `queue_halted=${this.queue?.halted ? this.queue.haltReason : 'no'}`,
+        `queue_queued=${this.queue ? this.queue.depth().queued : 0}`,
+        `last_inbound=${Math.floor(this.lastInboundAt / 1000)}`,
+        `last_sent=${this.queue?.lastSentAt ? Math.floor(this.queue.lastSentAt / 1000) : 0}`,
+        '',
+      ].join('\n');
+      const tmp = `${this.heartbeatFile}.tmp`;
+      fs.writeFileSync(tmp, body);
+      fs.renameSync(tmp, this.heartbeatFile);
+    } catch (err) {
+      this.logger.warn(`heartbeat write failed: ${err.message}`);
+    }
+  }
+
+  #wire(socket, DisconnectReason, generation, saveCreds) {
+    socket.ev.on('creds.update', () => {
+      if (!this.#owns(socket, generation)) return;
+      Promise.resolve(saveCreds?.()).catch((error) =>
+        this.logger.error(`could not persist WhatsApp credentials: ${error.message}`)
+      );
+    });
     let pairingRequested = false;
 
     socket.ev.on('connection.update', async (update) => {
+      if (!this.#owns(socket, generation)) return;
+      this.lastFrameAt = Date.now();
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        this.logger.info('QR code generated');
+        this.logger.info(`link requested generation=${generation}`);
         this.#emit('qr', qr);
-
-        // A fresh account never reaches connection='open' until it has been
-        // linked. Ask for the pairing code as soon as Baileys emits its first
-        // QR (the websocket is ready to accept the link-code request then).
+        this.awaitingLink = true;
         if (shouldRequestPairingCode({
           qr,
           pairingNumber: this.config.wa.pairingNumber,
@@ -214,53 +482,73 @@ export class WhatsAppConnection {
           requested: pairingRequested,
         })) {
           pairingRequested = true;
-          await this.#requestPairingCode(socket);
+          await this.#requestPairingCode(socket, generation);
+          if (!this.#owns(socket, generation)) return;
         }
       }
 
       if (connection === 'open') {
-        this.attempt = 0;
+        if (this.state === 'open') return;
+        this.#setState('open');
+        this.awaitingLink = false;
+        this.lastFrameAt = Date.now();
         const me = normalizeJid(socket.user?.id || '');
-        this.logger.info(`connected as ${me}`);
-        this.#emit('open', { jid: me, pushName: socket.user?.name || null });
+        await preservePrimaryPhoneNotifications(socket, this.logger);
+        if (!this.#owns(socket, generation) || this.state !== 'open') return;
+        this.#scheduleStableOpen(socket, generation);
+        this.logger.info(`connected generation=${generation}`);
+        this.#emit('open', { jid: me, pushName: socket.user?.name || null, generation });
         return;
       }
 
       if (connection === 'close') {
         const reason = lastDisconnect?.error?.output?.statusCode;
         const action = classifyDisconnect(reason, DisconnectReason);
-        this.logger.warn(`connection closed (code=${reason ?? 'none'}) → ${action}`);
-        this.#emit('close', { reason, action });
+        this.#cancelStableOpen();
+        this.awaitingLink = false;
+        this.#setState('closed');
+        this.queue?.detach?.(socket);
+        this.socket = null;
+        this.logger.warn(`connection closed source=transport-close generation=${generation} code=${reason ?? 'none'} action=${action}`);
+        this.#emit('close', { reason, action, generation, source: 'transport-close' });
 
-        if (this.stopped) return;
-
-        if (action === 'relogin') {
-          this.logger.error('session is no longer valid — credentials must be re-linked');
-          this.#emit('relogin', { reason });
+        if (this.stopped || this.halted) return;
+        if (action === 'replaced' || action === 'relogin') {
+          this.#markTerminal(action, reason);
+          this.#emit(action, { reason, generation });
+          setTimeout(() => process.exit(EXIT_DO_NOT_RESTART), 1500);
           return;
         }
-        this.attempt++;
-        const delay = backoffDelay(this.attempt);
-        this.logger.info(`reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.attempt})`);
-        setTimeout(() => {
-          if (!this.stopped) this.connect().catch((e) => this.logger.error(e.message));
-        }, delay);
+        this.#scheduleReconnect(`code ${reason ?? 'none'}`, { source: 'transport-close', immediate: action === 'restart' && reason === 515 });
       }
     });
 
-    socket.ev.on('messages.upsert', (p) => this.#emit('messages.upsert', p));
-    socket.ev.on('messages.update', (p) => this.#emit('messages.update', p));
-    socket.ev.on('contacts.update', (p) => this.#emit('contacts.update', p));
-    socket.ev.on('chats.update', (p) => this.#emit('chats.update', p));
-    socket.ev.on('chats.upsert', (p) => this.#emit('chats.upsert', p));
-    socket.ev.on('messaging-history.set', (p) => this.#emit('messaging-history.set', p));
+    const forward = (event) => (payload) => {
+      if (!this.#owns(socket, generation)) return;
+      this.lastFrameAt = Date.now();
+      this.#emit(event, payload);
+    };
+    socket.ev.on('messages.upsert', (payload) => {
+      if (!this.#owns(socket, generation)) return;
+      this.lastInboundAt = Date.now();
+      forward('messages.upsert')(payload);
+    });
+    socket.ev.on('messages.update', forward('messages.update'));
+    socket.ev.on('contacts.update', forward('contacts.update'));
+    socket.ev.on('contacts.upsert', forward('contacts.upsert'));
+    socket.ev.on('lid-mapping.update', forward('lid-mapping.update'));
+    socket.ev.on('chats.update', forward('chats.update'));
+    socket.ev.on('chats.upsert', forward('chats.upsert'));
+    socket.ev.on('messaging-history.set', forward('messaging-history.set'));
+    socket.ev.on('presence.update', forward('presence.update'));
   }
 
-  async #requestPairingCode(socket) {
+  async #requestPairingCode(socket, generation = this.generation) {
     const number = this.config.wa.pairingNumber;
     try {
       const code = await socket.requestPairingCode(number);
-      this.logger.info(`pairing code: ${formatPairingCode(code)}`);
+      if (!this.#owns(socket, generation)) return null;
+      this.logger.info(`pairing code issued privately generation=${generation}`);
       this.#emit('pairing-code', code);
       return code;
     } catch (err) {
@@ -278,9 +566,21 @@ export class WhatsAppConnection {
   }
 
   async stop() {
+    if (this.stopped) return;
     this.stopped = true;
+    this.generation++;
+    this.retryTicket++;
+    this.awaitingLink = false;
+    this.#cancelStableOpen();
+    clearTimeout(this.reconnectTimer);
+    clearInterval(this.healthTimer);
+    this.reconnectTimer = null;
+    this.healthTimer = null;
+    const socket = this.socket;
+    this.queue?.detach?.(socket);
+    this.socket = null;
     try {
-      await this.socket?.end?.();
+      await socket?.end?.();
     } catch {
       /* already closed */
     }

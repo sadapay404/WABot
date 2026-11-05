@@ -346,13 +346,13 @@ function render(s) {
 
   renderStats(s); renderSessions(s); renderCountries(s); renderRuntime(s);
   renderDeletions(s); renderServices(s); renderPlugins(s); renderContacts(s); renderLogs(s);
-  $('foot').textContent = `pid ${s.pid} · ${s.dashboard.protected ? 'token protected' : 'dry-run: unauthenticated'} · Nexus-WA`;
+  $('foot').textContent = `pid ${s.pid} · ${s.dashboard.protected ? 'token protected' : 'protected'} · Nexus-WA`;
 }
 
 async function tick() {
   try {
     const r = await fetch('/api/state', { cache: 'no-store' });
-    if (r.status === 401) { $('sub').textContent = 'unauthorised — pass ?token='; return; }
+    if (r.status === 401) { $('sub').textContent = 'unauthorised — authenticate with DASHBOARD_TOKEN'; return; }
     render(await r.json());
     $('dot').classList.remove('off');
   } catch (e) {

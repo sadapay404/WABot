@@ -56,6 +56,8 @@ CREATE INDEX IF NOT EXISTS idx_events_session ON connection_events(session_id, t
 
 CREATE TABLE IF NOT EXISTS contacts (
   jid           TEXT PRIMARY KEY,
+  -- A controller-entered name always wins over synced/profile labels.
+  manual_name   TEXT,
   local_name    TEXT,
   notify_name   TEXT,
   verified_name TEXT,
@@ -64,6 +66,16 @@ CREATE TABLE IF NOT EXISTS contacts (
   country_name  TEXT,
   last_seen     INTEGER
 );
+
+-- WhatsApp may identify one person by a phone-number JID in one event and an
+-- LID in another. Keep only associations observed in protocol data or entered
+-- by the owner; never try to guess a phone number from an LID.
+CREATE TABLE IF NOT EXISTS contact_aliases (
+  alias_jid     TEXT PRIMARY KEY,
+  canonical_jid TEXT NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_contact_alias_canonical ON contact_aliases(canonical_jid);
 
 -- ── Message capture ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS message_cache (
@@ -294,6 +306,15 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- Persistent public-AI access controls. This is a database-backed owner tool,
+-- not an environment setting, so it survives restarts without exposing a list
+-- of restricted users in panel configuration.
+CREATE TABLE IF NOT EXISTS ai_blocklist (
+  jid        TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  created_by TEXT
+);
 `;
 
 /**
@@ -418,6 +439,13 @@ function migrate(db, logger) {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA);
+
+  // A manual contact name is deliberately separate from WhatsApp-synced and
+  // profile labels, so a later contacts.update can never overwrite an owner’s
+  // own address-book choice.
+  if (addColumnIfMissing(db, 'contacts', 'manual_name', 'TEXT')) {
+    logger?.child?.({ scope: 'db' })?.info('migrated contacts table (manual names)');
+  }
 
   // Keep phone-number and LID chat identities together when Baileys supplies
   // both forms. Old databases gain the nullable alias columns in place.

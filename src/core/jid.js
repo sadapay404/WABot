@@ -42,6 +42,10 @@ export function isGroupJid(jid) {
 export function isNewsletterJid(jid) {
   return normalizeJid(jid).endsWith(NEWSLETTER);
 }
+/** WhatsApp status feed; it is not a one-to-one contact. */
+export function isStatusBroadcast(jid) {
+  return normalizeJid(jid) === 'status@broadcast';
+}
 export function isLidJid(jid) {
   return normalizeJid(jid).endsWith(LID);
 }
@@ -120,6 +124,7 @@ export function resolvePhone(input) {
 export function describeChat(jid, { myJid, name } = {}) {
   const n = normalizeJid(jid);
   if (isSelfJid(n, myJid)) return 'You';
+  if (isStatusBroadcast(n)) return 'Status';
   if (name) return name;
   if (isGroupJid(n)) return `group ${n.split('@')[0].slice(-6)}…`;
   if (isNewsletterJid(n)) return 'channel';
@@ -132,6 +137,7 @@ export default {
   isGroupJid,
   isUserJid,
   isNewsletterJid,
+  isStatusBroadcast,
   isLidJid,
   jidToPhone,
   phoneToJid,

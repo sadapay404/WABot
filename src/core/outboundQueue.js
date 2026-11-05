@@ -1,4 +1,34 @@
-import { normalizeJid } from './jid.js';
+import { isSelfJid, normalizeJid } from './jid.js';
+
+/**
+ * A send that never settles (a half-open socket can do this) would hold the
+ * only send slot forever, and every reply after it would wait behind it.
+ * Bounding each send frees the slot.
+ */
+export const SEND_TIMEOUT_MS = 60_000;
+
+export function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+  });
+  return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
+}
+
+function withAdvisoryTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+  return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
+}
+
+/** A self-chat never needs a typing indicator; it can disturb primary-phone presence. */
+export function isSelfDestination(socket, jid) {
+  const self = socket?.user?.id;
+  return Boolean(self && (isSelfJid(jid, self) || normalizeJid(jid) === normalizeJid(self)));
+}
 
 const DEFAULT_LOOP_THRESHOLD = 5;
 const MAX_LOOP_THRESHOLD = 25;
@@ -11,6 +41,8 @@ const MAX_VOLUME_WINDOW_MS = 3_600_000;
 const LOOP_HISTORY_MAX_DESTINATIONS = 500;
 const LOOP_MIN_TOKENS_FOR_FUZZY_MATCH = 3;
 const LOOP_TOKEN_OVERLAP_THRESHOLD = 0.8;
+const MAX_QUEUE_DEPTH = 1_000;
+const PRESENCE_TIMEOUT_MS = 3_000;
 
 function boundedInteger(value, fallback, minimum, maximum) {
   const number = Number(value);
@@ -119,9 +151,13 @@ export class OutboundQueue {
     this.volumeWindow = [];
     this.lastVolumeAlertAt = 0;
     this.rawSendMessage = null;
+    this.transportVersion = 0;
     this.beforeSendObservers = new Set();
     this.queue = [];
+    this.inFlight = new Set();
+    this.pumping = false;
     this.active = 0;
+    this.lastSentAt = 0;
     this.stats = {
       sent: 0,
       throttledMs: 0,
@@ -155,18 +191,66 @@ export class OutboundQueue {
     }
   }
 
-  /** Wrap a socket with outbound pacing and loop protection. */
-  attach() {
-    const original = this.socket.sendMessage.bind(this.socket);
+  /**
+   * Wrap one raw transport. Existing queued work deliberately does not retain
+   * this socket: dispatch selects the newest attached transport at the last
+   * possible moment. A wrapper on a retired socket rejects instead of silently
+   * adding work to a replacement connection.
+   */
+  attach(socket = this.socket) {
+    if (!socket || typeof socket.sendMessage !== 'function') {
+      throw new TypeError('outbound queue needs a sendMessage-capable transport');
+    }
+    const original = socket.sendMessage.bind(socket);
+    const version = ++this.transportVersion;
+    this.socket = socket;
     this.rawSendMessage = original;
     const self = this;
 
-    this.socket.sendMessage = function queuedSendMessage(jid, content, options) {
-      return self.#enqueue(() => original(jid, content, options), jid, content);
+    socket.sendMessage = function queuedSendMessage(jid, content, options = {}) {
+      if (self.socket !== socket || self.transportVersion !== version) {
+        return Promise.reject(new Error('outbound transport retired; wait for the active connection'));
+      }
+      const {
+        nexusSystemEvent = false,
+        nexusSkipTyping = false,
+        nexusOwnerControl = false,
+        nexusExpiresAt = null,
+        ...transportOptions
+      } = options || {};
+      return self.#enqueue(jid, content, transportOptions, {
+        bypassLoopBreaker: Boolean(nexusSystemEvent),
+        skipTyping: Boolean(nexusSkipTyping),
+        ownerControl: Boolean(nexusOwnerControl),
+        expiresAt: nexusExpiresAt !== null && nexusExpiresAt !== '' && Number.isFinite(Number(nexusExpiresAt))
+          ? Number(nexusExpiresAt)
+          : null,
+      });
     };
 
-    this.socket.__outboundQueue = this;
-    return this.socket;
+    socket.__outboundQueue = this;
+    return socket;
+  }
+
+  /** Retire an old transport without discarding work that can await a reconnect. */
+  detach(socket = this.socket) {
+    if (socket && this.socket !== socket) return false;
+    this.transportVersion++;
+    this.socket = null;
+    this.rawSendMessage = null;
+    return true;
+  }
+
+  #isOwnerDestination(jid) {
+    const destination = normalizeJid(jid);
+    if (!destination) return false;
+    const owners = (this.config?.safety?.ownerJids || []).map(normalizeJid);
+    return owners.includes(destination) || isSelfDestination(this.socket, destination);
+  }
+
+  #allowObserveSend(item) {
+    if (!this.config?.isObserve) return true;
+    return Boolean(this.config?.safety?.observeAllowReplyToOwner && item.ownerControl && this.#isOwnerDestination(item.jid));
   }
 
   #withinBudget(jid) {
@@ -176,7 +260,7 @@ export class OutboundQueue {
     return win.length < this.limitPerMin;
   }
 
-  #enqueue(task, jid, content) {
+  #enqueue(jid, content, transportOptions, { bypassLoopBreaker = false, skipTyping = false, ownerControl = false, expiresAt = null } = {}) {
     return new Promise((resolve, reject) => {
       let bypassSafetyMonitors = false;
       if (this.halted) {
@@ -190,8 +274,15 @@ export class OutboundQueue {
           return reject(new Error(`outbound halted by ${this.haltReason}`));
         }
       }
-      this.queue.push({ task, jid, content, bypassSafetyMonitors, resolve, reject });
-      this.#pump();
+      if (this.queue.length + this.inFlight.size >= MAX_QUEUE_DEPTH) {
+        this.stats.dropped++;
+        return reject(new Error(`outbound queue is full (${MAX_QUEUE_DEPTH} items)`));
+      }
+      this.queue.push({
+        jid, content, transportOptions, bypassSafetyMonitors, bypassLoopBreaker,
+        skipTyping, ownerControl, expiresAt, resolve, reject, cancelled: false, submitted: false,
+      });
+      void this.#pump();
     });
   }
 
@@ -205,9 +296,13 @@ export class OutboundQueue {
     const dropped = this.queue.length;
     const pending = this.queue.splice(0, this.queue.length);
     for (const item of pending) {
+      item.cancelled = true;
       this.stats.dropped++;
       item.reject(new Error(`outbound halted by ${reason}`));
     }
+    // A message already submitted to WhatsApp cannot be recalled here, but
+    // any item still in a typing/rate/pre-send await must not cross transport.
+    for (const item of this.inFlight) item.cancelled = true;
     this.logger.warn(`${reason.toUpperCase().replaceAll('-', ' ')} engaged — dropped ${dropped} queued message(s)`);
     return dropped;
   }
@@ -297,8 +392,11 @@ export class OutboundQueue {
           `(threshold: ${this.volumeLimit}). Sending continues under normal limits; ` +
           `use ".panic" if this was unexpected.`,
       };
+      if (!this.#allowObserveSend({ jid: ownerJid, ownerControl: true })) return;
+      const rawSend = this.rawSendMessage;
+      if (!rawSend) return;
       this.#notifyBeforeSend(ownerJid, content);
-      await this.rawSendMessage(ownerJid, content);
+      await withTimeout(rawSend(ownerJid, content), SEND_TIMEOUT_MS, 'volume alert');
     } catch (error) {
       this.logger.error(`outbound volume owner alert failed: ${error.message}`);
     }
@@ -324,49 +422,62 @@ export class OutboundQueue {
     this.allowOnce();
     const seconds = Math.ceil(this.loopWindowMs / 1_000);
     try {
-      await this.socket.sendMessage(ownerJid, {
+      await withTimeout(this.socket.sendMessage(ownerJid, {
         text:
           `🛑 Outbound loop breaker engaged.\n\n` +
           `Blocked similar message ${count} to ${destination} within ${seconds}s. ` +
           `Further sends are halted. Fix the source, then run ".panic resume" or restart Nexus-WA.\n` +
           `Message text is not included in this alert.`,
-      });
+      }, { nexusOwnerControl: true, nexusSkipTyping: true }), SEND_TIMEOUT_MS, 'loop-breaker alert');
     } catch (error) {
       this.logger.error(`loop breaker owner alert failed: ${error.message}`);
     }
   }
 
   async #pump() {
-    while (this.active < this.concurrency && this.queue.length) {
-      const item = this.queue.shift();
-
-      // Wait out the per-chat budget rather than dropping the message.
-      if (item.jid && !this.#withinBudget(item.jid)) {
-        const wait = this.#msUntilSlot(item.jid);
-        this.stats.throttledMs += wait;
-        this.logger.warn(
-          `rate limit hit for ${item.jid} — holding ${Math.round(wait)}ms ` +
-            `(${this.limitPerMin}/min)`
-        );
-        // Re-queue at the front and wait.
-        this.queue.unshift(item);
-        await sleep(wait);
-        continue;
-      }
-
-      if (!item.bypassSafetyMonitors) {
-        const trip = this.#checkLoop(item);
-        if (trip) {
-          await this.#tripLoopBreaker(item, trip);
+    if (this.pumping) return;
+    this.pumping = true;
+    try {
+      while (this.active < this.concurrency && this.queue.length) {
+        const item = this.queue.shift();
+        if (item.cancelled) continue;
+        if (!this.#allowObserveSend(item)) {
+          this.stats.dropped++;
+          const error = new Error('outbound blocked in observe mode');
+          error.deliveryBlocked = true;
+          item.reject(error);
           continue;
         }
-      }
 
-      this.active++;
-      this.#run(item).finally(() => {
-        this.active--;
-        this.#pump();
-      });
+        if (item.jid && !this.#withinBudget(item.jid)) {
+          const wait = this.#msUntilSlot(item.jid);
+          this.stats.throttledMs += wait;
+          this.logger.warn(
+            `rate limit hit for ${item.jid} — holding ${Math.round(wait)}ms ` +
+              `(${this.limitPerMin}/min)`
+          );
+          this.queue.unshift(item);
+          await sleep(wait);
+          continue;
+        }
+
+        if (!item.bypassSafetyMonitors && !item.bypassLoopBreaker) {
+          const trip = this.#checkLoop(item);
+          if (trip) {
+            await this.#tripLoopBreaker(item, trip);
+            continue;
+          }
+        }
+
+        this.active++;
+        void this.#run(item).finally(() => {
+          this.active--;
+          void this.#pump();
+        });
+      }
+    } finally {
+      this.pumping = false;
+      if (this.active < this.concurrency && this.queue.length) void this.#pump();
     }
   }
 
@@ -376,15 +487,46 @@ export class OutboundQueue {
     return Math.max(0, this.windowMs - (Date.now() - win[0]) + 50);
   }
 
+  #assertSendable(item) {
+    if (item.cancelled || (this.halted && !item.bypassSafetyMonitors)) {
+      throw new Error(`outbound halted by ${this.haltReason}`);
+    }
+    if (!this.#allowObserveSend(item)) {
+      const error = new Error('outbound blocked in observe mode');
+      error.deliveryBlocked = true;
+      throw error;
+    }
+    if (item.expiresAt !== null && Date.now() > item.expiresAt) {
+      const error = new Error('outbound send expired before transport');
+      error.expiredBeforeTransport = true;
+      throw error;
+    }
+    if (!this.rawSendMessage || !this.socket) throw new Error('outbound transport is unavailable');
+  }
+
   async #run(item) {
+    this.inFlight.add(item);
+    let timer = null;
     try {
-      if (this.typing && item.jid) await this.#simulateTyping(item.jid);
-      this.#notifyBeforeSend(item.jid, item.content);
-      const res = await item.task();
+      const delivery = this.#deliver(item);
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          item.cancelled = true;
+          const error = new Error(
+            item.submitted
+              ? `send outcome uncertain after ${Math.round(SEND_TIMEOUT_MS / 1000)}s`
+              : `send timed out before transport after ${Math.round(SEND_TIMEOUT_MS / 1000)}s`
+          );
+          error.deliveryUncertain = Boolean(item.submitted);
+          reject(error);
+        }, SEND_TIMEOUT_MS);
+      });
+      const res = await Promise.race([delivery, timeout]);
       if (item.jid) {
         this.windows.set(item.jid, [...(this.windows.get(item.jid) || []), Date.now()]);
       }
       this.stats.sent++;
+      this.lastSentAt = Date.now();
       if (!item.bypassSafetyMonitors) {
         const anomaly = this.#checkVolumeAnomaly();
         if (anomaly) await this.#alertVolumeAnomaly(anomaly);
@@ -393,6 +535,40 @@ export class OutboundQueue {
     } catch (err) {
       this.logger.error(`send failed: ${err.message}`);
       item.reject(err);
+    } finally {
+      clearTimeout(timer);
+      this.inFlight.delete(item);
+    }
+  }
+
+  async #deliver(item) {
+    // A self-chat is where capture alerts land when the linked account is also
+    // the owner. There is no human recipient to benefit from a typing signal.
+    this.#assertSendable(item);
+    if (this.typing && !item.skipTyping && item.jid && !isSelfDestination(this.socket, item.jid)) {
+      await this.#simulateTyping(item.jid);
+    }
+    // Nothing after a pre-send await may bypass a panic, timeout, observe-mode
+    // policy, or transport replacement.
+    this.#assertSendable(item);
+    const rawSend = this.rawSendMessage;
+    const transport = this.socket;
+    item.submitted = true;
+    this.#notifyBeforeSend(item.jid, item.content);
+    try {
+      return await rawSend(item.jid, item.content, item.transportOptions);
+    } finally {
+      // Presence is advisory and must never convert an acknowledged send into
+      // a scheduler retry. Bound it independently of the delivery result.
+      void this.#restorePrimaryPhonePresence(transport);
+    }
+  }
+
+  async #restorePrimaryPhonePresence(socket) {
+    try {
+      await withAdvisoryTimeout(Promise.resolve(socket?.sendPresenceUpdate?.('unavailable')), PRESENCE_TIMEOUT_MS);
+    } catch {
+      // Presence is advisory. Never hide a successful message send behind it.
     }
   }
 
@@ -411,7 +587,7 @@ export class OutboundQueue {
   }
 
   depth() {
-    return { queued: this.queue.length, active: this.active, halted: this.halted, ...this.stats };
+    return { queued: this.queue.length, active: this.active, inFlight: this.inFlight.size, halted: this.halted, ...this.stats };
   }
 }
 

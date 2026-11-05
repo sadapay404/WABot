@@ -133,25 +133,29 @@ export function resolveRecipient(value, contacts = null) {
   }
 
   const matches = contacts?.findByName?.(query) || [];
-  if (matches.length === 1) {
-    const row = matches[0];
-    const exact = String(row.local_name || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase() === query.toLocaleLowerCase();
+  const exact = matches.filter((row) => row.matchType === 'exact');
+  if (exact.length === 1) {
+    const row = exact[0];
     const phone = jidToPhone(row.jid);
     return {
       status: 'resolved',
       jid: normalizeJid(row.jid),
       label: row.local_name || contacts?.displayName?.(row.jid)?.name || phone || row.jid,
-      matchType: exact ? 'exact' : 'partial',
+      matchType: 'exact',
     };
   }
-  if (matches.length > 1) {
+  if (matches.length) {
     return {
+      // A non-exact result (even when it is the only nearby name) must be
+      // confirmed by its numbered choice. Never schedule/send to a guessed
+      // contact just because it was the closest spelling.
       status: 'ambiguous',
       query,
       matches: matches.map((row) => ({
         jid: normalizeJid(row.jid),
         label: row.local_name || contacts?.displayName?.(row.jid)?.name || row.jid,
         phone: jidToPhone(row.jid),
+        matchType: row.matchType || 'similar',
       })),
     };
   }
@@ -186,7 +190,7 @@ function targetPrompt(kind, state) {
       .map((item, index) => `${index + 1}. ${item.label}${item.phone ? ` (+${item.phone})` : ''}`)
       .join('\n');
     return [
-      `*Several contacts match “${state.targetQuery}”*`,
+      `*${state.targetMatches.length === 1 ? 'Closest contact match' : 'Several contacts match'} “${state.targetQuery}”*`,
       options,
       'Reply with a number from this list, the full saved name, or a phone number.',
     ].join('\n');

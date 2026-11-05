@@ -36,21 +36,79 @@ test('remote API-key entry writes atomically, redacts the value, and updates AI 
     assert.equal(editor.pending.size, 1, 'history replay must not consume the pending secret');
     assert.equal(fs.existsSync(file), false);
 
-    const secret = 'test-key-must-not-be-logged';
+    const fixtureValue = 'test-key-must-not-be-logged';
     const consumed = await editor.consumePending({
-      msg: { sender: OWNER, jid: OWNER, text: secret, upsertType: 'notify', isGroup: false },
+      msg: { sender: OWNER, jid: OWNER, text: fixtureValue, upsertType: 'notify', isGroup: false },
       socket: { async sendMessage(jid, content) { sent.push({ jid, content }); } },
       isOwner: true,
     });
     assert.equal(consumed, true);
-    assert.equal(config.ai.keys.groq, secret, 'new key is active in the running AI client');
+    assert.equal(config.ai.keys.groq, fixtureValue, 'new key is active in the running AI client');
     assert.match(fs.readFileSync(file, 'utf8'), /GROQ_API_KEY=/);
     assert.equal(fs.statSync(file).mode & 0o777, 0o600, 'configuration file is owner-readable only');
-    assert.doesNotMatch(sent.at(-1).content.text, new RegExp(secret));
-    assert.doesNotMatch(editor.status(), new RegExp(secret));
+    assert.doesNotMatch(sent.at(-1).content.text, new RegExp(fixtureValue));
+    assert.doesNotMatch(editor.status(), new RegExp(fixtureValue));
   } finally {
     if (original === undefined) delete process.env.GROQ_API_KEY;
     else process.env.GROQ_API_KEY = original;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('pending secret entry accepts the configured PN owner when WhatsApp switches the chat to LID', async () => {
+  const { dir, config, editor, file } = fixture();
+  const original = process.env.GROQ_API_KEY;
+  const OWNER_LID = '123456789012345@lid';
+  try {
+    editor.startSecret({ ownerJid: OWNER, chatJid: OWNER, key: 'GROQ_API_KEY' });
+    const consumed = await editor.consumePending({
+      msg: {
+        sender: OWNER_LID,
+        senderAlt: OWNER,
+        jid: OWNER_LID,
+        jidAlt: OWNER,
+        text: 'lid-alias-key',
+        upsertType: 'notify',
+        isGroup: false,
+      },
+      socket: { async sendMessage() {} },
+      isOwner: true,
+    });
+    assert.equal(consumed, true);
+    assert.equal(config.ai.keys.groq, 'lid-alias-key');
+    assert.match(fs.readFileSync(file, 'utf8'), /GROQ_API_KEY=/);
+  } finally {
+    if (original === undefined) delete process.env.GROQ_API_KEY;
+    else process.env.GROQ_API_KEY = original;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Cloudflare image account and token can be configured without showing either value', async () => {
+  const { dir, config, editor, file } = fixture();
+  const originalToken = process.env.CLOUDFLARE_API_TOKEN;
+  const originalAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
+  try {
+    editor.setValue('CLOUDFLARE_ACCOUNT_ID', 'a1b2c3d4e5f6');
+    assert.equal(config.imageGen.accountId, 'a1b2c3d4e5f6');
+    editor.startSecret({ ownerJid: OWNER, chatJid: OWNER, key: 'CLOUDFLARE_API_TOKEN' });
+    await editor.consumePending({
+      msg: { sender: OWNER, jid: OWNER, text: 'cf-private-token', upsertType: 'notify', isGroup: false },
+      socket: { async sendMessage() {} },
+      isOwner: true,
+    });
+    assert.equal(config.imageGen.apiToken, 'cf-private-token');
+    assert.match(editor.status(), /Cloudflare image account: set \(hidden\)/);
+    assert.match(editor.status(), /Image generation: ready/);
+    assert.doesNotMatch(editor.status(), /a1b2c3d4e5f6|cf-private-token/);
+    assert.match(fs.readFileSync(file, 'utf8'), /CLOUDFLARE_API_TOKEN=/);
+    editor.unsetValue('CLOUDFLARE_API_TOKEN');
+    assert.equal(config.imageGen.apiToken, '');
+  } finally {
+    if (originalToken === undefined) delete process.env.CLOUDFLARE_API_TOKEN;
+    else process.env.CLOUDFLARE_API_TOKEN = originalToken;
+    if (originalAccount === undefined) delete process.env.CLOUDFLARE_ACCOUNT_ID;
+    else process.env.CLOUDFLARE_ACCOUNT_ID = originalAccount;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -114,6 +172,19 @@ test('owner additions update the running whitelist; the final owner cannot be re
   } finally {
     if (original === undefined) delete process.env.OWNER_JIDS;
     else process.env.OWNER_JIDS = original;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('public AI policy is source-controlled and cannot be changed through .env commands', () => {
+  const { dir, config, editor } = fixture();
+  try {
+    assert.equal('publicEnabled' in config.ai, false);
+    assert.equal('publicGroups' in config.ai, false);
+    assert.throws(() => editor.setValue('PUBLIC_AI_ENABLED', 'false'), /not remotely editable/);
+    assert.throws(() => editor.setValue('SELF_AI_COMMANDS', 'false'), /not remotely editable/);
+    assert.match(editor.status(), /built into live mode/);
+  } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

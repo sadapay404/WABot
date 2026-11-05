@@ -8,6 +8,7 @@ import { AskContext } from '../src/core/askContext.js';
 import { MessageCache } from '../src/core/messageCache.js';
 import { ContactStore } from '../src/core/contactStore.js';
 import { normalize } from '../src/core/message.js';
+import { PendingPrompts } from '../src/core/pendingPrompts.js';
 import { localDateRange } from '../src/lib/when.js';
 import askPlugin, { redactText } from '../src/plugins/ask.js';
 
@@ -27,7 +28,7 @@ function store(cache, id, jid, text, { fromMe = false, ts = Date.now(), remoteJi
   cache.store(raw, normalize(raw), SELF);
 }
 
-function context({ args, db, askContext, contacts, ai, replies, config }) {
+function context({ args, db, askContext, contacts, ai, replies, config, prompts = null }) {
   return {
     args,
     sender: OWNER,
@@ -35,7 +36,7 @@ function context({ args, db, askContext, contacts, ai, replies, config }) {
     isGroup: false,
     config,
     db,
-    bot: { askContext, contacts, ai, selfJid: SELF },
+    bot: { askContext, contacts, ai, prompts, selfJid: SELF },
     reply: async (text) => replies.push(String(text)),
   };
 }
@@ -205,6 +206,60 @@ test('.ask accepts multiple explicit direct-phone selections', async () => {
   assert.match(request.prompt, /Alice selected this chat/);
   assert.match(request.prompt, /Bob selected this chat/);
   assert.match(replies.at(-1), /Using 2 text messages from Alice .*Bob/);
+});
+
+test('.ask resolves one exact multi-word saved name, but requires a numbered choice for partial or similar names', async () => {
+  const db = await getMemoryDb();
+  const cache = new MessageCache(db, quiet);
+  const contacts = new ContactStore(db, quiet);
+  const AYESHA_KHAN = '923001234561@s.whatsapp.net';
+  const AYESHA_NOOR = '923001234562@s.whatsapp.net';
+  contacts.upsertMany([
+    { id: AYESHA_KHAN, name: 'Ayesha Khan' },
+    { id: AYESHA_NOOR, name: 'Ayesha Noor' },
+  ]);
+  store(cache, 'AK-1', AYESHA_KHAN, 'Khan exact-name transcript.');
+  store(cache, 'AN-1', AYESHA_NOOR, 'Noor chosen transcript.');
+  const askContext = new AskContext({ db });
+  const config = buildConfig({ mode: 'dry-run' });
+  config.safety.ownerJids = [OWNER];
+  const replies = [];
+  let request;
+  const ai = {
+    provider: 'groq',
+    configured: () => true,
+    async complete(value) { request = value; return 'Answer'; },
+  };
+
+  await askPlugin.execute(context({
+    args: ['Ayesha', 'Khan', '10', 'What', 'was', 'said?'],
+    db, askContext, contacts, ai, replies, config,
+  }));
+  assert.match(request.prompt, /Khan exact-name transcript/);
+  assert.doesNotMatch(request.prompt, /Noor chosen transcript/);
+
+  const prompts = new PendingPrompts();
+  await askPlugin.execute(context({
+    args: ['Ayesha', '10', 'What', 'was', 'said?'],
+    db, askContext, contacts, ai, replies, config, prompts,
+  }));
+  assert.match(replies.at(-1), /Saved contact matches/);
+  assert.match(replies.at(-1), /Ayesha Khan/);
+  assert.match(replies.at(-1), /Ayesha Noor/);
+  assert.ok(prompts.peek(OWNER), 'a partial saved name must wait for an explicit owner choice');
+  assert.doesNotMatch(replies.at(-1), /Answer/);
+
+  const pending = prompts.take(OWNER);
+  await pending.onReply({ text: '2', reply: async (text) => replies.push(String(text)) });
+  assert.match(request.prompt, /Noor chosen transcript/);
+  assert.doesNotMatch(request.prompt, /Khan exact-name transcript/);
+
+  await askPlugin.execute(context({
+    args: ['Ayesha', 'Kha', '10', 'What', 'was', 'said?'],
+    db, askContext, contacts, ai, replies, config, prompts,
+  }));
+  assert.match(replies.at(-1), /Closest saved contact match/);
+  assert.ok(prompts.peek(OWNER), 'a conservative typo match must not be selected automatically');
 });
 
 test('.ask locally redacts phone numbers, emails and specified phrases before provider transmission', async () => {

@@ -12,7 +12,7 @@
 set -uo pipefail
 
 REPO_URL="${NEXUS_REPO:-https://github.com/sadapay404/WABot.git}"
-REPO_BRANCH="${NEXUS_BRANCH:-arena/fa15663b-wabot}"
+REPO_BRANCH="${NEXUS_BRANCH:-arena/3032c08c-wabot}"
 APP_DIR="$HOME/nexus-wa"
 
 say()  { printf '\n\033[1;36m▸ %s\033[0m\n' "$1"; }

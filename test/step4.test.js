@@ -20,7 +20,7 @@ const quiet = createLogger('fatal');
 const PASS = 'correct horse battery';
 
 /** A rig: real SessionBackup against a temp dir, plus a fake remote store. */
-function rig({ kind = 'http', fetchImpl = null, extra = {} } = {}) {
+function rig({ kind = 'http', fetchImpl = null, extra = {}, requestTimeoutMs } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nwb-vault-'));
   const sessionDir = path.join(tmp, 'auth');
   fs.mkdirSync(sessionDir, { recursive: true });
@@ -66,6 +66,7 @@ function rig({ kind = 'http', fetchImpl = null, extra = {} } = {}) {
       ...extra,
     },
     fetchImpl: fakeFetch,
+    requestTimeoutMs,
   });
 
   return { tmp, sessionDir, dbPath, backup, vault, store, calls };
@@ -185,6 +186,42 @@ test('vault: a failing upload never throws out of the timer', async () => {
   const res = await vault.push();
   assert.equal(res, false);
   assert.equal(vault.stats.failed, 1);
+});
+
+test('vault: an unresponsive remote is bounded so boot cannot hang forever', async () => {
+  const never = () => new Promise(() => {});
+  const { vault } = rig({ fetchImpl: never, requestTimeoutMs: 25 });
+  const started = Date.now();
+  assert.equal(await vault.restoreIfEmpty(false), false);
+  assert.ok(Date.now() - started < 500, 'the restore attempt must fail promptly');
+  assert.equal(vault.stats.failed, 1);
+});
+
+test('vault: request deadline remains active while a streamed response body is consumed', async () => {
+  const bytes = Buffer.from('streamed encrypted bytes');
+  let aborted = false;
+  const { vault } = rig({
+    requestTimeoutMs: 80,
+    fetchImpl: async (_url, init) => ({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        aborted = Boolean(init.signal.aborted);
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      },
+    }),
+  });
+  const blob = await vault.pull();
+  assert.deepEqual(blob, bytes);
+  assert.equal(aborted, false, 'the response must not be aborted immediately after headers');
+});
+
+test('vault: a valid local database independently blocks automatic restore', async () => {
+  const { vault } = rig();
+  await vault.push();
+  assert.equal(await vault.restoreIfEmpty(false, true), false);
+  assert.equal(vault.stats.restored, 0);
 });
 
 test('vault: a non-2xx upload response is a failure, not a silent success', async () => {

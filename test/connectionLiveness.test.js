@@ -1,0 +1,127 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  WhatsAppConnection, classifyDisconnect, livenessAction, preservePrimaryPhoneNotifications, parseBaileysVersionSource,
+  fetchBaileysVersionFromGitHub, SILENCE_MS, CONNECT_STALL_MS, RECONNECT_MAX_DELAY_MS, backoffDelay,
+} from '../src/core/whatsapp.js';
+import { createLogger } from '../src/core/logger.js';
+
+const quiet = createLogger('fatal');
+const cfg = { wa: { sessionDir: '/tmp/nexus-liveness-unused' }, telegram: { enabled: false } };
+const NOW = 1_000_000_000_000;
+
+test('GitHub version source parser accepts public Baileys Defaults and rejects malformed input', () => {
+  assert.deepEqual(parseBaileysVersionSource('const version = [2, 3000, 1234567890];'), [2, 3000, 1234567890]);
+  assert.throws(() => parseBaileysVersionSource('const version = unknown;'), /did not contain/);
+});
+
+test('version check uses the GitHub API rather than raw.githubusercontent.com', async () => {
+  let seen = null;
+  const controller = new AbortController();
+  const version = await fetchBaileysVersionFromGitHub({
+    signal: controller.signal,
+    fetchImpl: async (url, init) => {
+      seen = { url, init };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ content: Buffer.from('const version = [2, 3000, 1234567890];').toString('base64') }),
+      };
+    },
+  });
+  assert.deepEqual(version, [2, 3000, 1234567890]);
+  assert.match(seen.url, /^https:\/\/api\.github\.com\/repos\/WhiskeySockets\/Baileys\/contents\//);
+  assert.ok(seen.init.signal, 'the version check is abortable');
+});
+
+test('disconnect classification is stable with or without Baileys enum aliases', () => {
+  const enumLike = { connectionClosed: 428, forbidden: 403, connectionReplaced: 440 };
+  for (const reasons of [undefined, enumLike]) {
+    assert.equal(classifyDisconnect(428, reasons), 'restart');
+    assert.equal(classifyDisconnect(408, reasons), 'restart');
+    assert.equal(classifyDisconnect(500, reasons), 'restart');
+    assert.equal(classifyDisconnect(401, reasons), 'relogin');
+    assert.equal(classifyDisconnect(440, reasons), 'replaced');
+  }
+});
+
+test('a sustained transport outage cools reconnect attempts to a five-minute ceiling', () => {
+  const delay = backoffDelay(100);
+  assert.ok(delay >= RECONNECT_MAX_DELAY_MS / 2, `expected a long outage delay, got ${delay}ms`);
+  assert.ok(delay <= RECONNECT_MAX_DELAY_MS, `must not exceed the five-minute ceiling, got ${delay}ms`);
+});
+
+test('the companion explicitly becomes unavailable so the primary phone remains notifiable', async () => {
+  const calls = [];
+  assert.equal(await preservePrimaryPhoneNotifications({
+    async sendPresenceUpdate(...args) { calls.push(args); },
+  }), true);
+  assert.deepEqual(calls, [['unavailable']]);
+  assert.equal(await preservePrimaryPhoneNotifications({}), false);
+});
+
+test('a healthy open link with recent frames is left alone', () => {
+  assert.equal(livenessAction({ state: 'open', now: NOW, lastFrameAt: NOW - 30_000, stateSince: NOW - 999_999 }), null);
+});
+
+test('an open link is not force-cycled solely because user traffic is quiet', () => {
+  const v = livenessAction({ state: 'open', now: NOW, lastFrameAt: NOW - SILENCE_MS - 1, stateSince: NOW - 9e6 });
+  assert.equal(v, null, 'Baileys protocol keepalive owns healthy-open liveness');
+});
+
+test('a connect attempt stalled past CONNECT_STALL_MS is recycled, unless awaiting a link', () => {
+  const stalled = { state: 'connecting', now: NOW, lastFrameAt: 0, stateSince: NOW - CONNECT_STALL_MS - 1 };
+  assert.equal(livenessAction(stalled).action, 'reconnect');
+  assert.equal(livenessAction({ ...stalled, awaitingLink: true }), null);
+});
+
+test('a closed state with nothing pending gets a reconnect scheduled', () => {
+  assert.equal(livenessAction({ state: 'closed', now: NOW, lastFrameAt: 0, stateSince: NOW }).action, 'schedule');
+  assert.equal(livenessAction({ state: 'closed', now: NOW, lastFrameAt: 0, stateSince: NOW, reconnectPending: true }), null);
+});
+
+test('forceReconnect runs connect once, even when called twice', async () => {
+  const conn = new WhatsAppConnection({ config: cfg, logger: quiet });
+  let calls = 0;
+  conn.connect = async () => { calls++; return null; };
+  conn.forceReconnect('test one', { immediate: true });
+  assert.equal(conn.reconnectTimer?.hasRef?.(), true,
+    'a reconnect timer must keep Node alive after a socket closes');
+  conn.forceReconnect('test two', { immediate: true });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(calls, 1);
+  await conn.stop();
+});
+
+test('a socket that was replaced is ended and never reconnects by itself', async () => {
+  const conn = new WhatsAppConnection({ config: cfg, logger: quiet });
+  let calls = 0;
+  conn.connect = async () => { calls++; return null; };
+  let ended = 0;
+  conn.socket = { end: () => { ended++; } };
+  conn.forceReconnect('stall', { immediate: true });
+  assert.equal(ended, 1);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(calls, 1);
+  await conn.stop();
+});
+
+test('a failed reconnect schedules another attempt, but a fatal one halts', async () => {
+  const conn = new WhatsAppConnection({ config: cfg, logger: quiet });
+  let calls = 0;
+  conn.connect = async () => { calls++; throw new Error('boom'); };
+  conn.forceReconnect('retry test', { immediate: true });
+  // The retry waits out a jittered backoff (3–6s), so poll rather than sleep a fixed time.
+  for (let i = 0; i < 160 && calls < 2; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(calls >= 2, `expected a retry, saw ${calls} call(s)`);
+  await conn.stop();
+
+  const fatal = new WhatsAppConnection({ config: cfg, logger: quiet });
+  let fcalls = 0;
+  fatal.connect = async () => { fcalls++; const e = new Error('config'); e.fatal = true; throw e; };
+  fatal.forceReconnect('fatal test', { immediate: true });
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(fatal.halted, true);
+  assert.equal(fcalls, 1);
+  await fatal.stop();
+});

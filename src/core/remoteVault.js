@@ -24,6 +24,8 @@
  */
 
 const GITHUB_API = 'https://api.github.com';
+/** A dead vault endpoint must never hold boot/recovery hostage indefinitely. */
+export const VAULT_REQUEST_TIMEOUT_MS = 15_000;
 
 export class RemoteVault {
   /**
@@ -33,12 +35,14 @@ export class RemoteVault {
    * @param {object} deps.cfg      { kind, url, token, passphrase, path, intervalMin }
    * @param {Function} [deps.fetchImpl]
    * @param {Function} [deps.onAlert]  called with a message when pushes are failing
+   * @param {number} [deps.requestTimeoutMs] bounded network wait; injectable for tests
    */
-  constructor({ logger, backup, cfg, fetchImpl = null, onAlert = null, alertAfter = 3 }) {
+  constructor({ logger, backup, cfg, fetchImpl = null, onAlert = null, alertAfter = 3, requestTimeoutMs = VAULT_REQUEST_TIMEOUT_MS }) {
     this.logger = logger.child({ scope: 'vault' });
     this.backup = backup;
     this.cfg = cfg;
     this.fetch = fetchImpl || globalThis.fetch;
+    this.requestTimeoutMs = Math.max(10, Number(requestTimeoutMs) || VAULT_REQUEST_TIMEOUT_MS);
     this.timer = null;
     this.stats = { pushed: 0, pulled: 0, failed: 0, restored: 0, skipped: 0 };
     this.onAlert = onAlert;
@@ -46,6 +50,7 @@ export class RemoteVault {
     /** Consecutive push failures since the last success. */
     this.consecutiveFailures = 0;
     this.alerted = false;
+    this.pushing = null;
   }
 
   /**
@@ -90,6 +95,12 @@ export class RemoteVault {
    * @returns {Promise<boolean>}
    */
   async push() {
+    if (this.pushing) return this.pushing;
+    this.pushing = this.#push().finally(() => { this.pushing = null; });
+    return this.pushing;
+  }
+
+  async #push() {
     if (!this.enabled()) {
       this.stats.skipped++;
       return false;
@@ -104,6 +115,7 @@ export class RemoteVault {
       this.consecutiveFailures = 0;
       if (this.alerted) {
         this.alerted = false;
+    this.pushing = null;
         this.onAlert?.('✅ *Backup working again.* Your session is being saved to the vault.');
       }
       this.logger.info(`pushed ${made.bytes}B backup to the remote vault`);
@@ -155,13 +167,13 @@ export class RemoteVault {
    * @param {boolean} localSessionExists
    * @returns {Promise<boolean>} whether a restore happened
    */
-  async restoreIfEmpty(localSessionExists) {
+  async restoreIfEmpty(localSessionExists, localDatabaseExists = false) {
     if (!this.enabled()) {
       this.stats.skipped++;
       return false;
     }
-    if (localSessionExists) {
-      this.logger.info('local session present — not touching it');
+    if (localSessionExists || localDatabaseExists) {
+      this.logger.info(`local ${localSessionExists ? 'session' : 'database'} present — not touching it`);
       return false;
     }
     const blob = await this.pull();
@@ -205,6 +217,32 @@ export class RemoteVault {
   }
 
   // ── backends ──────────────────────────────────────────────────────
+  /**
+   * Bound the complete remote operation, including streamed response-body
+   * consumption. Aborting immediately after fetch resolves cancels ordinary
+   * streamed GETs before callers can read them.
+   */
+  async #request(url, init = {}, consume = async (response) => response) {
+    const controller = new AbortController();
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error(`remote vault request timed out after ${Math.round(this.requestTimeoutMs / 1000)}s`));
+      }, this.requestTimeoutMs);
+    });
+    try {
+      const response = await Promise.race([
+        Promise.resolve(this.fetch(url, { ...init, signal: init.signal || controller.signal })),
+        timeout,
+      ]);
+      return await Promise.race([Promise.resolve(consume(response)), timeout]);
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
+    }
+  }
+
   async #upload(blob) {
     if (this.cfg.kind === 'github') return this.#githubPut(blob);
     return this.#httpPut(blob);
@@ -226,7 +264,7 @@ export class RemoteVault {
 
   async #githubGet() {
     const { owner, repo, path } = this.#githubParts();
-    const res = await this.fetch(
+    return this.#request(
       `${GITHUB_API}/repos/${owner}/${repo}/contents/${path}`,
       {
         headers: {
@@ -234,13 +272,14 @@ export class RemoteVault {
           accept: 'application/vnd.github+json',
           'x-github-api-version': '2022-11-28',
         },
+      },
+      async (res) => {
+        if (res.status === 404) throw new Error('404 not found');
+        if (!res.ok) throw new Error(`GitHub responded ${res.status}`);
+        const json = await res.json();
+        return Buffer.from(String(json.content || '').replace(/\s/g, ''), 'base64');
       }
     );
-    if (res.status === 404) throw new Error('404 not found');
-    if (!res.ok) throw new Error(`GitHub responded ${res.status}`);
-    const json = await res.json();
-    // The Contents API returns base64 with newlines folded in.
-    return Buffer.from(String(json.content || '').replace(/\s/g, ''), 'base64');
   }
 
   async #githubPut(blob) {
@@ -256,13 +295,15 @@ export class RemoteVault {
     // Updating an existing file needs its current sha, or GitHub rejects it.
     let sha;
     try {
-      const cur = await this.fetch(url, { headers });
-      if (cur.ok) sha = (await cur.json()).sha;
+      const cur = await this.#request(url, { headers }, async (res) =>
+        res.ok ? { ok: true, body: await res.json() } : { ok: false }
+      );
+      if (cur.ok) sha = cur.body?.sha;
     } catch {
       /* first upload — nothing to update */
     }
 
-    const res = await this.fetch(url, {
+    await this.#request(url, {
       method: 'PUT',
       headers,
       body: JSON.stringify({
@@ -270,29 +311,34 @@ export class RemoteVault {
         content: blob.toString('base64'),
         ...(sha ? { sha } : {}),
       }),
+    }, async (res) => {
+      if (!res.ok) throw new Error(`GitHub rejected the upload (${res.status})`);
+      return true;
     });
-    if (!res.ok) throw new Error(`GitHub rejected the upload (${res.status})`);
   }
 
   async #httpGet() {
-    const res = await this.fetch(this.cfg.url, {
+    return this.#request(this.cfg.url, {
       headers: { authorization: `Bearer ${this.cfg.token}` },
+    }, async (res) => {
+      if (res.status === 404) throw new Error('404 not found');
+      if (!res.ok) throw new Error(`remote responded ${res.status}`);
+      return Buffer.from(await res.arrayBuffer());
     });
-    if (res.status === 404) throw new Error('404 not found');
-    if (!res.ok) throw new Error(`remote responded ${res.status}`);
-    return Buffer.from(await res.arrayBuffer());
   }
 
   async #httpPut(blob) {
-    const res = await this.fetch(this.cfg.url, {
+    return this.#request(this.cfg.url, {
       method: 'PUT',
       headers: {
         authorization: `Bearer ${this.cfg.token}`,
         'content-type': 'application/octet-stream',
       },
       body: blob,
+    }, async (res) => {
+      if (!res.ok) throw new Error(`remote rejected the upload (${res.status})`);
+      return true;
     });
-    if (!res.ok) throw new Error(`remote rejected the upload (${res.status})`);
   }
 }
 

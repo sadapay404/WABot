@@ -5,13 +5,9 @@
  * patched on a bot that is supposed to run unattended for weeks.
  *
  * Auth policy, matched to the risk of what is on screen:
- *   • dry-run  → no token required. The data is synthetic and there is no
- *                account attached, so friction would only hide the preview.
- *   • observe / live → DASHBOARD_TOKEN is REQUIRED. The page shows real phone
- *                numbers, contact names and message contents, which is exactly
- *                the data you would not want exposed on a public PaaS URL.
- * If no token is set in those modes the server refuses to start rather than
- * quietly serving your contact list to the internet.
+ * Every mode requires DASHBOARD_TOKEN. A mutable runtime mode is not evidence
+ * that the database, logs, or transport are synthetic, so an unauthenticated
+ * preview could otherwise expose real state on a public PaaS URL.
  */
 
 import http from 'node:http';
@@ -138,7 +134,7 @@ export function buildState(app) {
     logs: (logs?.tail?.(80) || []).slice().reverse(),
 
     telegram: { enabled: Boolean(config.telegram.enabled), ownerId: config.telegram.ownerId ? '***' : '' },
-    dashboard: { url: app.dashboardUrl || null, protected: !config.isDryRun },
+    dashboard: { url: app.dashboardUrl || null, protected: true },
   };
 }
 
@@ -156,32 +152,33 @@ export class Dashboard {
     this.logger = logger.child({ scope: 'dashboard' });
     this.port = port;
     this.token = process.env.DASHBOARD_TOKEN || '';
+    this.sessionToken = crypto.randomBytes(32).toString('hex');
     this.server = null;
     this.html = null;
   }
 
-  #authed(req) {
-    // dry-run holds only synthetic data — see the module header.
-    if (this.config.isDryRun) return true;
-    if (!this.token) return false;
-    const url = new URL(req.url, 'http://localhost');
-    const given = req.headers['x-dashboard-token'] || url.searchParams.get('token') || '';
+  #tokenMatches(value) {
     try {
-      return (
-        given.length > 0 &&
-        crypto.timingSafeEqual(Buffer.from(String(given)), Buffer.from(this.token))
-      );
+      return Boolean(value) && crypto.timingSafeEqual(Buffer.from(String(value)), Buffer.from(this.token));
     } catch {
-      return false; // length mismatch throws; treat as unauthorised
+      return false;
     }
   }
 
+  #authed(req) {
+    if (!this.token) return false;
+    const url = new URL(req.url, 'http://localhost');
+    const cookie = String(req.headers.cookie || '')
+      .split(/;\s*/)
+      .find((part) => part.startsWith('nexus_dashboard_session='))
+      ?.slice('nexus_dashboard_session='.length);
+    return this.#tokenMatches(cookie) || this.#tokenMatches(req.headers['x-dashboard-token']) || this.#tokenMatches(url.searchParams.get('token'));
+  }
+
+
   async listen(host = '0.0.0.0') {
-    if (!this.config.isDryRun && !this.token) {
-      throw new Error(
-        'Refusing to start the dashboard in a connected mode without DASHBOARD_TOKEN. ' +
-          'It would expose real phone numbers and contact names.'
-      );
+    if (!this.token) {
+      throw new Error('Refusing to start the dashboard without DASHBOARD_TOKEN. Runtime mode cannot prove storage is synthetic.');
     }
     this.html = fs.readFileSync(path.join(HERE, 'index.html'), 'utf8');
 
@@ -197,21 +194,32 @@ export class Dashboard {
   }
 
   url() {
-    if (!this.port) return null;
-    const base = `http://localhost:${this.port}/`;
-    return this.config.isDryRun || !this.token ? base : `${base}?token=${this.token}`;
+    // Never return/log a bearer-bearing URL. Authenticate once with a private
+    // token entry and the server exchanges it for an HttpOnly local session.
+    return this.port ? `http://localhost:${this.port}/` : null;
   }
 
   #handle(req, res) {
     const url = new URL(req.url, 'http://localhost');
 
     if (url.pathname === '/healthz') {
-      return this.#json(res, 200, { ok: true, mode: this.config.mode });
+      // HTTP liveness only. It intentionally makes no WhatsApp-readiness claim.
+      return this.#json(res, 200, { ok: true, service: 'dashboard' });
     }
 
+    // A one-time query/header token is exchanged for an HttpOnly session then
+    // removed from the visible URL before the app polls its API.
+    if (url.pathname === '/' && this.#tokenMatches(url.searchParams.get('token'))) {
+      res.writeHead(302, {
+        location: '/',
+        'set-cookie': `nexus_dashboard_session=${this.sessionToken}; HttpOnly; SameSite=Strict; Path=/`,
+        'cache-control': 'no-store',
+      });
+      return res.end();
+    }
     if (!this.#authed(req)) {
-      res.writeHead(401, { 'content-type': 'text/plain' });
-      return res.end('unauthorised: set DASHBOARD_TOKEN and pass ?token=…');
+      res.writeHead(401, { 'content-type': 'text/plain', 'cache-control': 'no-store' });
+      return res.end('unauthorised: authenticate with DASHBOARD_TOKEN');
     }
 
     if (url.pathname === '/api/state') {

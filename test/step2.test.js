@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 import { getMemoryDb, getSetting, setSetting } from '../src/database/index.js';
 import { buildConfig } from '../src/config/index.js';
-import { createLogger } from '../src/core/logger.js';
+import { createLogger, summarizeBaileysFailure } from '../src/core/logger.js';
 import { LogBuffer } from '../src/core/logBuffer.js';
 import {
   normalizeJid,
@@ -156,6 +156,63 @@ test('contacts: falls back through verified → notify → phone → jid', async
   assert.equal(cs.displayName('61412345678@s.whatsapp.net').source, 'phone');
 
   assert.equal(cs.displayName('120363000000000000@g.us').source, 'jid');
+});
+
+test('contacts: persistent owner names and observed PN/LID aliases override profiles in every identity form', async () => {
+  const db = await getMemoryDb();
+  const cs = new ContactStore(db, quiet);
+  const pn = '923001234567@s.whatsapp.net';
+  const lid = '123456789012345@lid';
+  cs.upsert({ id: pn, name: 'WhatsApp Saved Name', notify: 'Their Push Name' });
+  cs.setManualName(pn, 'Ayesha — Doctor');
+  cs.linkAliases(lid, pn);
+  cs.upsert({ id: lid, name: 'LID profile label', notify: 'Changed remote profile' });
+
+  const byLid = cs.profile(lid);
+  assert.equal(byLid.jid, pn, 'the observed PN remains the canonical stored identity');
+  assert.equal(byLid.name, 'Ayesha — Doctor');
+  assert.equal(byLid.nameSource, 'manual');
+  assert.equal(byLid.phoneE164, '+923001234567', 'an LID alert uses its explicit PN alias');
+  assert.equal(cs.displayName(lid).name, 'Ayesha — Doctor');
+  assert.equal(cs.displayName(lid).source, 'manual');
+
+  cs.clearManualName(lid);
+  assert.equal(cs.profile(pn).name, 'WhatsApp Saved Name', 'removal restores synced-name fallback only');
+});
+
+test('contacts: unsafe alias fan-out is repaired before it can show the owner name for everyone', async () => {
+  const db = await getMemoryDb();
+  const cs = new ContactStore(db, quiet);
+  const ownerPn = '923251111111@s.whatsapp.net';
+  const otherPn = '923252222222@s.whatsapp.net';
+  const lidOne = '111111111111111@lid';
+  const lidTwo = '222222222222222@lid';
+  cs.upsert({ id: ownerPn, name: 'Awais 兄弟' });
+  cs.upsert({ id: otherPn, name: 'Real Contact' });
+
+  // Model the old faulty state: several unrelated LIDs all pointed at one
+  // phone identity, causing that one saved name/number to leak everywhere.
+  db.prepare('INSERT INTO contact_aliases(alias_jid, canonical_jid, updated_at) VALUES (?,?,?)')
+    .run(lidOne, ownerPn, Date.now());
+  db.prepare('INSERT INTO contact_aliases(alias_jid, canonical_jid, updated_at) VALUES (?,?,?)')
+    .run(lidTwo, ownerPn, Date.now());
+  assert.equal(cs.repairAliases(), 2);
+  assert.equal(cs.canonicalJid(lidOne), lidOne);
+  assert.equal(cs.canonicalJid(lidTwo), lidTwo);
+  assert.notEqual(cs.displayName(lidOne).name, 'Awais 兄弟');
+
+  // Only one LID and one PN are a valid relationship. A second live LID
+  // replaces an earlier one instead of creating another fan-out.
+  assert.equal(cs.linkAliases(lidOne, ownerPn), ownerPn);
+  assert.equal(cs.linkAliases(lidTwo, ownerPn), ownerPn);
+  assert.equal(cs.canonicalJid(lidOne), lidOne);
+  assert.equal(cs.canonicalJid(lidTwo), ownerPn);
+
+  // Two phones and group IDs are not aliases and must never contaminate names.
+  cs.linkAliases(ownerPn, otherPn);
+  cs.linkAliases('120363000000000001@g.us', ownerPn);
+  assert.equal(cs.canonicalJid(otherPn), otherPn);
+  assert.equal(cs.displayName(otherPn).name, 'Real Contact');
 });
 
 // ══════════════════════════════════════════════════════════════════
@@ -403,7 +460,7 @@ test('formatDeletion: media is labelled as voice note / photo', () => {
     record: { kind: 'image', media_mimetype: 'image/jpeg', has_media: 1 },
   });
   assert.match(photo, /Deleted photo/);
-  assert.match(photo, /Forwarding the photo below/);
+  assert.match(photo, /attached in reply to this alert/);
 });
 
 test('formatDeletion: says so honestly when content was never captured', () => {
@@ -412,7 +469,7 @@ test('formatDeletion: says so honestly when content was never captured', () => {
     profile: { name: '+61412345678', phoneE164: '+61412345678' },
     record: null,
   });
-  assert.match(text, /Content not captured/);
+  assert.match(text, /No recoverable content was retained/);
 });
 
 // ── Full anti-delete flow over the real mock transport ────────────
@@ -451,6 +508,25 @@ test('anti-delete: end-to-end — message deleted, alert lands in your own chat'
   assert.match(sent.text, /the code is 4417/);
 });
 
+test('anti-delete: duplicate revoke events notify only once', async () => {
+  const { socket, ad } = await antiDeleteRig();
+  const raw = rawMsg('DEL-DUPLICATE', 'one original');
+  ad.onMessage(raw, normMsg('DEL-DUPLICATE', 'one original'));
+  const revoke = {
+    key: { remoteJid: MOM, fromMe: false, id: 'RV-DUPLICATE' },
+    update: { message: { protocolMessage: { type: 0, stanzaId: 'DEL-DUPLICATE' } } },
+  };
+
+  const results = await Promise.all([ad.onUpdate(revoke), ad.onUpdate(revoke)]);
+  assert.equal(results.filter(Boolean).length, 1);
+  assert.equal(socket.outbox.length, 1, 'upsert/update replay must not duplicate the owner alert');
+  assert.equal(ad.stats.detected, 1);
+  assert.equal(
+    ad.db.prepare('SELECT COUNT(*) AS count FROM deleted_messages WHERE stanza_id = ?').get('DEL-DUPLICATE').count,
+    1
+  );
+});
+
 test('anti-delete: forwards the actual deleted media', async () => {
   const { socket, ad } = await antiDeleteRig();
   const raw = rawMsg('DEL2', 'caption here');
@@ -476,6 +552,7 @@ test('anti-delete: forwards the actual deleted media', async () => {
   assert.equal(ad.stats.mediaForwarded, 1);
   assert.equal(socket.outbox.length, 2, 'alert + the media itself');
   assert.equal(socket.outbox[1].kind, 'image');
+  assert.equal(socket.outbox[1].quoted, true, 'recovered media replies to its alert');
 });
 
 test('anti-delete: media forwarding can be switched off', async () => {
@@ -517,7 +594,7 @@ test('anti-delete: an uncached deletion still alerts, marked as unresolved', asy
   });
   assert.equal(ad.stats.unresolved, 1);
   assert.equal(socket.outbox.length, 1);
-  assert.match(socket.outbox[0].text, /Content not captured/);
+  assert.match(socket.outbox[0].text, /No recoverable content was retained/);
 });
 
 test('anti-delete: the toggle stops alerts entirely', async () => {
@@ -562,7 +639,36 @@ test('queue: serialises sends and records typing presence', async () => {
   assert.deepEqual(socket.sentOrder, ['one', 'two'], 'sends must complete in order');
   assert.ok(socket.signals.some((s) => s.presence === 'composing'), 'typing indicator shown');
   assert.ok(socket.signals.some((s) => s.presence === 'paused'), 'presence cleared afterwards');
+  assert.equal(socket.signals.filter((s) => s.presence === 'unavailable').length, 2,
+    'each send restores offline presence so the linked primary phone can ring');
+  assert.equal(socket.signals.at(-1).presence, 'unavailable');
   assert.equal(q.stats.sent, 2);
+});
+
+test('queue: capture alerts sent to the linked account skip typing and leave it unavailable', async () => {
+  const socket = new MockWebSocket();
+  const config = rigConfig();
+  config.safety.typingIndicator = true;
+  new OutboundQueue(socket, config, quiet).attach();
+
+  await socket.sendMessage(SELF, { text: 'private capture alert' });
+  assert.ok(!socket.signals.some((s) => s.presence === 'composing'), 'self chats have no human to show typing to');
+  assert.deepEqual(socket.signals.map((s) => s.presence), ['unavailable']);
+});
+
+test('queue: a health response can skip typing without bypassing outbound safety', async () => {
+  const socket = new MockWebSocket();
+  const config = rigConfig();
+  config.safety.typingIndicator = true;
+  const q = new OutboundQueue(socket, config, quiet);
+  q.attach();
+
+  await socket.sendMessage(MOM, { text: 'Pong' }, { nexusSkipTyping: true });
+  assert.ok(!socket.signals.some((signal) => signal.presence === 'composing'));
+  assert.equal(q.depth().sent, 1);
+
+  q.halt();
+  await assert.rejects(socket.sendMessage(MOM, { text: 'Pong' }, { nexusSkipTyping: true }), /halted/);
 });
 
 test('queue: holds sends past the per-chat budget instead of dropping them', async () => {
@@ -597,6 +703,8 @@ test('classifyDisconnect: logged out means re-link, not retry', () => {
   assert.equal(classifyDisconnect(401), 'relogin');
   assert.equal(classifyDisconnect(515), 'restart');
   assert.equal(classifyDisconnect(408), 'restart');
+  assert.equal(classifyDisconnect(428), 'restart', 'connectionClosed is retryable with or without an enum');
+  assert.equal(classifyDisconnect(500), 'restart');
   assert.equal(classifyDisconnect(403), 'relogin');
   assert.equal(classifyDisconnect(411), 'relogin');
   assert.equal(classifyDisconnect(undefined), 'backoff');
@@ -608,6 +716,7 @@ test('classifyDisconnect: works against the real DisconnectReason object', async
   assert.equal(classifyDisconnect(DisconnectReason.loggedOut, DisconnectReason), 'relogin');
   assert.equal(classifyDisconnect(DisconnectReason.restartRequired, DisconnectReason), 'restart');
   assert.equal(classifyDisconnect(DisconnectReason.connectionLost, DisconnectReason), 'restart');
+  assert.equal(classifyDisconnect(428, DisconnectReason), 'restart');
 });
 
 test('backoffDelay: grows, jitters and caps', () => {
@@ -745,6 +854,7 @@ test('dashboard: serves the UI and JSON over HTTP in dry-run', async () => {
   const antiDelete = new AntiDelete({ socket, db, cache, contacts, registry, logger: quiet, config });
   seedDemoData({ db, registry, contacts, selfJid: SELF });
 
+  process.env.DASHBOARD_TOKEN = 'dry-run-test-token';
   const dash = new Dashboard({
     app: {
       config, registry, contacts, cache, antiDelete,
@@ -759,12 +869,17 @@ test('dashboard: serves the UI and JSON over HTTP in dry-run', async () => {
 
   try {
     const base = `http://127.0.0.1:${dash.port}`;
-    const html = await fetch(`${base}/`);
+    const unauthenticated = await fetch(`${base}/`);
+    assert.equal(unauthenticated.status, 401);
+    const login = await fetch(`${base}/?token=dry-run-test-token`, { redirect: 'manual' });
+    assert.equal(login.status, 302);
+    const cookie = login.headers.get('set-cookie');
+    const html = await fetch(`${base}/`, { headers: { cookie } });
     assert.equal(html.status, 200);
     assert.match(html.headers.get('content-type'), /text\/html/);
     assert.match(await html.text(), /Nexus/);
 
-    const api = await fetch(`${base}/api/state`);
+    const api = await fetch(`${base}/api/state`, { headers: { cookie } });
     assert.equal(api.status, 200);
     const body = await api.json();
     assert.equal(body.sessions.length, 5);
@@ -772,10 +887,11 @@ test('dashboard: serves the UI and JSON over HTTP in dry-run', async () => {
     const health = await fetch(`${base}/healthz`);
     assert.equal((await health.json()).ok, true);
 
-    const missing = await fetch(`${base}/nope`);
+    const missing = await fetch(`${base}/nope`, { headers: { cookie } });
     assert.equal(missing.status, 404);
   } finally {
     await dash.stop();
+    delete process.env.DASHBOARD_TOKEN;
   }
 });
 
@@ -804,6 +920,14 @@ test('dashboard: rejects an unauthorised request in a connected mode', async () 
 });
 
 // ══════════════════════════════════════════════════════════════════
+test('logger: Baileys failure summaries retain status class without exposing error text', () => {
+  const sensitive = new Error('could not decrypt account or session 15550001234');
+  sensitive.output = { statusCode: 401 };
+  assert.equal(summarizeBaileysFailure({ err: sensitive }), '[Baileys failure: status 401]');
+  assert.equal(summarizeBaileysFailure(new Error('socket timeout while connecting')), '[Baileys failure: timeout]');
+  assert.equal(summarizeBaileysFailure({ err: new Error('session record rejected') }), '[Baileys failure: encrypted session]');
+});
+
 test('logBuffer: captures lines from any child logger', () => {
   const buf = new LogBuffer(3).attach();
   const log = createLogger('info');

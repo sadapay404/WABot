@@ -26,7 +26,10 @@ function socketSink() {
   return {
     sent,
     user: { id: SPARE },
-    async sendMessage(jid, content) { sent.push({ jid, content }); return { key: { id: `OUT${sent.length}` } }; },
+    async sendMessage(jid, content, options = {}) {
+      sent.push({ jid, content, options });
+      return { key: { id: `OUT${sent.length}` }, message: content };
+    },
     async sendPresenceUpdate() {},
   };
 }
@@ -48,6 +51,32 @@ test('capture alerts prefer explicit destination, then a remote owner, then link
   cfg.safety.captureAlertJid = '';
   cfg.safety.ownerJids = [SPARE];
   assert.equal(captureAlertJid(cfg, SPARE), SPARE);
+});
+
+test('revoke alerts immediately use a WhatsApp-supplied LID phone alias and owner name', async () => {
+  const db = await getMemoryDb();
+  const socket = socketSink();
+  const cache = new MessageCache(db, quiet);
+  const contacts = new ContactStore(db, quiet);
+  const pn = '923001234567@s.whatsapp.net';
+  const lid = '123456789012345@lid';
+  contacts.upsert({ id: pn, name: 'Synced Address Book Name', notify: 'Remote Push Name' });
+  contacts.setManualName(pn, 'Ayesha — Doctor');
+  const raw = {
+    key: { remoteJid: lid, remoteJidAlt: pn, fromMe: false, id: 'ALIAS-ORIGINAL' },
+    messageTimestamp: Math.floor(Date.now() / 1_000),
+    message: { conversation: 'Alias-aware alert text.' },
+  };
+  cache.store(raw, normalize(raw), SPARE);
+  const deleted = new AntiDelete({ socket, db, cache, contacts, registry: null, logger: quiet, config: config() });
+  await deleted.onUpdate({
+    key: { remoteJid: lid, remoteJidAlt: pn, fromMe: false, id: 'ALIAS-REVOKE' },
+    update: { message: { protocolMessage: { type: 0, stanzaId: 'ALIAS-ORIGINAL' } } },
+  });
+  const alert = socket.sent.at(-1).content.text;
+  assert.match(alert, /Ayesha — Doctor \(\+923001234567\)/);
+  assert.doesNotMatch(alert, /number not known/);
+  assert.equal(contacts.canonicalJid(lid), pn, 'the observed relationship is durable for later LID-only events');
 });
 
 test('delete, edit, and view-once events from a non-owner chat are stored and alerted to the remote owner', async () => {
@@ -101,5 +130,6 @@ test('delete, edit, and view-once events from a non-owner chat are stored and al
   assert.ok(db.prepare('SELECT 1 FROM view_once WHERE stanza_id = ?').get('VO-1'));
   assert.equal(socket.sent.at(-2).jid, MAIN, 'view-once alert goes to the configured owner');
   assert.equal(socket.sent.at(-1).jid, MAIN, 'captured media goes to the same owner');
+  assert.equal(socket.sent.at(-1).options.quoted?.key?.id, 'OUT3', 'captured media replies to its alert');
   fs.rmSync(temp, { recursive: true, force: true });
 });

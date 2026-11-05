@@ -18,7 +18,7 @@ set -uo pipefail
 
 REPO_OWNER="sadapay404"
 REPO_NAME="WABot"
-REPO_BRANCH="arena/fa15663b-wabot"
+REPO_BRANCH="arena/3032c08c-wabot"
 APP_DIR="$HOME/nexus-wa"
 DATA_DIR="$HOME/.nexus-wa"
 LOG="$DATA_DIR/logs/nexus.log"

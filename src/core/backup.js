@@ -22,6 +22,8 @@ import crypto from 'node:crypto';
 
 const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 32 };
 const MAGIC = 'NEXWA1';
+const MAX_BACKUP_BYTES = 128 * 1024 * 1024;
+const MAX_SESSION_FILES = 10_000;
 
 function deriveKey(passphrase, salt) {
   return crypto.scryptSync(String(passphrase), salt, SCRYPT.keylen, {
@@ -39,12 +41,14 @@ export class SessionBackup {
    * @param {string} deps.sessionDir  where Baileys credentials live
    * @param {string} deps.dbPath
    * @param {string} [deps.dir]       where backups are written
+   * @param {object} [deps.db]         open driver-agnostic SQLite handle
    */
-  constructor({ logger, sessionDir, dbPath, dir }) {
+  constructor({ logger, sessionDir, dbPath, dir, db = null }) {
     this.logger = logger.child({ scope: 'backup' });
     this.sessionDir = sessionDir;
     this.dbPath = dbPath;
     this.dir = dir || path.join(path.dirname(dbPath), 'backups');
+    this.db = db;
     fs.mkdirSync(this.dir, { recursive: true });
   }
 
@@ -58,10 +62,16 @@ export class SessionBackup {
       throw new Error('backup passphrase must be at least 8 characters');
     }
 
+    const snapshot = this.#readDatabaseFiles();
     const payload = {
       createdAt: Date.now(),
       session: this.#readSession(),
-      db: fs.existsSync(this.dbPath) ? fs.readFileSync(this.dbPath).toString('base64') : null,
+      // SQLite WAL commits do not necessarily appear in the main file. Keep
+      // matching sidecars so a restore before opening SQLite sees the same
+      // committed state rather than silently rolling it back.
+      db: snapshot.main,
+      dbWal: snapshot.wal,
+      dbShm: snapshot.shm,
     };
 
     const salt = crypto.randomBytes(16);
@@ -72,7 +82,7 @@ export class SessionBackup {
 
     const file = path.join(
       this.dir,
-      `nexus-backup-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.nwb`
+      `nexus-backup-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}-${process.pid}-${crypto.randomUUID()}.nwb`
     );
     const blob = Buffer.concat([
       Buffer.from(MAGIC, 'utf8'),
@@ -85,6 +95,22 @@ export class SessionBackup {
 
     this.logger.info(`wrote encrypted backup (${blob.length} bytes) → ${file}`);
     return { file, bytes: blob.length, sessions: payload.session.length };
+  }
+
+  #readDatabaseFiles() {
+    if (this.db?.prepare) {
+      // A successful truncate checkpoint gives us one coherent main DB. Never
+      // silently create a main-file-only backup if SQLite says readers kept
+      // WAL pages pinned; callers can retry after the workload settles.
+      const rows = this.db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').all();
+      const result = Array.isArray(rows) ? rows[0] : rows;
+      if (Number(result?.busy || 0) !== 0) throw new Error('SQLite checkpoint is busy; backup was not created');
+    }
+    const read = (file) => (fs.existsSync(file) ? fs.readFileSync(file).toString('base64') : null);
+    // Legacy/manual callers without an open DB handle retain matching WAL/SHM
+    // sidecars. Runtime construction supplies the handle above for a verified
+    // checkpointed snapshot.
+    return { main: read(this.dbPath), wal: read(`${this.dbPath}-wal`), shm: read(`${this.dbPath}-shm`) };
   }
 
   #readSession() {
@@ -133,10 +159,11 @@ export class SessionBackup {
    * @returns {{sessions:number, db:boolean}}
    */
   restoreBuffer(blob, passphrase, label = 'remote') {
-    if (!Buffer.isBuffer(blob) || blob.subarray(0, MAGIC.length).toString('utf8') !== MAGIC) {
+    if (!Buffer.isBuffer(blob) || blob.length > MAX_BACKUP_BYTES || blob.subarray(0, MAGIC.length).toString('utf8') !== MAGIC) {
       throw new Error('not a Nexus-WA backup file');
     }
     let off = MAGIC.length;
+    if (blob.length < off + 16 + 12 + 16) throw new Error('not a Nexus-WA backup file');
     const salt = blob.subarray(off, (off += 16));
     const iv = blob.subarray(off, (off += 12));
     const tag = blob.subarray(off, (off += 16));
@@ -150,26 +177,63 @@ export class SessionBackup {
     try {
       payload = JSON.parse(Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8'));
     } catch {
-      // A GCM auth failure and a wrong passphrase look identical, on purpose.
       throw new Error('could not decrypt — wrong passphrase, or the file is corrupt');
     }
+    const session = Array.isArray(payload?.session) ? payload.session : null;
+    if (!session || session.length > MAX_SESSION_FILES) throw new Error('backup payload has invalid session entries');
 
-    fs.rmSync(this.sessionDir, { recursive: true, force: true });
-    fs.mkdirSync(this.sessionDir, { recursive: true });
-    for (const f of payload.session || []) {
-      const dest = path.join(this.sessionDir, f.path);
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.writeFileSync(dest, Buffer.from(f.data, 'base64'));
+    // Validate everything before touching either destination. Session paths are
+    // archive-like untrusted data even after authentication: keep them beneath
+    // the configured root and cap decoded values.
+    const staged = session.map((entry) => {
+      const rel = String(entry?.path || '');
+      if (!rel || path.isAbsolute(rel) || rel.split(/[\\/]+/).includes('..')) throw new Error('backup payload has an unsafe session path');
+      const data = Buffer.from(String(entry?.data || ''), 'base64');
+      if (data.length > MAX_BACKUP_BYTES) throw new Error('backup payload contains an oversized session file');
+      return { rel, data };
+    });
+    const decodeDb = (value, name) => {
+      if (value == null) return null;
+      const data = Buffer.from(String(value), 'base64');
+      if (data.length > MAX_BACKUP_BYTES) throw new Error(`backup payload contains an oversized ${name}`);
+      return data;
+    };
+    const db = decodeDb(payload.db, 'database');
+    const wal = decodeDb(payload.dbWal, 'database WAL');
+    const shm = decodeDb(payload.dbShm, 'database SHM');
+
+    const parent = path.dirname(this.sessionDir);
+    const staging = fs.mkdtempSync(path.join(parent, '.nexus-restore-'));
+    try {
+      const stagedSession = path.join(staging, 'session');
+      fs.mkdirSync(stagedSession, { recursive: true });
+      for (const file of staged) {
+        const dest = path.resolve(stagedSession, file.rel);
+        if (!dest.startsWith(`${stagedSession}${path.sep}`)) throw new Error('backup payload has an unsafe session path');
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.writeFileSync(dest, file.data);
+      }
+      if (db) fs.writeFileSync(path.join(staging, 'database'), db);
+      if (wal) fs.writeFileSync(path.join(staging, 'database-wal'), wal);
+      if (shm) fs.writeFileSync(path.join(staging, 'database-shm'), shm);
+
+      // This method is only used before the database is opened or by explicit
+      // owner restore. Do not delete/replace a destination until validation and
+      // staging succeeded.
+      fs.rmSync(this.sessionDir, { recursive: true, force: true });
+      fs.renameSync(stagedSession, this.sessionDir);
+      if (db) {
+        fs.writeFileSync(this.dbPath, fs.readFileSync(path.join(staging, 'database')));
+        for (const suffix of ['-wal', '-shm']) fs.rmSync(`${this.dbPath}${suffix}`, { force: true });
+        if (wal) fs.writeFileSync(`${this.dbPath}-wal`, fs.readFileSync(path.join(staging, 'database-wal')));
+        if (shm) fs.writeFileSync(`${this.dbPath}-shm`, fs.readFileSync(path.join(staging, 'database-shm')));
+      }
+    } finally {
+      fs.rmSync(staging, { recursive: true, force: true });
     }
 
-    let db = false;
-    if (payload.db) {
-      fs.writeFileSync(this.dbPath, Buffer.from(payload.db, 'base64'));
-      db = true;
-    }
-
-    this.logger.info(`restored ${(payload.session || []).length} session file(s) from ${label}`);
-    return { sessions: (payload.session || []).length, db };
+    this.logger.info(`restored ${session.length} session file(s) from ${label}`);
+    return { sessions: session.length, db: Boolean(db) };
   }
 
   list() {

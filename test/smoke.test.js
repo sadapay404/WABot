@@ -173,6 +173,29 @@ test('gate 1: owner-only command runs for the owner', async () => {
   assert.deepEqual(socket.outbox.map((o) => o.text), ['vault opened']);
 });
 
+test('gate 1: a PN owner alias authorizes an LID sender in a group', async () => {
+  const config = rig({ ownerJids: [OWNER] });
+  const loader = new PluginLoader({ dir: path.join(ROOT, 'test', 'fixtures', 'plugins'), logger: quiet });
+  await loader.loadAll();
+  const socket = new MockWhatsAppSocket({ logger: quiet, ownerJid: OWNER });
+  const dispatcher = new Dispatcher({ plugins: loader, config, logger: quiet });
+  const raw = {
+    key: {
+      id: 'OWNER-LID',
+      remoteJid: MOCK_GROUP_JID,
+      participant: '123456789012345@lid',
+      participantPN: OWNER,
+      fromMe: false,
+    },
+    message: { conversation: '.secret' },
+  };
+  const msg = normalize(raw);
+  assert.equal(msg.sender, '123456789012345@lid');
+  assert.equal(msg.senderAlt, OWNER);
+  await dispatcher.handle(socket, msg);
+  assert.deepEqual(socket.outbox.map((o) => o.text), ['vault opened']);
+});
+
 test('gate 1: an unknown command sends nothing and is counted as rejected', async () => {
   const { socket, dispatcher } = await dispatchFixture('.doesnotexist', { from: OWNER });
   assert.equal(socket.outbox.length, 0);
@@ -351,7 +374,7 @@ test('end-to-end: the real entry point runs .ping under dry-run', () => {
   assert.equal(res.status, 0, `entry point exited ${res.status}\n${res.stderr}`);
   assert.match(out, /Nexus-WA/);
   assert.match(out, /ban risk: NONE/, 'banner must state there is no ban risk');
-  assert.match(out, /Pong/, '.ping must reply through the fake socket');
+  assert.match(out, /Nexus is online/, '.ping must reply through the fake socket');
   assert.match(out, /0 real WhatsApp calls/, 'must confirm no network transport was used');
   assert.match(out, /"kind": "text"/, '/out must show the recorded outbox');
   assert.match(out, /"handled": 1/, 'dispatcher must report exactly one handled command');
@@ -382,7 +405,7 @@ test('end-to-end: a public command still answers a stranger (no over-blocking)',
   const out = stripAnsi(res.stdout);
   assert.equal(res.status, 0, res.stderr);
   // .ping is ownerOnly:false, so the gate must NOT swallow it.
-  assert.match(out, /Pong/);
+  assert.match(out, /Nexus is online/);
   assert.match(out, /you: `guest`/, 'a stranger must not be misidentified as the owner');
 });
 
@@ -448,7 +471,7 @@ test('end-to-end: /as targets the given JID and still runs the command', () => {
   });
   const out = stripAnsi(res.stdout);
   assert.equal(res.status, 0, res.stderr);
-  assert.match(out, /Pong/, 'the injected command must actually execute');
+  assert.match(out, /Nexus is online/, 'the injected command must actually execute');
   assert.match(out, /you: `guest`/, 'an injected stranger must not be treated as the owner');
   assert.doesNotMatch(out, /you: `owner`/);
 });

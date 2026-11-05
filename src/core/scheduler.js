@@ -212,7 +212,7 @@ export class Scheduler {
     ).run(Number(id));
     if (!claim.changes) return { ok: false, reason: 'changed' };
     try {
-      await this.#deliver(job);
+      await this.#deliver(job, { ownerApproved: true });
       this.#finish(job, now);
       this.stats.fired++;
       this.onFire?.(job);
@@ -276,21 +276,33 @@ export class Scheduler {
       } catch (err) {
         this.stats.failed++;
         this.logger.error(`job ${job.id} failed: ${err.message}`);
-        // Keep it pending so it retries on the next tick, but record why.
-        this.db
-          .prepare("UPDATE jobs SET status = 'pending', last_error = ? WHERE id = ? AND status = 'running'")
-          .run(String(err.message).slice(0, 400), job.id);
+        if (err?.deliveryUncertain || err?.expiredBeforeTransport || err?.deliveryBlocked) {
+          // Once transport may have accepted a message—or policy/queue delay
+          // made automatic delivery unsafe—only the owner may decide what to do.
+          this.db
+            .prepare("UPDATE jobs SET status = 'missed', last_error = ? WHERE id = ? AND status = 'running'")
+            .run(String(err.message).slice(0, 400), job.id);
+          this.stats.missed++;
+        } else {
+          this.db
+            .prepare("UPDATE jobs SET status = 'pending', last_error = ? WHERE id = ? AND status = 'running'")
+            .run(String(err.message).slice(0, 400), job.id);
+        }
       }
       done.push(job.id);
     }
     return done;
   }
 
-  async #deliver(job) {
+  async #deliver(job, { ownerApproved = false } = {}) {
     if (!this.socket) throw new Error('no transport attached');
     // Deliver the confirmed message body verbatim. Schedule metadata belongs in
     // the owner-side preview, not as an unsolicited prefix sent to recipients.
-    await this.socket.sendMessage(job.jid, { text: String(job.text ?? '') });
+    await this.socket.sendMessage(job.jid, { text: String(job.text ?? '') }, {
+      // Recheck at the actual queue transport boundary; an owner-approved
+      // recovery is intentionally exempt because it is an explicit decision.
+      ...(ownerApproved ? {} : { nexusExpiresAt: job.run_at + MISFIRE_GRACE_MS }),
+    });
   }
 
   #nextOccurrence(job, now) {

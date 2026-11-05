@@ -183,7 +183,29 @@ test('scheduled restart invokes nexus restart, not a direct Node kill', (t) => {
   assert.equal(control.spawned.options.detached, true);
 });
 
-test('WhatsApp update and restart commands require the private owner-control chat', async () => {
+test('Kerit commands require a panel restart instead of stopping the container', async () => {
+  const calls = [];
+  const control = {
+    availability() { return { ok: true, platform: 'kerit' }; },
+    async update() { calls.push('update'); return { ok: true, updated: true, restartRequired: true, platform: 'kerit', current: 'new1234' }; },
+    async check() { return { ok: true, platform: 'kerit', branch: 'main', current: 'old1234', remote: 'new1234', ahead: 0, behind: 1 }; },
+    scheduleRestart() { calls.push('restart'); return { ok: true }; },
+  };
+  const update = termuxPlugin.commands.find((command) => command.name === 'update');
+  const restart = termuxPlugin.commands.find((command) => command.name === 'restart');
+
+  const updateOwner = fakeContext({ args: [], control });
+  await update.execute(updateOwner.ctx);
+  assert.deepEqual(calls, ['update']);
+  assert.match(updateOwner.replies.at(-1), /Restart.*Kerit server panel/);
+
+  const restartOwner = fakeContext({ args: [], control });
+  await restart.execute(restartOwner.ctx);
+  assert.deepEqual(calls, ['update']);
+  assert.match(restartOwner.replies.at(-1), /will not exit itself/);
+});
+
+test('owner update and restart commands work outside the linked account’s private control chat', async () => {
   const calls = [];
   const control = {
     async check() { calls.push('check'); return { ok: true, branch: 'main', current: 'a', remote: 'a', ahead: 0, behind: 0 }; },
@@ -199,13 +221,13 @@ test('WhatsApp update and restart commands require the private owner-control cha
   assert.deepEqual(calls, ['check']);
   assert.match(privateOwner.replies[0], /Already up to date/);
 
-  const otherChat = fakeContext({ args: [], jid: 'someone-else@s.whatsapp.net', control });
-  await update.execute(otherChat.ctx);
-  assert.deepEqual(calls, ['check']);
-  assert.match(otherChat.replies[0], /private controller chat/);
+  const ownerInAnotherChat = fakeContext({ args: [], jid: 'someone-else@s.whatsapp.net', control });
+  await update.execute(ownerInAnotherChat.ctx);
+  assert.deepEqual(calls, ['check', 'update']);
+  assert.match(ownerInAnotherChat.replies.at(-1), /Already up to date/);
 
   const restartOwner = fakeContext({ args: [], control });
   await restart.execute(restartOwner.ctx);
-  assert.deepEqual(calls, ['check', 'restart']);
+  assert.deepEqual(calls, ['check', 'update', 'restart']);
   assert.match(restartOwner.replies[0], /Restarting Nexus-WA/);
 });

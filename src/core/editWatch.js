@@ -10,12 +10,25 @@
  * diff instead of just "this was edited".
  */
 
-import { normalizeJid, isGroupJid, describeChat } from './jid.js';
+import { normalizeJid, isGroupJid, isStatusBroadcast, describeChat } from './jid.js';
+import { alertContext } from '../lib/display.js';
 import { captureAlertJid } from './alertRouting.js';
 import { extractText } from './message.js';
 import { flag, setFlag } from '../database/index.js';
 
 const PROTOCOL_MESSAGE_EDIT = 14;
+
+function firstAddress(...values) {
+  return values.find((value) => typeof value === 'string' && value.trim()) || null;
+}
+
+function editorAlternate(key, hasParticipant) {
+  return key?.fromMe
+    ? firstAddress(key.remoteJidAlt, key.remoteJidPn, key.remoteJidPN)
+    : hasParticipant
+      ? firstAddress(key.participantAlt, key.participantPn, key.participantPN)
+      : firstAddress(key.remoteJidAlt, key.remoteJidPn, key.remoteJidPN);
+}
 
 /**
  * Pull an edit out of a Baileys update/upsert payload.
@@ -46,9 +59,6 @@ export function extractEdit(payload = {}) {
   return { stanzaId, newText };
 }
 
-function clockTime(ms) {
-  return new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-}
 
 export class EditWatch {
   constructor({ socket, db, cache, contacts, logger, config }) {
@@ -87,15 +97,21 @@ export class EditWatch {
 
     const key = source?.key || {};
     const chatJid = normalizeJid(key.remoteJid);
-    const senderJid = normalizeJid(
-      key.fromMe ? this.selfJid() : isGroupJid(chatJid) ? key.participant || chatJid : chatJid
-    );
-
+    const isGroup = isGroupJid(chatJid);
+    const isStatus = isStatusBroadcast(chatJid);
     const record = this.cache?.getRecord?.(edit.stanzaId) || null;
     const rawOriginal = this.cache?.getRaw?.(edit.stanzaId) || null;
+    const senderJid = normalizeJid(
+      key.fromMe
+        ? this.selfJid()
+        : (isGroup || isStatus)
+          ? key.participant || rawOriginal?.key?.participant || record?.sender_jid || chatJid
+          : record?.sender_jid || chatJid
+    );
+    const senderAlt = editorAlternate(key, isGroup || isStatus);
     const before = record?.text ?? (rawOriginal ? extractText(rawOriginal.message) || null : null);
     this.logger.info(`edit event detected${before === null ? ' (original not cached)' : ''}`);
-    const profile = this.contacts.profile(senderJid);
+    const profile = this.contacts.profile(senderJid, senderAlt);
     const at = Date.now();
 
     if (before) this.stats.withDiff++;
@@ -169,26 +185,24 @@ export class EditWatch {
 }
 
 export function formatEdit(e) {
-  const p = e.profile || {};
-  const who = [p.name, p.phoneE164 && p.phoneE164 !== p.name ? p.phoneE164 : null]
-    .filter(Boolean)
-    .join(' · ');
-
-  const lines = ['✏️ *Message edited*', '', `👤 ${who || 'unknown'}`];
-  const meta = [p.countryName, e.isGroup ? e.chatLabel : null, clockTime(e.at)].filter(Boolean);
-  if (meta.length) lines.push(`ℹ️ ${meta.join(' · ')}`);
+  const lines = ['✏️ *Message edited*', ''];
+  lines.push(...alertContext(e.profile, {
+    chatJid: e.chatJid,
+    chatLabel: e.chatLabel,
+    at: e.at,
+  }));
   lines.push('');
 
   if (e.before === null) {
-    lines.push('_Original not captured_, so only the new text is known:');
-    lines.push(`> ${e.after || '(empty)'}`);
+    lines.push('*Updated content*');
+    for (const line of String(e.after || '(empty)').split('\n')) lines.push(`> ${line}`);
   } else if (e.before === e.after) {
-    lines.push('_Edited, but the text is unchanged_ (likely a caption or media swap).');
+    lines.push('_The message changed, but its text is unchanged._');
   } else {
-    lines.push('was:');
-    for (const l of String(e.before).split('\n')) lines.push(`> ${l}`);
-    lines.push('', 'now:');
-    for (const l of String(e.after || '(empty)').split('\n')) lines.push(`> ${l}`);
+    lines.push('*Before*');
+    for (const line of String(e.before).split('\n')) lines.push(`> ${line}`);
+    lines.push('', '*After*');
+    for (const line of String(e.after || '(empty)').split('\n')) lines.push(`> ${line}`);
   }
 
   return lines.join('\n');
